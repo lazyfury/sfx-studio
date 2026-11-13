@@ -16,14 +16,20 @@ pub const BORDER_HI: Color = hex(0x44503F);
 pub const TEXT: Color = hex(0xE6ECE3);
 pub const DIM: Color = hex(0x9AA393);
 pub const FAINT: Color = hex(0x6E776A);
-pub const ACCENT: Color = hex(0xB7F36B);
-pub const ACCENT_DARK: Color = hex(0x537C2C);
+pub const ACCENT: Color = hex(0xA8CE86);
+pub const ACCENT_DARK: Color = hex(0x7FA35F);
+/// Muted accent washes for active states: a hint of color instead of a solid
+/// brand block, so the waveform and timeline stay the visual anchors.
+pub const ACCENT_TINT: Color = Color::new(0.659, 0.808, 0.525, 0.14);
+pub const ACCENT_LINE: Color = Color::new(0.659, 0.808, 0.525, 0.5);
 pub const ACCENT2: Color = hex(0x8DBBEA);
 pub const WARN: Color = hex(0xE4B45A);
 pub const HOVER: Color = hex(0x232A22);
 pub const ACTIVE: Color = hex(0x2C3529);
 pub const DARK: Color = hex(0x0D100D);
 pub const DARK_DIM: Color = hex(0x8F9A8A);
+/// Slightly lifted surface for the timeline body so clips read brighter.
+pub const TRACK_BG: Color = hex(0x212621);
 
 pub const VIEW_W: f32 = 1440.0;
 pub const VIEW_H: f32 = 900.0;
@@ -150,7 +156,7 @@ pub fn button_icon(
     active: bool,
 ) {
     let bg = if active {
-        ACCENT
+        ACCENT_TINT
     } else if hovered {
         HOVER
     } else {
@@ -162,26 +168,39 @@ pub fn button_icon(
         6.0,
         1.0,
         if active {
-            ACCENT
+            ACCENT_LINE
         } else if hovered {
             BORDER_HI
         } else {
             BORDER
         },
     );
-    let fg = if active { BG } else { TEXT };
+    let fg = if active { ACCENT } else { TEXT };
     if let Some(icon) = icon {
         let side = (rect.size.height - 8.0).clamp(10.0, 14.0);
+        let label_w = if label.is_empty() {
+            0.0
+        } else {
+            measurer.measure_run(label, SMALL)
+        };
+        let gap = if label.is_empty() { 0.0 } else { 5.0 };
+        // Center icon + label as one group so wide buttons do not leave a
+        // lonely glyph at the far left.
+        let start = rect.center().x - (side + gap + label_w) * 0.5;
         let icon_rect = Rect::from_min_size(
-            Vec2::new(rect.left() + 5.0, rect.center().y - side * 0.5),
+            Vec2::new(start, rect.center().y - side * 0.5),
             igui_core::Size::splat(side),
         );
-        icon.draw(ctx, icon_rect, if active { ACCENT_DARK } else { DIM });
-        let text_rect = Rect::from_min_size(
-            Vec2::new(rect.left() + 7.0 + side, rect.top()),
-            igui_core::Size::new(rect.size.width - side - 9.0, rect.size.height),
-        );
-        text_center(ctx, measurer, label, text_rect, SMALL, fg);
+        icon.draw(ctx, icon_rect, if active { ACCENT } else { DIM });
+        if !label.is_empty() {
+            text(
+                ctx,
+                label,
+                Vec2::new(start + side + gap, baseline(measurer, rect, SMALL)),
+                SMALL,
+                fg,
+            );
+        }
     } else {
         text_center(ctx, measurer, label, rect, FONT, fg);
     }

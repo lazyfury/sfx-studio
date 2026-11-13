@@ -15,6 +15,7 @@ list="$(mktemp)"
 trap 'rm -f "$list"' EXIT
 
 find src scripts .githooks -type f \( -name '*.rs' -o -name '*.sh' \) -print >>"$list"
+find assets -type f -print >>"$list" 2>/dev/null || true
 find .githooks -type f -print >>"$list" 2>/dev/null || true
 printf '%s\n' Cargo.toml Cargo.lock >>"$list"
 find plugins -type f -name '*.gd' -print >>"$list" 2>/dev/null || true

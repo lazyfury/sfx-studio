@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单与首帧延迟渲染；app/ui 主体拆分与后台渲染见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染与 0005 UI 打磨（Lucide 图标、面板边距、列表行布局）；app/ui 主体拆分与后台渲染见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -47,7 +47,7 @@
 | P1-2 | 每帧全量 peak + 波形扫描 | 缓存 `cache_peak` / `music_cache_peak` + 2048-bucket 包络 | `envelope_buckets_track_min_and_max`、selfcheck |
 | P1-3 | 未保存时 Open 无确认 | `ConfirmOpen` 模态：Enter 丢弃并打开 / Esc 取消 | `--selfcheck` 覆盖模态绘制路径 |
 | P1-4 | 布局容量常量三处重复 | `ui::library_capacity/layer_capacity/timeline_height` 单一来源 | `compact_layout_stays_inside_a_1024_window` |
-| P1-5 | 窄窗口顶栏重叠 | <1180 px 切 icon-only 顶栏 + 紧凑 header | 1024 宽度布局测试 |
+| P1-5 | 窄窗口顶栏重叠 | <1260 px 切 icon-only 顶栏；标题/参数行按可用宽度省略，不再压到按钮 | 1024 宽度布局测试 |
 | P1-6 | 加载未校验（NaN/巨值/OOM） | `Project::migrate/validate`；时长/采样率/数组/自动化点全部 clamp；DSP 侧 30s/300s 防御上限 | `validate_repairs_untrusted_values_and_duplicate_names` |
 | P1-7 | 点击/拖动无变化也产生 undo | `begin_edit` / `commit_edit` 事务化，仅真实变更入栈 | `undo_transactions_ignore_noop_gestures` |
 | P1-8 | 撤销无标签 | undo/redo 记录 `(label, Project)`，状态栏提示 | 手测 |
@@ -79,13 +79,13 @@
 
 ## 2. 本轮验收证据
 
-审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`（status: approved，source_hash 匹配）。
+审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`（status: approved，source_hash 匹配）。
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                 # 47 passed
-cargo run -- --selfcheck   # 2 frames / 3010 commands / 148 text runs
+cargo test                 # 48 passed
+cargo run -- --selfcheck   # 2 frames / 2537 commands / 118 text runs
 ./scripts/preflight.sh
 ./scripts/review_gate.sh   # 需要 docs/reviews/*.md 中 approved + 匹配 source_hash
 ```
@@ -109,6 +109,7 @@ cargo run -- --selfcheck   # 2 frames / 3010 commands / 148 text runs
 8. **采样波形**：`Wave::Sample` + WAV 导入 + `sample_pitch/loop` 导入导出。
 9. **i18n 与可访问性**：文案表、焦点遍历、键盘可达全部操作。
 10. **CLI 产品化**：`clap` 子命令、`--golden` 渲染校验、批量导出接入游戏仓库 CI。
+11. **UI 体验跟进（0005 审查遗留）**：拖动 Clip 时冻结时间线比例、收藏星标点击切换、音频 playhead 无锁读取、自适应时间线/波形高度、时间线缩放/网格、图标表一致性测试。
 
 ## 4. 已验证的端到端场景
 
@@ -138,7 +139,17 @@ cargo run -- --selfcheck   # 2 frames / 3010 commands / 148 text runs
 - 移除 `.github/workflows`（不使用 GitHub Actions）；`scripts/ci.sh` 仍可作为本地/共享 runner 入口。
 - `cargo test` 47 passed；新增菜单绘制/命中测试与延迟渲染测试。
 
-## 8. Definition of Done（每个 PR 必须满足）
+## 8. 本轮增量（0005）
+
+- 新增 18 个 Lucide 图标（lucide-static v1.47.0，ISC），用于顶栏 UNDO/REDO/PLAY/STOP/LOOP/图层操作、SOUND/MUSIC 标签页、MENU、搜索框、系统菜单项与检查器按钮；图标与文字作为整体居中。
+- 左侧列表修复收藏星标与波形标签重叠：星标固定槽位、标签统一右对齐、名称省略宽度按实测文本计算。
+- 面板边距统一：检查器内容内缩 6px（分隔线/滑杆/按钮不贴边）、中央标题卡按钮垂直居中并留右内边距、自动化 tabs 留边距。
+- 标题栏对齐：左侧 LIBRARY 与右侧 PARAMETERS 使用同一套 26px raised 标题条。
+- 播放头时间标签加暗色底片，消除与标尺 0.00 的叠字；主题色弱化、时间线表面提亮。
+- `scripts/source_hash.sh` 纳入 `assets/`，图标资源不再绕过审查门禁。
+- 新增 `inspector_controls_keep_panel_margins` 布局测试；`cargo test` 48 passed。
+
+## 9. Definition of Done（每个 PR 必须满足）
 
 - [ ] `docs/PLAN.md` 对应条目状态更新。
 - [ ] `scripts/preflight.sh` 全绿（fmt / clippy -D warnings / test / selfcheck）。

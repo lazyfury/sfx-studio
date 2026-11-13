@@ -17,10 +17,13 @@ pub const TIMELINE_LABEL: f32 = 76.0;
 pub const RULER_H: f32 = 18.0;
 pub const TRACK_H: f32 = 22.0;
 pub const INSPECTOR_LABEL: f32 = 82.0;
+/// Inner breathing room for inspector rows so controls never touch the panel
+/// card edges.
+pub const INSPECTOR_PAD: f32 = 6.0;
 
 /// Shared layout metrics. `app.rs` uses these helpers instead of re-deriving
 /// row capacity, so a metrics change cannot silently desync scrolling.
-pub const LIBRARY_TOP: f32 = 76.0;
+pub const LIBRARY_TOP: f32 = 86.0;
 pub const LIBRARY_ROW_H: f32 = 24.0;
 pub const LIBRARY_END_GAP: f32 = 8.0;
 pub const MUSIC_ROW_OFFSET: f32 = 28.0;
@@ -135,6 +138,7 @@ pub struct Button {
     pub label: String,
     pub action: Action,
     pub active: bool,
+    pub icon: Option<Icon>,
 }
 
 #[derive(Clone, Copy)]
@@ -217,7 +221,7 @@ pub struct Layout {
     pub viewport: Size,
     pub top: Rect,
     pub left: Rect,
-    pub center: Rect,
+    pub header: Rect,
     pub right: Rect,
     pub status: Rect,
     pub menu_button: Rect,
@@ -271,49 +275,51 @@ impl Layout {
             Size::new(center.size.width - pad * 2.0, HEADER_H),
         );
 
-        // Below ~1180 px the top bar cannot fit full labels; switch to
-        // icon-only buttons and tighter header controls instead of overlapping.
-        let compact = viewport.width < 1180.0;
+        // Below ~1260 px the top bar cannot fit icon+label buttons; switch to
+        // icon-only buttons instead of letting them crowd the patch title.
+        let compact = viewport.width < 1260.0;
         let mut header_buttons = Vec::new();
-        let mut x = header.right();
+        let mut x = header.right() - 6.0;
         for (label, action, width) in [
-            ("DEL", Action::DeleteLayer, 38.0),
-            ("DUP", Action::DuplicateLayer, 38.0),
-            ("+LAYER", Action::AddLayer, 54.0),
-            ("LOOP", Action::Loop, 46.0),
-            ("STOP", Action::Stop, 44.0),
-            ("PLAY", Action::Play, 44.0),
-            ("UNDO", Action::Undo, 44.0),
-            ("REDO", Action::Redo, 44.0),
+            ("DEL", Action::DeleteLayer, 44.0),
+            ("DUP", Action::DuplicateLayer, 46.0),
+            ("LAYER", Action::AddLayer, 62.0),
+            ("LOOP", Action::Loop, 52.0),
+            ("STOP", Action::Stop, 50.0),
+            ("PLAY", Action::Play, 48.0),
+            ("REDO", Action::Redo, 52.0),
+            ("UNDO", Action::Undo, 52.0),
         ] {
-            let width = if compact { 30.0 } else { width };
-            let gap = if compact { 2.0 } else { 4.0 };
+            let width = if compact { 28.0 } else { width };
+            let gap = if compact { 3.0 } else { 4.0 };
             x -= width;
             header_buttons.push(Button {
-                rect: Rect::from_min_size(Vec2::new(x, header.top()), Size::new(width, 22.0)),
-                label: label.into(),
+                rect: Rect::from_min_size(Vec2::new(x, header.top() + 6.0), Size::new(width, 22.0)),
+                label: if compact { String::new() } else { label.into() },
                 action,
                 active: action == Action::Loop && state.loop_play,
+                icon: action_icon(action),
             });
             x -= gap;
         }
         header_buttons.reverse();
 
-        let menu_button = Rect::from_min_size(Vec2::new(92.0, 5.0), Size::new(56.0, 22.0));
-        let project_anchor = 158.0;
+        let menu_button = Rect::from_min_size(Vec2::new(92.0, 5.0), Size::new(62.0, 22.0));
+        let project_anchor = 170.0;
         let mut tab_buttons = Vec::new();
-        let mut tab_x = viewport.width - 8.0 - 64.0 * 2.0 - 4.0;
-        for (label, action, tab) in [
-            ("SOUND", Action::TabPatches, Tab::Patches),
-            ("MUSIC", Action::TabMusic, Tab::Music),
+        let mut tab_x = viewport.width - 8.0 - 72.0 * 2.0 - 4.0;
+        for (label, action, tab, icon) in [
+            ("SOUND", Action::TabPatches, Tab::Patches, Icon::Waveform),
+            ("MUSIC", Action::TabMusic, Tab::Music, Icon::Music),
         ] {
             tab_buttons.push(Button {
-                rect: Rect::from_min_size(Vec2::new(tab_x, 4.0), Size::new(64.0, 22.0)),
+                rect: Rect::from_min_size(Vec2::new(tab_x, 4.0), Size::new(72.0, 22.0)),
                 label: label.into(),
                 action,
                 active: state.tab == tab,
+                icon: Some(icon),
             });
-            tab_x += 68.0;
+            tab_x += 76.0;
         }
 
         let mut menu_rect = None;
@@ -364,15 +370,15 @@ impl Layout {
         // Left: category filter, patch rows + MUSIC row.
         let list_top = left.top() + LIBRARY_TOP;
         let category_rect = Rect::from_min_size(
-            Vec2::new(left.left() + 8.0, left.top() + 24.0),
+            Vec2::new(left.left() + 8.0, left.top() + 34.0),
             Size::new(118.0, 20.0),
         );
         let favorite_rect = Rect::from_min_size(
-            Vec2::new(left.right() - 32.0, left.top() + 24.0),
+            Vec2::new(left.right() - 32.0, left.top() + 34.0),
             Size::new(24.0, 20.0),
         );
         let search_rect = Rect::from_min_size(
-            Vec2::new(left.left() + 8.0, left.top() + 48.0),
+            Vec2::new(left.left() + 8.0, left.top() + 58.0),
             Size::new(left.size.width - 16.0, 20.0),
         );
         let music_row = Rect::from_min_size(
@@ -439,24 +445,26 @@ impl Layout {
         }
 
         let inspector = Rect::from_min_size(
-            Vec2::new(right.left() + 8.0, right.top() + 30.0),
-            Size::new(right.size.width - 16.0, (right.size.height - 38.0).max(1.0)),
+            Vec2::new(right.left() + 8.0, right.top() + 32.0),
+            Size::new(right.size.width - 16.0, (right.size.height - 40.0).max(1.0)),
         );
         let raw = inspector_items(state);
         let mut items = Vec::new();
         let mut y = inspector.top() + 4.0 - state.inspector_scroll;
         let content_start = y;
+        let inner_left = inspector.left() + INSPECTOR_PAD;
+        let inner_width = (inspector.size.width - INSPECTOR_PAD * 2.0).max(1.0);
+        let inner_rect = |top: f32, height: f32| {
+            Rect::from_min_size(Vec2::new(inner_left, top), Size::new(inner_width, height))
+        };
         for raw in raw {
             match raw {
                 RawItem::Section(text) => {
                     items.push(Item::Section {
                         text,
-                        rect: Rect::from_min_size(
-                            Vec2::new(inspector.left(), y),
-                            Size::new(inspector.size.width, 22.0),
-                        ),
+                        rect: inner_rect(y, 24.0),
                     });
-                    y += 22.0;
+                    y += 24.0;
                 }
                 RawItem::Param {
                     label,
@@ -469,10 +477,7 @@ impl Layout {
                         value,
                         hit,
                         norm,
-                        rect: Rect::from_min_size(
-                            Vec2::new(inspector.left(), y),
-                            Size::new(inspector.size.width, 26.0),
-                        ),
+                        rect: inner_rect(y, 26.0),
                     });
                     y += 26.0;
                 }
@@ -483,10 +488,9 @@ impl Layout {
                 } => {
                     let cols = columns.max(1) as f32;
                     let gap = 2.0;
-                    let width =
-                        (inspector.size.width - INSPECTOR_LABEL - gap * (cols - 1.0)) / cols;
+                    let width = (inner_width - INSPECTOR_LABEL - gap * (cols - 1.0)) / cols;
                     let rows = (options.len() as f32 / cols).ceil().max(1.0);
-                    let height = rows * 19.0 + 2.0;
+                    let height = rows * 19.0 + 7.0;
                     let mut buttons = Vec::new();
                     for (index, (text, action, active)) in options.into_iter().enumerate() {
                         let col = index % columns;
@@ -494,22 +498,20 @@ impl Layout {
                         buttons.push(Button {
                             rect: Rect::from_min_size(
                                 Vec2::new(
-                                    inspector.left() + INSPECTOR_LABEL + col as f32 * (width + gap),
-                                    y + row as f32 * 19.0,
+                                    inner_left + INSPECTOR_LABEL + col as f32 * (width + gap),
+                                    y + 3.0 + row as f32 * 19.0,
                                 ),
                                 Size::new(width, 18.0),
                             ),
                             label: text,
                             action,
                             active,
+                            icon: action_icon(action),
                         });
                     }
                     items.push(Item::Options {
                         label,
-                        rect: Rect::from_min_size(
-                            Vec2::new(inspector.left(), y),
-                            Size::new(inspector.size.width, height),
-                        ),
+                        rect: inner_rect(y, height),
                         buttons,
                     });
                     y += height + 2.0;
@@ -523,22 +525,16 @@ impl Layout {
                         label,
                         value,
                         action,
-                        rect: Rect::from_min_size(
-                            Vec2::new(inspector.left(), y),
-                            Size::new(inspector.size.width, 26.0),
-                        ),
+                        rect: inner_rect(y, 26.0),
                     });
                     y += 26.0;
                 }
                 RawItem::Note(text) => {
                     items.push(Item::Note {
                         text,
-                        rect: Rect::from_min_size(
-                            Vec2::new(inspector.left(), y),
-                            Size::new(inspector.size.width, 16.0),
-                        ),
+                        rect: inner_rect(y, 18.0),
                     });
-                    y += 16.0;
+                    y += 18.0;
                 }
             }
         }
@@ -548,7 +544,7 @@ impl Layout {
         let mut inspector_thumb = Rect::from_min_size(Vec2::ZERO, Size::ZERO);
         if inspector_content_h > inspector.size.height + 1.0 {
             let track = Rect::from_min_size(
-                Vec2::new(right.right() - 11.0, inspector.top() + 2.0),
+                Vec2::new(right.right() - 9.0, inspector.top() + 2.0),
                 Size::new(5.0, (inspector.size.height - 4.0).max(1.0)),
             );
             let max_scroll = (inspector_content_h - inspector.size.height).max(0.001);
@@ -598,7 +594,7 @@ impl Layout {
             viewport,
             top,
             left,
-            center,
+            header,
             right,
             status,
             menu_button,
@@ -671,20 +667,20 @@ impl Layout {
 
 fn automation_tabs(layout: &Layout) -> [(AutomationKind, Rect); 2] {
     let w = 54.0;
-    let y = layout.automation.top() + 2.0;
+    let y = layout.automation.top() + 4.0;
     [
         (
             AutomationKind::Gain,
             Rect::from_min_size(
-                Vec2::new(layout.automation.right() - w * 2.0 - 8.0, y),
-                Size::new(w, 14.0),
+                Vec2::new(layout.automation.right() - w * 2.0 - 12.0, y),
+                Size::new(w, 16.0),
             ),
         ),
         (
             AutomationKind::Cutoff,
             Rect::from_min_size(
-                Vec2::new(layout.automation.right() - w - 4.0, y),
-                Size::new(w, 14.0),
+                Vec2::new(layout.automation.right() - w - 8.0, y),
+                Size::new(w, 16.0),
             ),
         ),
     ]
@@ -846,6 +842,30 @@ pub fn hit(state: &State, layout: &Layout, pos: Vec2) -> Option<Hit> {
     None
 }
 
+fn action_icon(action: Action) -> Option<Icon> {
+    match action {
+        Action::Open => Some(Icon::FolderOpen),
+        Action::Save => Some(Icon::Save),
+        Action::NewPatch => Some(Icon::FilePlus),
+        Action::RenamePatch => Some(Icon::Pencil),
+        Action::DuplicatePatch | Action::DuplicateLayer => Some(Icon::Copy),
+        Action::DeletePatch | Action::DeleteLayer | Action::DeleteClip => Some(Icon::Trash),
+        Action::Randomize => Some(Icon::Wand),
+        Action::Vary => Some(Icon::Layers),
+        Action::Favorite => Some(Icon::Star),
+        Action::ExportWav => Some(Icon::Download),
+        Action::Bake => Some(Icon::Package),
+        Action::Tres => Some(Icon::FileCode),
+        Action::AddLayer | Action::AddClip => Some(Icon::Plus),
+        Action::Play => Some(Icon::Play),
+        Action::Stop => Some(Icon::Stop),
+        Action::Loop => Some(Icon::Loop),
+        Action::Undo => Some(Icon::Undo),
+        Action::Redo => Some(Icon::Redo),
+        _ => None,
+    }
+}
+
 fn action_tip(action: Action) -> &'static str {
     match action {
         Action::Open => "打开项目文件夹 · Open",
@@ -907,7 +927,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "UNTITLED PROJECT".into());
-    let tabs_left = layout.viewport.width - 144.0;
+    let tabs_left = layout.viewport.width - 156.0;
     let project_text = ellipsis(
         measurer,
         &project,
@@ -930,24 +950,17 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             WARN,
         );
     }
-    theme::button(
+    theme::button_icon(
         ctx,
         measurer,
         layout.menu_button,
         "MENU",
+        icons::document(Icon::Menu),
         state.hover_hit == Some(Hit::MenuToggle),
         state.menu_open,
     );
     for button in &layout.tab_buttons {
-        theme::button(
-            ctx,
-            measurer,
-            button.rect,
-            &button.label,
-            state.hover == Some(button.action)
-                || state.hover_hit == Some(Hit::Action(button.action)),
-            button.active,
-        );
+        paint_button(state, measurer, ctx, button);
     }
 
     // Left panel
@@ -959,19 +972,36 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         layout.left.bottom(),
         BORDER,
     );
+    // Title bar mirrors the right inspector header: raised strip, hairline
+    // rule, icon + title, so both side panels read as the same chrome.
+    fill(
+        ctx,
+        Rect::from_min_size(layout.left.origin, Size::new(layout.left.size.width, 26.0)),
+        RAISED,
+    );
+    hline(
+        ctx,
+        layout.left.left(),
+        layout.left.right(),
+        layout.left.top() + 26.0,
+        BORDER,
+    );
     icons::paint(
         ctx,
         Icon::Library,
-        Rect::from_min_size(Vec2::new(10.0, layout.left.top() + 7.0), Size::splat(12.0)),
+        Rect::from_min_size(
+            Vec2::new(layout.left.left() + 10.0, layout.left.top() + 7.0),
+            Size::splat(13.0),
+        ),
         DIM,
     );
     text_top(
         ctx,
         measurer,
         "LIBRARY",
-        26.0,
-        layout.left.top() + 7.0,
-        SMALL,
+        layout.left.left() + 28.0,
+        layout.left.top() + 6.0,
+        TITLE,
         TEXT,
     );
     text_right(
@@ -979,7 +1009,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         measurer,
         &format!("{:02}", state.visible_patches().len()),
         layout.left.right() - 10.0,
-        layout.left.top() + 15.0,
+        layout.left.top() + 13.0,
         SMALL,
         FAINT,
     );
@@ -1009,6 +1039,18 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         1.0,
         if state.search_focus { ACCENT } else { BORDER },
     );
+    icons::paint(
+        ctx,
+        Icon::Search,
+        Rect::from_min_size(
+            Vec2::new(
+                layout.search_rect.left() + 6.0,
+                layout.search_rect.center().y - 6.0,
+            ),
+            Size::splat(12.0),
+        ),
+        FAINT,
+    );
     let search_text = if state.search.is_empty() {
         "Search sounds…"
     } else {
@@ -1019,14 +1061,14 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         ctx,
         measurer,
         search_text,
-        layout.search_rect.left() + 7.0,
+        layout.search_rect.left() + 23.0,
         layout.search_rect.top() + 3.0,
         SMALL,
         search_color,
     );
     if state.search_focus {
         let caret_x = layout.search_rect.left()
-            + 7.0
+            + 23.0
             + measurer.measure_run(state.search.as_str(), SMALL)
             + 1.0;
         vline(
@@ -1051,21 +1093,28 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             fill(ctx, *rect, HOVER);
         }
         let wave = patch.layers.first().map(|l| l.wave).unwrap_or(Wave::Sine);
+        let wave_label = wave.label();
+        // The favorite star owns a fixed slot at the far right; the wave tag is
+        // right-aligned before it so the two never share pixels.
+        let label_right = rect.right() - 26.0;
         if patch.favorite {
             icons::paint(
                 ctx,
                 Icon::Star,
                 Rect::from_min_size(
-                    Vec2::new(rect.right() - 42.0, rect.center().y - 5.0),
+                    Vec2::new(rect.right() - 20.0, rect.center().y - 5.0),
                     Size::splat(10.0),
                 ),
                 if selected { ACCENT_DARK } else { WARN },
             );
         }
+        let name_width =
+            (label_right - measurer.measure_run(wave_label, SMALL) - 8.0 - (rect.left() + 12.0))
+                .max(24.0);
         text_top(
             ctx,
             measurer,
-            &ellipsis(measurer, &patch.name, FONT, rect.size.width - 52.0),
+            &ellipsis(measurer, &patch.name, FONT, name_width),
             rect.left() + 12.0,
             rect.top() + 4.0,
             FONT,
@@ -1074,11 +1123,11 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         text_right(
             ctx,
             measurer,
-            wave.label(),
-            rect.right() - 8.0,
+            wave_label,
+            label_right,
             rect.center().y,
             SMALL,
-            if selected { ACCENT } else { FAINT },
+            if selected { DIM } else { FAINT },
         );
     }
     if state.visible_patches().is_empty() {
@@ -1087,7 +1136,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             measurer,
             "NO MATCHES",
             layout.left.left() + 12.0,
-            layout.left.top() + 86.0,
+            layout.left.top() + 96.0,
             SMALL,
             FAINT,
         );
@@ -1188,7 +1237,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             Vec2::new(layout.right.left() + 10.0, layout.right.top() + 7.0),
             Size::splat(13.0),
         ),
-        ACCENT,
+        DIM,
     );
     text_top(
         ctx,
@@ -1281,6 +1330,23 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
     }
 }
 
+fn paint_button(
+    state: &State,
+    measurer: &dyn TextMeasurer,
+    ctx: &mut PaintContext,
+    button: &Button,
+) {
+    theme::button_icon(
+        ctx,
+        measurer,
+        button.rect,
+        &button.label,
+        button.icon.and_then(icons::document),
+        state.hover == Some(button.action) || state.hover_hit == Some(Hit::Action(button.action)),
+        button.active,
+    );
+}
+
 fn paint_menu(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext, layout: &Layout) {
     let Some(rect) = layout.menu_rect else {
         return;
@@ -1304,11 +1370,24 @@ fn paint_menu(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext
         }
         let active =
             *action == Action::Favorite && state.patch().is_some_and(|patch| patch.favorite);
+        let mut text_x = item.left() + 10.0;
+        if let Some(icon) = action_icon(*action) {
+            icons::paint(
+                ctx,
+                icon,
+                Rect::from_min_size(
+                    Vec2::new(item.left() + 9.0, item.center().y - 6.5),
+                    Size::splat(13.0),
+                ),
+                if active { ACCENT } else { DIM },
+            );
+            text_x = item.left() + 30.0;
+        }
         text_top(
             ctx,
             measurer,
             label,
-            item.left() + 10.0,
+            text_x,
             item.top() + 5.0,
             FONT,
             if active { ACCENT } else { TEXT },
@@ -1364,28 +1443,25 @@ fn paint_header(
     ctx: &mut PaintContext,
     layout: &Layout,
 ) {
-    let header = Rect::from_min_size(
-        Vec2::new(layout.center.left() + 8.0, layout.center.top() + 6.0),
-        Size::new(layout.center.size.width - 16.0, HEADER_H),
-    );
+    let header = layout.header;
     fill(ctx, header, PANEL);
     stroke(ctx, header, BORDER);
     for button in &layout.header_buttons {
-        theme::button(
-            ctx,
-            measurer,
-            button.rect,
-            &button.label,
-            state.hover == Some(button.action),
-            button.active,
-        );
+        paint_button(state, measurer, ctx, button);
     }
+    // Keep the title block clear of the transport buttons at any width.
+    let title_right = layout
+        .header_buttons
+        .first()
+        .map(|button| button.rect.left() - 8.0)
+        .unwrap_or(header.right() - 10.0);
+    let title_width = (title_right - (header.left() + 10.0)).max(24.0);
     if state.tab == Tab::Patches {
         if let Some(patch) = state.patch() {
             text_top(
                 ctx,
                 measurer,
-                &patch.name,
+                &ellipsis(measurer, &patch.name, TITLE, title_width),
                 header.left() + 10.0,
                 header.top() + 4.0,
                 TITLE,
@@ -1402,7 +1478,7 @@ fn paint_header(
             text_top(
                 ctx,
                 measurer,
-                &meta,
+                &ellipsis(measurer, &meta, SMALL, title_width),
                 header.left() + 10.0,
                 header.top() + 18.0,
                 SMALL,
@@ -1422,16 +1498,21 @@ fn paint_header(
         text_top(
             ctx,
             measurer,
-            &format!(
-                "{} BPM  ·  {} BARS  ·  {} CHORD BARS  ·  {}",
-                state.project.music.bpm,
-                state.project.music.bars,
-                state.project.music.chords.len(),
-                if state.project.music.use_patterns {
-                    "PATTERN"
-                } else {
-                    "DEFAULT"
-                }
+            &ellipsis(
+                measurer,
+                &format!(
+                    "{} BPM  ·  {} BARS  ·  {} CHORD BARS  ·  {}",
+                    state.project.music.bpm,
+                    state.project.music.bars,
+                    state.project.music.chords.len(),
+                    if state.project.music.use_patterns {
+                        "PATTERN"
+                    } else {
+                        "DEFAULT"
+                    }
+                ),
+                SMALL,
+                title_width,
             ),
             header.left() + 10.0,
             header.top() + 18.0,
@@ -1448,7 +1529,7 @@ fn paint_timeline(
     layout: &Layout,
 ) {
     let rect = layout.timeline;
-    fill(ctx, rect, PANEL);
+    fill(ctx, rect, TRACK_BG);
     stroke(ctx, rect, BORDER);
     let ruler = Rect::from_min_size(rect.origin, Size::new(rect.size.width, RULER_H));
     fill(ctx, ruler, RAISED);
@@ -1458,7 +1539,7 @@ fn paint_timeline(
     let mut time = 0.0;
     while time <= layout.timeline_total + 0.001 {
         let x = layout.time_x(time);
-        vline(ctx, x, ruler.top(), ruler.bottom(), BORDER);
+        vline(ctx, x, ruler.top(), ruler.bottom(), BORDER_HI);
         text_top(
             ctx,
             measurer,
@@ -1466,7 +1547,7 @@ fn paint_timeline(
             x + 3.0,
             ruler.top() + 2.0,
             SMALL,
-            FAINT,
+            DIM,
         );
         time += step;
     }
@@ -1551,11 +1632,22 @@ fn paint_timeline(
         1.0,
         WARN,
     );
+    let label = format!("{:.3}", state.playhead);
+    let label_w = measurer.measure_run(&label, SMALL);
+    let label_x = (px + 6.0).min(rect.right() - label_w - 8.0);
+    ctx.fill_rounded_rect(
+        Rect::from_min_size(
+            Vec2::new(label_x - 4.0, rect.top() + 1.0),
+            Size::new(label_w + 8.0, 14.0),
+        ),
+        3.0,
+        Color::new(BG.r, BG.g, BG.b, 0.92),
+    );
     text_top(
         ctx,
         measurer,
-        &format!("{:.3}", state.playhead),
-        (px + 6.0).min(rect.right() - 40.0),
+        &label,
+        label_x,
         rect.top() + 2.0,
         SMALL,
         WARN,
@@ -1814,7 +1906,7 @@ fn paint_patterns(
         let on = pattern_on(&state.project.music, *row, *step);
         let hovered = rect.contains(state.cursor);
         let color = if on {
-            ACCENT
+            Color::new(ACCENT.r, ACCENT.g, ACCENT.b, 0.45)
         } else if hovered {
             BORDER_HI
         } else {
@@ -1930,14 +2022,7 @@ fn paint_inspector(
                     DIM,
                 );
                 for button in buttons {
-                    theme::button(
-                        ctx,
-                        measurer,
-                        button.rect,
-                        &button.label,
-                        state.hover == Some(button.action),
-                        button.active,
-                    );
+                    paint_button(state, measurer, ctx, button);
                 }
             }
             Item::Toggle {
@@ -2085,10 +2170,10 @@ fn inspector_items(state: &State) -> Vec<RawItem> {
                 .collect(),
         });
         items.push(RawItem::Options {
-            label: "DELETE".into(),
+            label: "LAYER".into(),
             columns: 3,
             options: vec![
-                ("+LAYER".into(), Action::AddLayer, false),
+                ("LAYER".into(), Action::AddLayer, false),
                 ("DUP".into(), Action::DuplicateLayer, false),
                 ("DEL".into(), Action::DeleteLayer, false),
             ],
@@ -2114,7 +2199,7 @@ fn inspector_items(state: &State) -> Vec<RawItem> {
             label: "CLIPS".into(),
             columns: 2,
             options: vec![
-                ("+ CLIP".into(), Action::AddClip, false),
+                ("CLIP".into(), Action::AddClip, false),
                 ("DEL CLIP".into(), Action::DeleteClip, false),
             ],
         });
@@ -2527,9 +2612,9 @@ fn paint_clip_block(
         _ => false,
     };
     let color = wave_color(layer.wave);
-    let alpha = (if layer.enabled { 0.9 } else { 0.35 }) * gain.clamp(0.25, 1.0);
+    let alpha = (if layer.enabled { 1.0 } else { 0.45 }) * gain.clamp(0.5, 1.0);
     let alpha = if hovered || dragging {
-        (alpha + 0.08).min(1.0)
+        (alpha + 0.05).min(1.0)
     } else {
         alpha
     };
@@ -2842,8 +2927,42 @@ mod tests {
                 viewport.width
             );
         }
-        assert!(layout.left.right() <= layout.center.left() + 0.001);
-        assert!(layout.center.right() <= layout.right.left() + 0.001);
+        assert!(layout.left.right() <= layout.header.left() + 0.001);
+        assert!(layout.header.right() <= layout.right.left() + 0.001);
+    }
+
+    #[test]
+    fn inspector_controls_keep_panel_margins() {
+        let mut state = State::new();
+        state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
+        let layout = Layout::new(&state, state.viewport);
+        let panel = layout.right;
+        for item in &layout.items {
+            let rect = match item {
+                Item::Section { rect, .. }
+                | Item::Param { rect, .. }
+                | Item::Options { rect, .. }
+                | Item::Toggle { rect, .. }
+                | Item::Note { rect, .. } => *rect,
+            };
+            assert!(
+                rect.left() >= panel.left() + 8.0 && rect.right() <= panel.right() - 8.0,
+                "inspector row {:?} touches the panel edge of {:?}",
+                rect,
+                panel
+            );
+        }
+        for item in &layout.items {
+            if let Item::Options { buttons, .. } = item {
+                for button in buttons {
+                    assert!(
+                        button.rect.right() <= panel.right() - 8.0,
+                        "inspector button {} touches the panel edge",
+                        button.label
+                    );
+                }
+            }
+        }
     }
 
     #[test]
