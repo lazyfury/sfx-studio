@@ -8,7 +8,7 @@ use crate::app::{Drag, State, Tab, TimelineDrag};
 use crate::icons::{self, Icon};
 use crate::model::{
     AutomationKind, Category, ClipField, EnvShape, FilterMode, LayerField, MusicField, MusicWave,
-    Wave,
+    ToneEnv, Wave,
 };
 use crate::synth;
 use crate::theme::{self, *};
@@ -17,6 +17,31 @@ pub const TIMELINE_LABEL: f32 = 76.0;
 pub const RULER_H: f32 = 18.0;
 pub const TRACK_H: f32 = 22.0;
 pub const INSPECTOR_LABEL: f32 = 82.0;
+
+/// Shared layout metrics. `app.rs` uses these helpers instead of re-deriving
+/// row capacity, so a metrics change cannot silently desync scrolling.
+pub const LIBRARY_TOP: f32 = 76.0;
+pub const LIBRARY_ROW_H: f32 = 24.0;
+pub const LIBRARY_END_GAP: f32 = 8.0;
+pub const MUSIC_ROW_OFFSET: f32 = 28.0;
+
+pub fn body_height(viewport: Size) -> f32 {
+    (viewport.height - theme::TOP_H - theme::STATUS_H).max(1.0)
+}
+
+pub fn library_capacity(viewport: Size) -> usize {
+    let list_top = theme::TOP_H + LIBRARY_TOP;
+    let music_top = theme::TOP_H + body_height(viewport) - MUSIC_ROW_OFFSET;
+    (((music_top - LIBRARY_END_GAP - list_top) / LIBRARY_ROW_H).max(1.0) as usize).max(1)
+}
+
+pub fn timeline_height(viewport: Size) -> f32 {
+    (body_height(viewport) - theme::HEADER_H - theme::AUTOMATION_H - 152.0).max(180.0)
+}
+
+pub fn layer_capacity(viewport: Size) -> usize {
+    (((timeline_height(viewport) - RULER_H) / TRACK_H).max(1.0) as usize).max(1)
+}
 
 /// Hit/drag area for a parameter slider row (shared by paint and input).
 pub fn param_track(rect: Rect) -> Rect {
@@ -53,6 +78,7 @@ pub enum Action {
     SetWave(Wave),
     SetFilter(FilterMode),
     SetEnv(EnvShape),
+    SetToneEnv(ToneEnv),
     BassWave(MusicWave),
     ArpWave(MusicWave),
     TogglePatterns,
@@ -94,7 +120,9 @@ pub enum Hit {
         value: f32,
     },
     Pattern(PatternRow, usize),
-    Pad(usize),
+    MenuToggle,
+    MenuItem(Action),
+    MenuPanel,
     CategoryFilter,
     FavoriteFilter,
     Search,
@@ -108,6 +136,32 @@ pub struct Button {
     pub action: Action,
     pub active: bool,
 }
+
+#[derive(Clone, Copy)]
+pub enum MenuEntry {
+    Section(&'static str),
+    Item(&'static str, Action),
+}
+
+/// Top-bar actions are grouped into one system menu instead of a row of
+/// buttons. Keyboard shortcuts remain available.
+pub const MENU_ENTRIES: &[MenuEntry] = &[
+    MenuEntry::Section("FILE"),
+    MenuEntry::Item("OPEN…", Action::Open),
+    MenuEntry::Item("SAVE", Action::Save),
+    MenuEntry::Item("NEW SOUND", Action::NewPatch),
+    MenuEntry::Item("RENAME", Action::RenamePatch),
+    MenuEntry::Item("DUPLICATE", Action::DuplicatePatch),
+    MenuEntry::Item("DELETE", Action::DeletePatch),
+    MenuEntry::Section("SOUND"),
+    MenuEntry::Item("RANDOMIZE", Action::Randomize),
+    MenuEntry::Item("VARY A/B/C", Action::Vary),
+    MenuEntry::Item("FAVORITE", Action::Favorite),
+    MenuEntry::Section("EXPORT"),
+    MenuEntry::Item("EXPORT WAV", Action::ExportWav),
+    MenuEntry::Item("BAKE GODOT", Action::Bake),
+    MenuEntry::Item("EXPORT .TRES", Action::Tres),
+];
 
 pub enum RawItem {
     Section(String),
@@ -166,7 +220,11 @@ pub struct Layout {
     pub center: Rect,
     pub right: Rect,
     pub status: Rect,
-    pub top_buttons: Vec<Button>,
+    pub menu_button: Rect,
+    pub menu_rect: Option<Rect>,
+    pub menu_items: Vec<(Action, &'static str, Rect)>,
+    pub menu_sections: Vec<(&'static str, Rect)>,
+    pub tab_buttons: Vec<Button>,
     pub header_buttons: Vec<Button>,
     pub patch_rows: Vec<(usize, Rect)>,
     pub music_row: Rect,
@@ -182,8 +240,6 @@ pub struct Layout {
     pub category_rect: Rect,
     pub favorite_rect: Rect,
     pub search_rect: Rect,
-    pub pad: Rect,
-    pub pad_buttons: Vec<(usize, Rect)>,
     pub project_anchor: f32,
     pub inspector: Rect,
     pub inspector_content_h: f32,
@@ -198,11 +254,7 @@ impl Layout {
             Vec2::new(0.0, viewport.height - STATUS_H),
             Size::new(viewport.width, STATUS_H),
         );
-        let pad_rect = Rect::from_min_size(
-            Vec2::new(0.0, viewport.height - STATUS_H - PAD_H),
-            Size::new(viewport.width, PAD_H),
-        );
-        let body_h = (viewport.height - TOP_H - STATUS_H - PAD_H).max(1.0);
+        let body_h = body_height(viewport);
         let left = Rect::from_min_size(Vec2::new(0.0, TOP_H), Size::new(LEFT_W, body_h));
         let right = Rect::from_min_size(
             Vec2::new(viewport.width - RIGHT_W, TOP_H),
@@ -219,6 +271,9 @@ impl Layout {
             Size::new(center.size.width - pad * 2.0, HEADER_H),
         );
 
+        // Below ~1180 px the top bar cannot fit full labels; switch to
+        // icon-only buttons and tighter header controls instead of overlapping.
+        let compact = viewport.width < 1180.0;
         let mut header_buttons = Vec::new();
         let mut x = header.right();
         for (label, action, width) in [
@@ -231,6 +286,8 @@ impl Layout {
             ("UNDO", Action::Undo, 44.0),
             ("REDO", Action::Redo, 44.0),
         ] {
+            let width = if compact { 30.0 } else { width };
+            let gap = if compact { 2.0 } else { 4.0 };
             x -= width;
             header_buttons.push(Button {
                 rect: Rect::from_min_size(Vec2::new(x, header.top()), Size::new(width, 22.0)),
@@ -238,41 +295,19 @@ impl Layout {
                 action,
                 active: action == Action::Loop && state.loop_play,
             });
-            x -= 4.0;
+            x -= gap;
         }
         header_buttons.reverse();
 
-        let mut top_buttons = Vec::new();
-        let mut x = 100.0;
-        for (label, action, width) in [
-            ("OPEN", Action::Open, 54.0),
-            ("SAVE", Action::Save, 54.0),
-            ("EXP", Action::ExportWav, 50.0),
-            ("RAND", Action::Randomize, 54.0),
-            ("VARY", Action::Vary, 54.0),
-            ("FAV", Action::Favorite, 48.0),
-            ("BAKE", Action::Bake, 52.0),
-            ("TRES", Action::Tres, 52.0),
-            ("NEW", Action::NewPatch, 50.0),
-            ("DUP", Action::DuplicatePatch, 50.0),
-            ("REN", Action::RenamePatch, 50.0),
-            ("DEL", Action::DeletePatch, 48.0),
-        ] {
-            top_buttons.push(Button {
-                rect: Rect::from_min_size(Vec2::new(x, 5.0), Size::new(width, 22.0)),
-                label: label.into(),
-                action,
-                active: false,
-            });
-            x += width + 4.0;
-        }
-        let project_anchor = x + 10.0;
+        let menu_button = Rect::from_min_size(Vec2::new(92.0, 5.0), Size::new(56.0, 22.0));
+        let project_anchor = 158.0;
+        let mut tab_buttons = Vec::new();
         let mut tab_x = viewport.width - 8.0 - 64.0 * 2.0 - 4.0;
         for (label, action, tab) in [
             ("SOUND", Action::TabPatches, Tab::Patches),
             ("MUSIC", Action::TabMusic, Tab::Music),
         ] {
-            top_buttons.push(Button {
+            tab_buttons.push(Button {
                 rect: Rect::from_min_size(Vec2::new(tab_x, 4.0), Size::new(64.0, 22.0)),
                 label: label.into(),
                 action,
@@ -281,8 +316,53 @@ impl Layout {
             tab_x += 68.0;
         }
 
+        let mut menu_rect = None;
+        let mut menu_items = Vec::new();
+        let mut menu_sections = Vec::new();
+        if state.menu_open {
+            let width = 224.0;
+            let mut height = 10.0;
+            for entry in MENU_ENTRIES {
+                height += match entry {
+                    MenuEntry::Section(_) => 20.0,
+                    MenuEntry::Item(_, _) => 24.0,
+                };
+            }
+            let rect = Rect::from_min_size(
+                Vec2::new(menu_button.left(), TOP_H + 4.0),
+                Size::new(width, height),
+            );
+            let mut y = rect.top() + 5.0;
+            for entry in MENU_ENTRIES {
+                match entry {
+                    MenuEntry::Section(text) => {
+                        menu_sections.push((
+                            *text,
+                            Rect::from_min_size(
+                                Vec2::new(rect.left() + 10.0, y),
+                                Size::new(width - 20.0, 20.0),
+                            ),
+                        ));
+                        y += 20.0;
+                    }
+                    MenuEntry::Item(label, action) => {
+                        menu_items.push((
+                            *action,
+                            *label,
+                            Rect::from_min_size(
+                                Vec2::new(rect.left() + 4.0, y),
+                                Size::new(width - 8.0, 24.0),
+                            ),
+                        ));
+                        y += 24.0;
+                    }
+                }
+            }
+            menu_rect = Some(rect);
+        }
+
         // Left: category filter, patch rows + MUSIC row.
-        let list_top = left.top() + 76.0;
+        let list_top = left.top() + LIBRARY_TOP;
         let category_rect = Rect::from_min_size(
             Vec2::new(left.left() + 8.0, left.top() + 24.0),
             Size::new(118.0, 20.0),
@@ -296,11 +376,11 @@ impl Layout {
             Size::new(left.size.width - 16.0, 20.0),
         );
         let music_row = Rect::from_min_size(
-            Vec2::new(left.left(), left.bottom() - 28.0),
-            Size::new(left.size.width, 24.0),
+            Vec2::new(left.left(), left.bottom() - MUSIC_ROW_OFFSET),
+            Size::new(left.size.width, LIBRARY_ROW_H),
         );
-        let row_h = 24.0;
-        let capacity = ((music_row.top() - 8.0 - list_top) / row_h).max(1.0) as usize;
+        let row_h = LIBRARY_ROW_H;
+        let capacity = library_capacity(viewport);
         let visible_patches = state.visible_patches();
         let patch_start = state
             .patch_scroll
@@ -319,7 +399,7 @@ impl Layout {
             ));
         }
 
-        let timeline_h = (body_h - HEADER_H - AUTOMATION_H - 152.0).max(180.0);
+        let timeline_h = timeline_height(viewport);
         let timeline = Rect::from_min_size(
             Vec2::new(center.left() + pad, header.bottom() + 6.0),
             Size::new(center.size.width - pad * 2.0, timeline_h),
@@ -338,7 +418,7 @@ impl Layout {
             ((timeline.size.width - TIMELINE_LABEL - 8.0) / (total + 0.08)).max(8.0);
         let mut layer_rows = Vec::new();
         if let Some(patch) = state.patch() {
-            let visible = ((timeline.size.height - RULER_H) / TRACK_H).max(1.0) as usize;
+            let visible = layer_capacity(viewport);
             let start = state.layer_scroll.min(patch.layers.len().saturating_sub(1));
             for offset in 0..visible {
                 let index = start + offset;
@@ -514,28 +594,6 @@ impl Layout {
             }
         }
 
-        let mut pad_buttons = Vec::new();
-        let pad_left = pad_rect.left() + 8.0;
-        let pad_right = pad_rect.right() - 8.0;
-        let pad_top = pad_rect.top() + 24.0;
-        let gap = 6.0;
-        let cell_w = ((pad_right - pad_left - gap * 3.0) / 4.0).max(1.0);
-        let cell_h = ((pad_rect.bottom() - 6.0 - pad_top - gap) / 2.0).max(18.0);
-        for index in 0..8 {
-            let col = index % 4;
-            let row = index / 4;
-            pad_buttons.push((
-                index,
-                Rect::from_min_size(
-                    Vec2::new(
-                        pad_left + col as f32 * (cell_w + gap),
-                        pad_top + row as f32 * (cell_h + gap),
-                    ),
-                    Size::new(cell_w, cell_h),
-                ),
-            ));
-        }
-
         Self {
             viewport,
             top,
@@ -543,7 +601,11 @@ impl Layout {
             center,
             right,
             status,
-            top_buttons,
+            menu_button,
+            menu_rect,
+            menu_items,
+            menu_sections,
+            tab_buttons,
             header_buttons,
             patch_rows,
             music_row,
@@ -559,8 +621,6 @@ impl Layout {
             category_rect,
             favorite_rect,
             search_rect,
-            pad: pad_rect,
-            pad_buttons,
             project_anchor,
             inspector,
             inspector_content_h,
@@ -631,6 +691,19 @@ fn automation_tabs(layout: &Layout) -> [(AutomationKind, Rect); 2] {
 }
 
 pub fn hit(state: &State, layout: &Layout, pos: Vec2) -> Option<Hit> {
+    if layout.menu_button.contains(pos) {
+        return Some(Hit::MenuToggle);
+    }
+    if let Some(menu) = layout.menu_rect {
+        if menu.contains(pos) {
+            for (action, _, rect) in &layout.menu_items {
+                if rect.contains(pos) {
+                    return Some(Hit::MenuItem(*action));
+                }
+            }
+            return Some(Hit::MenuPanel);
+        }
+    }
     if layout.category_rect.contains(pos) {
         return Some(Hit::CategoryFilter);
     }
@@ -643,13 +716,8 @@ pub fn hit(state: &State, layout: &Layout, pos: Vec2) -> Option<Hit> {
     if layout.inspector_scrollbar.contains(pos) {
         return Some(Hit::InspectorScrollbar);
     }
-    for (index, rect) in &layout.pad_buttons {
-        if rect.contains(pos) {
-            return Some(Hit::Pad(*index));
-        }
-    }
     for button in layout
-        .top_buttons
+        .tab_buttons
         .iter()
         .chain(layout.header_buttons.iter())
     {
@@ -681,10 +749,8 @@ pub fn hit(state: &State, layout: &Layout, pos: Vec2) -> Option<Hit> {
                         }
                     }
                 }
-                Item::Toggle { action, rect, .. } => {
-                    if rect.contains(pos) {
-                        return Some(Hit::Action(*action));
-                    }
+                Item::Toggle { action, rect, .. } if rect.contains(pos) => {
+                    return Some(Hit::Action(*action));
                 }
                 _ => {}
             }
@@ -811,6 +877,7 @@ fn action_tip(action: Action) -> &'static str {
         Action::SetWave(_) => "切换波形 · Wave",
         Action::SetFilter(_) => "切换滤波器 · Filter",
         Action::SetEnv(_) => "切换包络 · Envelope",
+        Action::SetToneEnv(_) => "音调包络 · Tone envelope",
         Action::AutomationLane(_) => "自动化轨道 · Automation lane",
         Action::BassWave(_) => "贝斯波形 · Bass wave",
         Action::ArpWave(_) => "琶音波形 · Arp wave",
@@ -863,19 +930,23 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             WARN,
         );
     }
-    for button in &layout.top_buttons {
-        let active = button.active
-            || (button.action == Action::Favorite
-                && state.patch().is_some_and(|patch| patch.favorite));
-        theme::button_icon(
+    theme::button(
+        ctx,
+        measurer,
+        layout.menu_button,
+        "MENU",
+        state.hover_hit == Some(Hit::MenuToggle),
+        state.menu_open,
+    );
+    for button in &layout.tab_buttons {
+        theme::button(
             ctx,
             measurer,
             button.rect,
             &button.label,
-            action_icon(button.action).and_then(icons::document),
             state.hover == Some(button.action)
                 || state.hover_hit == Some(Hit::Action(button.action)),
-            active,
+            button.active,
         );
     }
 
@@ -1063,8 +1134,12 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             measurer,
             ctx,
             layout.waveform,
-            &state.cache,
-            state.cache_rate,
+            WaveformData {
+                samples: &state.cache,
+                envelope: &state.cache_envelope,
+                peak: state.cache_peak,
+                rate: state.cache_rate,
+            },
         );
     } else {
         paint_patterns(state, measurer, ctx, &layout);
@@ -1073,8 +1148,12 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             measurer,
             ctx,
             layout.waveform,
-            &state.music_cache,
-            state.cache_rate,
+            WaveformData {
+                samples: &state.music_cache,
+                envelope: &state.music_envelope,
+                peak: state.music_cache_peak,
+                rate: state.cache_rate,
+            },
         );
     }
 
@@ -1138,62 +1217,6 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         );
     }
 
-    // Trigger pad
-    fill(ctx, layout.pad, RAISED);
-    hline(ctx, 0.0, layout.pad.right(), layout.pad.top(), BORDER);
-    text_top(
-        ctx,
-        measurer,
-        "TRIGGER PAD",
-        10.0,
-        layout.pad.top() + 5.0,
-        SMALL,
-        DIM,
-    );
-    text_right(
-        ctx,
-        measurer,
-        "1 – 8",
-        layout.pad.right() - 10.0,
-        layout.pad.top() + 12.0,
-        SMALL,
-        FAINT,
-    );
-    for (index, rect) in &layout.pad_buttons {
-        let selected = *index == state.selected_patch;
-        let patch = state.project.patches.get(*index);
-        let bg = if selected { ACCENT } else { PANEL };
-        ctx.fill_rounded_rect(*rect, 6.0, bg);
-        ctx.stroke_rounded_rect(*rect, 6.0, 1.0, if selected { ACCENT_DARK } else { BORDER });
-        let fg = if selected { ACCENT_DARK } else { TEXT };
-        text_top(
-            ctx,
-            measurer,
-            &format!("{}", index + 1),
-            rect.left() + 7.0,
-            rect.top() + 4.0,
-            SMALL,
-            if selected { ACCENT_DARK } else { FAINT },
-        );
-        let name = patch.map(|p| p.name.as_str()).unwrap_or("EMPTY");
-        text_top(
-            ctx,
-            measurer,
-            &ellipsis(measurer, name, SMALL, rect.size.width - 34.0),
-            rect.left() + 20.0,
-            rect.top() + 4.0,
-            SMALL,
-            fg,
-        );
-        if let Some(patch) = patch {
-            ctx.fill_circle(
-                Vec2::new(rect.right() - 10.0, rect.center().y),
-                3.0,
-                category_color(patch.category),
-            );
-        }
-    }
-
     // Status bar
     fill(ctx, layout.status, PANEL);
     hline(ctx, 0.0, layout.status.right(), layout.status.top(), BORDER);
@@ -1228,7 +1251,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             state.cache_rate,
             patch.map(|p| p.end()).unwrap_or(0.0),
             patch.map(|p| p.layers.len()).unwrap_or(0),
-            synth::db(synth::peak(&state.cache))
+            synth::db(state.cache_peak)
         )
     } else {
         format!(
@@ -1236,7 +1259,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             state.project.music.bpm,
             state.project.music.bars,
             state.project.music.length_seconds(),
-            synth::db(synth::peak(&state.music_cache))
+            synth::db(state.music_cache_peak)
         )
     };
     text_right(
@@ -1249,10 +1272,58 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         FAINT,
     );
 
+    paint_menu(state, measurer, ctx, &layout);
+
     if state.modal.is_some() {
         paint_modal(state, measurer, ctx, &layout);
-    } else if matches!(state.drag, Drag::None) {
+    } else if matches!(state.drag, Drag::None) && !state.menu_open {
         paint_hover_tip(state, measurer, ctx);
+    }
+}
+
+fn paint_menu(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext, layout: &Layout) {
+    let Some(rect) = layout.menu_rect else {
+        return;
+    };
+    fill(ctx, rect, RAISED);
+    stroke(ctx, rect, BORDER_HI);
+    for (text, section) in &layout.menu_sections {
+        text_top(
+            ctx,
+            measurer,
+            text,
+            section.left(),
+            section.top() + 3.0,
+            SMALL,
+            ACCENT2,
+        );
+    }
+    for (action, label, item) in &layout.menu_items {
+        if item.contains(state.cursor) {
+            fill(ctx, *item, ACTIVE);
+        }
+        let active =
+            *action == Action::Favorite && state.patch().is_some_and(|patch| patch.favorite);
+        text_top(
+            ctx,
+            measurer,
+            label,
+            item.left() + 10.0,
+            item.top() + 5.0,
+            FONT,
+            if active { ACCENT } else { TEXT },
+        );
+        if active {
+            text_right(
+                ctx,
+                measurer,
+                "ON",
+                item.right() - 8.0,
+                item.center().y,
+                SMALL,
+                ACCENT_DARK,
+            );
+        }
     }
 }
 
@@ -1285,36 +1356,6 @@ fn paint_hover_tip(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintCo
         FONT,
         TEXT,
     );
-}
-
-fn category_color(category: Category) -> Color {
-    match category {
-        Category::Impact => hex(0xD86F68),
-        Category::Laser => hex(0x7599BD),
-        Category::Ui => ACCENT_DARK,
-        Category::Movement => hex(0xE4B45A),
-        Category::Magic => hex(0x9B7BD8),
-        Category::Environment => hex(0x5FAF8A),
-        Category::Combat => hex(0xC77B3C),
-    }
-}
-
-fn action_icon(action: Action) -> Option<Icon> {
-    match action {
-        Action::Open => Some(Icon::FolderSearch),
-        Action::Save => Some(Icon::Save),
-        Action::ExportWav => Some(Icon::ImagePlus),
-        Action::Bake => Some(Icon::Camera),
-        Action::Tres => Some(Icon::Tag),
-        Action::Randomize => Some(Icon::Sparkles),
-        Action::Vary => Some(Icon::LayoutGrid),
-        Action::Favorite => Some(Icon::Star),
-        Action::NewPatch => Some(Icon::ImagePlus),
-        Action::DuplicatePatch => Some(Icon::LayoutGrid),
-        Action::RenamePatch => Some(Icon::Pencil),
-        Action::DeletePatch => Some(Icon::Trash),
-        _ => None,
-    }
 }
 
 fn paint_header(
@@ -1634,14 +1675,26 @@ fn paint_automation(
     }
 }
 
+struct WaveformData<'a> {
+    samples: &'a [f32],
+    envelope: &'a synth::Envelope,
+    peak: f32,
+    rate: u32,
+}
+
 fn paint_waveform(
     state: &State,
     measurer: &dyn TextMeasurer,
     ctx: &mut PaintContext,
     rect: Rect,
-    samples: &[f32],
-    rate: u32,
+    data: WaveformData<'_>,
 ) {
+    let WaveformData {
+        samples,
+        envelope,
+        peak,
+        rate,
+    } = data;
     fill(ctx, rect, DARK);
     stroke(ctx, rect, Color::new(1.0, 1.0, 1.0, 0.10));
     hline(
@@ -1658,23 +1711,48 @@ fn paint_waveform(
     let width = rect.size.width.max(1.0) as usize;
     let half = rect.size.height * 0.45;
     let mid = rect.center().y;
-    for x in 0..width {
-        let first = (x * samples.len() / width).min(samples.len() - 1);
-        let last = (((x + 1) * samples.len()) / width)
-            .max(first + 1)
-            .min(samples.len());
-        let mut lo = 0.0f32;
-        let mut hi = 0.0f32;
-        for value in &samples[first..last] {
-            lo = lo.min(*value);
-            hi = hi.max(*value);
+    let color = Color::new(0.72, 0.95, 0.42, 0.90);
+    if envelope.is_empty() {
+        // Defensive fallback for a cache that was populated before the
+        // envelope existed (e.g. a freshly loaded session).
+        for x in 0..width {
+            let first = (x * samples.len() / width).min(samples.len() - 1);
+            let last = (((x + 1) * samples.len()) / width)
+                .max(first + 1)
+                .min(samples.len());
+            let mut lo = 0.0f32;
+            let mut hi = 0.0f32;
+            for value in &samples[first..last] {
+                lo = lo.min(*value);
+                hi = hi.max(*value);
+            }
+            ctx.draw_line(
+                Vec2::new(rect.left() + x as f32, mid - hi * half),
+                Vec2::new(rect.left() + x as f32, mid - lo * half),
+                1.0,
+                color,
+            );
         }
-        ctx.draw_line(
-            Vec2::new(rect.left() + x as f32, mid - hi * half),
-            Vec2::new(rect.left() + x as f32, mid - lo * half),
-            1.0,
-            Color::new(0.72, 0.95, 0.42, 0.90),
-        );
+    } else {
+        let bins = envelope.min.len();
+        for x in 0..width {
+            let first = (x * bins / width).min(bins - 1);
+            let last = (((x + 1) * bins) / width).max(first + 1).min(bins);
+            let lo = envelope.min[first..last]
+                .iter()
+                .copied()
+                .fold(0.0, f32::min);
+            let hi = envelope.max[first..last]
+                .iter()
+                .copied()
+                .fold(0.0, f32::max);
+            ctx.draw_line(
+                Vec2::new(rect.left() + x as f32, mid - hi * half),
+                Vec2::new(rect.left() + x as f32, mid - lo * half),
+                1.0,
+                color,
+            );
+        }
     }
     let duration = samples.len() as f32 / rate.max(1) as f32;
     let px = rect.left() + (state.playhead / duration.max(0.001)).clamp(0.0, 1.0) * rect.size.width;
@@ -1683,7 +1761,7 @@ fn paint_waveform(
         "{:.2}s  ·  {} Hz  ·  peak {:.1} dB",
         duration,
         rate,
-        synth::db(synth::peak(samples))
+        synth::db(peak)
     );
     text_right(
         ctx,
@@ -1942,20 +2020,37 @@ fn paint_modal(
     );
     fill(ctx, field, PANEL);
     stroke(ctx, field, BORDER_HI);
-    let text = format!("{}{}", modal.text, "▌");
+    if modal.is_input() {
+        let text = format!("{}{}", modal.text, "▌");
+        text_top(
+            ctx,
+            measurer,
+            &text,
+            field.left() + 8.0,
+            field.top() + 5.0,
+            FONT,
+            TEXT,
+        );
+    } else {
+        let text = theme::ellipsis(measurer, &modal.text, SMALL, field.size.width - 16.0);
+        text_top(
+            ctx,
+            measurer,
+            &text,
+            field.left() + 8.0,
+            field.top() + 6.0,
+            SMALL,
+            DIM,
+        );
+    }
     text_top(
         ctx,
         measurer,
-        &text,
-        field.left() + 8.0,
-        field.top() + 5.0,
-        FONT,
-        TEXT,
-    );
-    text_top(
-        ctx,
-        measurer,
-        "ENTER CONFIRM   ESC CANCEL",
+        if modal.is_input() {
+            "ENTER CONFIRM   ESC CANCEL"
+        } else {
+            "ENTER DISCARD & OPEN   ESC CANCEL"
+        },
         rect.left() + 12.0,
         rect.top() + 78.0,
         SMALL,
@@ -2045,6 +2140,22 @@ fn inspector_items(state: &State) -> Vec<RawItem> {
             items.push(layer_param(LayerField::VibratoRate, layer));
             items.push(layer_param(LayerField::VibratoDepth, layer));
             items.push(RawItem::Section("AMP ENV".into()));
+            items.push(RawItem::Options {
+                label: "TONE ENV".into(),
+                columns: 2,
+                options: vec![
+                    (
+                        ToneEnv::Adsr.label().into(),
+                        Action::SetToneEnv(ToneEnv::Adsr),
+                        layer.tone_env == ToneEnv::Adsr,
+                    ),
+                    (
+                        ToneEnv::Exp.label().into(),
+                        Action::SetToneEnv(ToneEnv::Exp),
+                        layer.tone_env == ToneEnv::Exp,
+                    ),
+                ],
+            });
             for field in [
                 LayerField::Attack,
                 LayerField::Decay,
@@ -2052,6 +2163,9 @@ fn inspector_items(state: &State) -> Vec<RawItem> {
                 LayerField::Release,
             ] {
                 items.push(layer_param(field, layer));
+            }
+            if layer.tone_env == ToneEnv::Exp {
+                items.push(layer_param(LayerField::ExpDecay, layer));
             }
             items.push(RawItem::Section("FILTER".into()));
             items.push(filter_options(layer.filter));
@@ -2144,14 +2258,18 @@ fn inspector_items(state: &State) -> Vec<RawItem> {
             }
         } else if layer.wave.is_drum() {
             items.push(RawItem::Section("DRUM".into()));
-            for field in [LayerField::DrumTone, LayerField::DrumSnap, LayerField::Seed] {
-                items.push(layer_param(field, layer));
+            items.push(layer_param(LayerField::DrumTone, layer));
+            items.push(layer_param(LayerField::DrumSnap, layer));
+            // Kick is deterministic; only noise drums read the seed.
+            if layer.wave != Wave::Kick {
+                items.push(layer_param(LayerField::Seed, layer));
             }
         }
         items.push(RawItem::Note(format!(
-            "{} · {:.1} dB",
+            "{} · {:.1} dB · bake {} Hz",
             layer.wave.label(),
-            synth::db(layer.gain.max(0.0001))
+            synth::db(layer.gain.max(0.0001)),
+            state.patch().map(|patch| patch.rate).unwrap_or(22050)
         )));
     } else {
         let music = &state.project.music;
@@ -2165,6 +2283,10 @@ fn inspector_items(state: &State) -> Vec<RawItem> {
         ] {
             items.push(music_param(field, music));
         }
+        items.push(RawItem::Note(format!(
+            "PREVIEW {} Hz · BAKE {} Hz",
+            state.cache_rate, music.rate
+        )));
         items.push(RawItem::Section("INSTRUMENTS".into()));
         items.push(RawItem::Options {
             label: "BASS".into(),
@@ -2250,35 +2372,32 @@ fn inspector_items(state: &State) -> Vec<RawItem> {
 }
 
 fn layer_param(field: LayerField, layer: &crate::model::Layer) -> RawItem {
-    let (min, max, _) = field.range();
     let value = field.get(layer);
     RawItem::Param {
         label: field.label().into(),
         value: field.format(value),
         hit: Hit::LayerField(field),
-        norm: ((value - min) / (max - min).max(0.0001)).clamp(0.0, 1.0),
+        norm: field.norm(value),
     }
 }
 
 fn clip_param(field: ClipField, clip: &crate::model::Clip) -> RawItem {
-    let (min, max, _) = field.range();
     let value = field.get(clip);
     RawItem::Param {
         label: field.label().into(),
         value: field.format(value),
         hit: Hit::ClipField(field),
-        norm: ((value - min) / (max - min).max(0.0001)).clamp(0.0, 1.0),
+        norm: field.norm(value),
     }
 }
 
 fn music_param(field: MusicField, music: &crate::model::Music) -> RawItem {
-    let (min, max, _) = field.range();
     let value = field.get(music);
     RawItem::Param {
         label: field.label().into(),
         value: field.format(value),
         hit: Hit::MusicField(field),
-        norm: ((value - min) / (max - min).max(0.0001)).clamp(0.0, 1.0),
+        norm: field.norm(value),
     }
 }
 
@@ -2505,91 +2624,6 @@ fn paint_clip_block(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::app::State;
-
-    #[test]
-    fn layout_exposes_library_filters_and_trigger_pad() {
-        let state = State::new();
-        let layout = Layout::new(&state, state.viewport);
-        assert_eq!(layout.pad_buttons.len(), 8);
-        assert!(layout.search_rect.size.width > 0.0);
-        assert!(layout.category_rect.size.width > 0.0);
-        assert!(layout.favorite_rect.size.width > 0.0);
-        assert!(layout.pad.contains(layout.pad_buttons[0].1.origin));
-    }
-
-    #[test]
-    fn layout_exposes_undo_and_clip_fields() {
-        let mut state = State::new();
-        state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
-        state.layer_mut().unwrap().ensure_clips();
-        state.selected_clip = Some(0);
-        let layout = Layout::new(&state, state.viewport);
-        assert!(layout
-            .header_buttons
-            .iter()
-            .any(|b| b.action == Action::Undo));
-        assert!(layout
-            .header_buttons
-            .iter()
-            .any(|b| b.action == Action::Redo));
-        assert!(layout.items.iter().any(|item| matches!(
-            item,
-            Item::Param {
-                hit: Hit::ClipField(_),
-                ..
-            }
-        )));
-    }
-
-    #[test]
-    fn automation_lane_adds_and_hits_points() {
-        let mut state = State::new();
-        state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
-        state.layer_mut().unwrap().ensure_clips();
-        state.selected_clip = Some(0);
-        state.layer_mut().unwrap().clips[0].add_point(AutomationKind::Gain, 0.05, 1.5);
-        let layout = Layout::new(&state, state.viewport);
-        assert!(layout.automation.size.height > 0.0);
-        let clip = &state.layer().unwrap().clips[0];
-        let point = text_point(&layout, clip, 0.05, 1.5);
-        assert!(matches!(
-            hit(&state, &layout, point),
-            Some(Hit::AutomationPoint(0))
-        ));
-        let lane = layout.automation_xy(0.02, 0.5, AutomationKind::Gain, clip.duration);
-        assert!(matches!(
-            hit(&state, &layout, lane),
-            Some(Hit::AutomationLane { .. })
-        ));
-    }
-
-    fn text_point(layout: &Layout, clip: &crate::model::Clip, time: f32, value: f32) -> Vec2 {
-        layout.automation_xy(time, value, AutomationKind::Gain, clip.duration)
-    }
-
-    #[test]
-    fn clip_blocks_are_hit_testable() {
-        let mut state = State::new();
-        state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
-        state.layer_mut().unwrap().ensure_clips();
-        let layout = Layout::new(&state, state.viewport);
-        let clip = &state.layer().unwrap().clips[0];
-        let x = layout.time_x(clip.start + clip.duration * 0.5);
-        let row = layout
-            .layer_rows
-            .iter()
-            .find(|(index, _)| *index == state.selected_layer)
-            .map(|(_, rect)| *rect)
-            .unwrap();
-        let hit = hit(&state, &layout, Vec2::new(x, row.center().y));
-        assert!(matches!(hit, Some(Hit::Timeline { clip: Some(0), .. })));
-    }
-}
-
 fn drag_info(state: &State) -> Option<String> {
     match &state.drag {
         Drag::Seek { .. } => Some(format!(
@@ -2676,7 +2710,14 @@ fn hover_info(state: &State) -> Option<String> {
         Some(Hit::CategoryFilter) => Some("切换分类过滤 · Category（C）".into()),
         Some(Hit::FavoriteFilter) => Some("只看收藏 · Favorites".into()),
         Some(Hit::InspectorScrollbar) => Some("拖动滚动参数面板 · Scroll".into()),
-        Some(Hit::Pad(index)) => Some(format!("触发 Pad {} · 1–8", index + 1)),
+        Some(Hit::MenuItem(action)) => {
+            let tip = action_tip(action);
+            if tip.is_empty() {
+                None
+            } else {
+                Some(tip.to_string())
+            }
+        }
         Some(Hit::Waveform(time)) => Some(format!("拖动定位播放头 · Playhead {time:.3}s")),
         Some(Hit::Timeline { layer, clip, .. }) => {
             let layer_data = state.patch()?.layers.get(layer)?;
@@ -2712,9 +2753,164 @@ fn hover_info(state: &State) -> Option<String> {
                 point.value
             ))
         }
-        Some(Hit::AutomationLane { time, value }) => Some(format!(
-            "AUTOMATION  T {time:.3}s  GAIN {value:.2}  ·  click to add point"
-        )),
+        Some(Hit::AutomationLane { time, value }) => {
+            let kind = state.automation_lane;
+            let value = if kind == AutomationKind::Gain {
+                format!("{value:.2}")
+            } else {
+                format!("{value:.0} Hz")
+            };
+            Some(format!(
+                "AUTOMATION {}  T {time:.3}s  {value}  ·  click to add point",
+                kind.label()
+            ))
+        }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::State;
+
+    #[test]
+    fn layout_exposes_library_filters_and_system_menu() {
+        let mut state = State::new();
+        state.menu_open = true;
+        let layout = Layout::new(&state, state.viewport);
+        assert!(layout.search_rect.size.width > 0.0);
+        assert!(layout.category_rect.size.width > 0.0);
+        assert!(layout.favorite_rect.size.width > 0.0);
+        assert!(layout.menu_rect.is_some());
+        assert!(layout
+            .menu_items
+            .iter()
+            .any(|(action, _, _)| *action == Action::Open));
+        assert!(layout
+            .menu_items
+            .iter()
+            .any(|(action, _, _)| *action == Action::ExportWav));
+    }
+
+    #[test]
+    fn system_menu_paints_and_hit_tests_actions() {
+        let mut state = State::new();
+        state.menu_open = true;
+        let layout = Layout::new(&state, state.viewport);
+        let open = layout
+            .menu_items
+            .iter()
+            .find(|(action, _, _)| *action == Action::Open)
+            .map(|(_, _, rect)| *rect)
+            .expect("open item");
+        assert!(matches!(
+            hit(&state, &layout, open.center()),
+            Some(Hit::MenuItem(Action::Open))
+        ));
+        let mut ctx = PaintContext::new();
+        paint(&state, &igui_ui::ApproxTextMeasurer, &mut ctx);
+        let draw_list = ctx.into_draw_list();
+        let labels: Vec<_> = draw_list
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                igui_render::DrawCommand::DrawText { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.contains(&"OPEN…"), "menu labels: {labels:?}");
+        assert!(labels.contains(&"EXPORT WAV"));
+    }
+
+    #[test]
+    fn compact_layout_stays_inside_a_1024_window() {
+        let mut state = State::new();
+        let viewport = Size::new(1024.0, 720.0);
+        state.viewport = viewport;
+        let layout = Layout::new(&state, viewport);
+        for button in layout
+            .tab_buttons
+            .iter()
+            .chain(layout.header_buttons.iter())
+        {
+            assert!(
+                button.rect.left() >= 0.0 && button.rect.right() <= viewport.width,
+                "{:?} at {:?} overflows {}",
+                button.action,
+                button.rect,
+                viewport.width
+            );
+        }
+        assert!(layout.left.right() <= layout.center.left() + 0.001);
+        assert!(layout.center.right() <= layout.right.left() + 0.001);
+    }
+
+    #[test]
+    fn layout_exposes_undo_and_clip_fields() {
+        let mut state = State::new();
+        state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
+        state.layer_mut().unwrap().ensure_clips();
+        state.selected_clip = Some(0);
+        let layout = Layout::new(&state, state.viewport);
+        assert!(layout
+            .header_buttons
+            .iter()
+            .any(|b| b.action == Action::Undo));
+        assert!(layout
+            .header_buttons
+            .iter()
+            .any(|b| b.action == Action::Redo));
+        assert!(layout.items.iter().any(|item| matches!(
+            item,
+            Item::Param {
+                hit: Hit::ClipField(_),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn automation_lane_adds_and_hits_points() {
+        let mut state = State::new();
+        state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
+        state.layer_mut().unwrap().ensure_clips();
+        state.selected_clip = Some(0);
+        state.layer_mut().unwrap().clips[0].add_point(AutomationKind::Gain, 0.05, 1.5);
+        let layout = Layout::new(&state, state.viewport);
+        assert!(layout.automation.size.height > 0.0);
+        let clip = &state.layer().unwrap().clips[0];
+        let point = text_point(&layout, clip, 0.05, 1.5);
+        assert!(matches!(
+            hit(&state, &layout, point),
+            Some(Hit::AutomationPoint(0))
+        ));
+        let lane = layout.automation_xy(0.02, 0.5, AutomationKind::Gain, clip.duration);
+        assert!(matches!(
+            hit(&state, &layout, lane),
+            Some(Hit::AutomationLane { .. })
+        ));
+    }
+
+    fn text_point(layout: &Layout, clip: &crate::model::Clip, time: f32, value: f32) -> Vec2 {
+        layout.automation_xy(time, value, AutomationKind::Gain, clip.duration)
+    }
+
+    #[test]
+    fn clip_blocks_are_hit_testable() {
+        let mut state = State::new();
+        state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
+        state.layer_mut().unwrap().ensure_clips();
+        let layout = Layout::new(&state, state.viewport);
+        let clip = &state.layer().unwrap().clips[0];
+        let x = layout.time_x(clip.start + clip.duration * 0.5);
+        let row = layout
+            .layer_rows
+            .iter()
+            .find(|(index, _)| *index == state.selected_layer)
+            .map(|(_, rect)| *rect)
+            .unwrap();
+        let hit = hit(&state, &layout, Vec2::new(x, row.center().y));
+        assert!(matches!(hit, Some(Hit::Timeline { clip: Some(0), .. })));
     }
 }

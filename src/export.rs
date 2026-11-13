@@ -2,23 +2,47 @@
 //! - baked mono WAVs + `audio/sfx_manifest.json`
 //! - `.tres` resources for the `sfx_studio` addon
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::model::{Layer, Music, Patch, Project};
+use crate::model::{self, Layer, Music, Patch, Project};
 use crate::synth;
+
+/// Deterministic, collision-free file stems for the whole project. Two patches
+/// called "coin" (or two Chinese names sanitising to "sound") must not
+/// overwrite each other's WAV / `.tres`.
+pub fn unique_names(project: &Project) -> Vec<String> {
+    let mut used = HashSet::new();
+    let mut names = Vec::with_capacity(project.patches.len());
+    for patch in &project.patches {
+        let base = patch.safe_name();
+        let mut name = base.clone();
+        let mut suffix = 2;
+        while !used.insert(name.clone()) {
+            name = format!("{base}_{suffix}");
+            suffix += 1;
+        }
+        names.push(name);
+    }
+    names
+}
 
 pub fn bake(project: &Project, root: &Path) -> Result<String, String> {
     let baked = root.join("audio").join("baked");
     std::fs::create_dir_all(&baked).map_err(|e| e.to_string())?;
+    let names = unique_names(project);
 
     let mut entries = Vec::new();
-    for patch in &project.patches {
-        let name = patch.safe_name();
+    for (patch, name) in project.patches.iter().zip(names.iter()) {
         let samples = synth::render_patch(patch, patch.rate);
         write_baked_wav(&baked.join(format!("{name}.wav")), &samples, patch.rate)?;
         entries.push(serde_json::json!({
             "name": name,
+            "patch": patch.name,
+            "category": patch.category.group(),
+            "favorite": patch.favorite,
+            "dsp_version": patch.dsp_version,
             "wav": format!("res://audio/baked/{name}.wav"),
             "rate": patch.rate,
             "duration": samples.len() as f32 / patch.rate as f32,
@@ -27,11 +51,17 @@ pub fn bake(project: &Project, root: &Path) -> Result<String, String> {
     }
 
     let music_samples = synth::render_music(&project.music, project.music.rate);
-    synth::write_wav(&baked.join("music.wav"), &music_samples, project.music.rate)
-        .map_err(|e| e.to_string())?;
+    let music_wav = baked.join("music.wav");
+    synth::write_wav(&music_wav, &music_samples, project.music.rate).map_err(|e| e.to_string())?;
+    model::write_atomic(
+        &music_wav.with_extension("wav.import"),
+        b"[params]\n\ncompress/mode=0\n",
+    )
+    .map_err(|e| e.to_string())?;
 
     let manifest = serde_json::json!({
-        "version": 1,
+        "version": 2,
+        "schema_version": model::PROJECT_VERSION,
         "project": project.name,
         "sounds": entries,
         "music": {
@@ -54,12 +84,12 @@ pub fn export_tres(project: &Project, root: &Path) -> Result<String, String> {
     let baked_dir = root.join("audio").join("baked");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&baked_dir).map_err(|e| e.to_string())?;
+    let names = unique_names(project);
     let mut baked_count = 0;
-    for patch in &project.patches {
+    for (patch, name) in project.patches.iter().zip(names.iter()) {
         let text = if patch.has_automation() {
             // Automation cannot be flattened to SfxLayer. Bake the exact result
             // and point `baked` at it; the layer parameters stay in the file.
-            let name = patch.safe_name();
             let samples = synth::render_patch(patch, patch.rate);
             write_baked_wav(&baked_dir.join(format!("{name}.wav")), &samples, patch.rate)?;
             baked_count += 1;
@@ -67,12 +97,12 @@ pub fn export_tres(project: &Project, root: &Path) -> Result<String, String> {
         } else {
             patch_tres(patch)
         };
-        let path = dir.join(format!("{}.tres", patch.safe_name()));
-        std::fs::write(path, text).map_err(|e| e.to_string())?;
+        let path = dir.join(format!("{name}.tres"));
+        model::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())?;
     }
-    std::fs::write(
-        root.join("audio").join("music.tres"),
-        music_tres(&project.music),
+    model::write_atomic(
+        &root.join("audio").join("music.tres"),
+        music_tres(&project.music).as_bytes(),
     )
     .map_err(|e| e.to_string())?;
     Ok(format!(
@@ -86,12 +116,12 @@ fn write_baked_wav(path: &Path, samples: &[f32], rate: u32) -> Result<(), String
     // Force PCM import. Godot 4.7's default WAV import is QOA (lossy); a minimal
     // sidecar with `compress/mode=0` makes the editor fill the rest and keep PCM.
     let sidecar = path.with_extension("wav.import");
-    std::fs::write(sidecar, "[params]\n\ncompress/mode=0\n").map_err(|e| e.to_string())
+    model::write_atomic(&sidecar, b"[params]\n\ncompress/mode=0\n").map_err(|e| e.to_string())
 }
 
 fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
     let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    std::fs::write(path, text).map_err(|e| e.to_string())
+    model::write_atomic(path, text.as_bytes()).map_err(|e| e.to_string())
 }
 
 pub fn patch_tres(patch: &Patch) -> String {
@@ -147,6 +177,8 @@ fn patch_tres_inner(patch: &Patch, baked: Option<&str>) -> String {
     }
     let _ = writeln!(out, "rate = {}", patch.rate);
     let _ = writeln!(out, "normalize_layers = {}", bool_lit(patch.normalize));
+    let _ = writeln!(out, "resource_name = \"{}\"", quote(&patch.name));
+    let _ = writeln!(out, "group = \"{}\"", quote(patch.category.group()));
     out.push_str("layers = Array[ExtResource(\"1_layer\")]([");
     for (index, id) in ids.iter().enumerate() {
         if index > 0 {
@@ -161,6 +193,8 @@ fn patch_tres_inner(patch: &Patch, baked: Option<&str>) -> String {
 fn write_layer(out: &mut String, layer: &Layer) {
     let _ = writeln!(out, "wave = {}", layer.wave.godot_id());
     let _ = writeln!(out, "enabled = {}", bool_lit(layer.enabled));
+    let _ = writeln!(out, "tone_env = {}", layer.tone_env.godot_id());
+    let _ = writeln!(out, "exp_decay = {}", f(layer.exp_decay));
     let _ = writeln!(out, "delay = {}", f(layer.delay));
     let _ = writeln!(out, "duration = {}", f(layer.duration));
     let _ = writeln!(out, "gain = {}", f(layer.gain));
@@ -252,6 +286,10 @@ fn bool_lit(value: bool) -> &'static str {
     } else {
         "false"
     }
+}
+
+fn quote(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn float_array(values: &[f32]) -> String {
@@ -378,6 +416,104 @@ mod tests {
         assert!(text.contains("baked = ExtResource(\"1_audio\")"));
         assert!(text.contains("type=\"AudioStreamWAV\""));
         assert!(text.contains("path=\"res://audio/baked/auto.wav\""));
+    }
+
+    #[test]
+    fn unique_names_never_overwrite() {
+        use crate::model::{Patch, Wave};
+        let mut project = crate::model::Project::demo("names");
+        project.patches = vec![
+            Patch::new_layer("Coin", Wave::Sine),
+            Patch::new_layer("coin", Wave::Sine),
+            Patch::new_layer("金币", Wave::Sine),
+            Patch::new_layer("金币 2", Wave::Sine),
+        ];
+        let names = unique_names(&project);
+        assert_eq!(names, vec!["coin", "coin_2", "sound", "sound_2"]);
+    }
+
+    #[test]
+    fn patch_metadata_and_tone_env_roundtrip() {
+        use crate::model::{Category, Layer, Patch, ToneEnv, Wave};
+        let mut layer = Layer::new(Wave::Sine);
+        layer.tone_env = ToneEnv::Exp;
+        layer.exp_decay = 7.5;
+        let patch = Patch {
+            name: "Laser Beam".into(),
+            category: Category::Magic,
+            normalize: false,
+            layers: vec![layer],
+            ..Patch::default()
+        };
+        let text = patch_tres(&patch);
+        assert!(text.contains("resource_name = \"Laser Beam\""));
+        assert!(text.contains("group = \"Magic\""));
+        assert!(text.contains("normalize_layers = false"));
+        let back = tres::parse_patch(&text).expect("parse");
+        assert_eq!(back.name, "Laser Beam");
+        assert_eq!(back.category, Category::Magic);
+        assert!(!back.normalize);
+        assert_eq!(back.layers[0].tone_env, ToneEnv::Exp);
+        assert!((back.layers[0].exp_decay - 7.5).abs() < 0.001);
+    }
+
+    fn temp_project_root(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "sfx-studio-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn bake_and_export_write_unique_assets_and_roundtrip_metadata() {
+        use crate::model::{Category, Patch, Wave};
+        let root = temp_project_root("export");
+        let mut project = crate::model::Project::demo("export");
+        project.patches.push(Patch::new_layer("coin", Wave::Sine));
+        project
+            .patches
+            .push(Patch::new_layer("Laser Beam", Wave::Square));
+        project.patches.last_mut().unwrap().category = Category::Magic;
+        project.patches.last_mut().unwrap().favorite = true;
+
+        bake(&project, &root).expect("bake");
+        assert!(root.join("audio/baked/music.wav").exists());
+        assert!(root.join("audio/baked/music.wav.import").exists());
+        assert!(root.join("audio/baked/laser_beam.wav").exists());
+        assert!(root.join("audio/sfx_manifest.json").exists());
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("audio/sfx_manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["schema_version"], crate::model::PROJECT_VERSION);
+        let names: Vec<_> = manifest["sounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|sound| sound["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"coin"));
+        assert!(names.contains(&"laser_beam"));
+
+        export_tres(&project, &root).expect("tres");
+        assert!(
+            root.join("audio/sfx/music.tres").exists() || root.join("audio/music.tres").exists()
+        );
+        let imported = crate::tres::import_project(&root).unwrap().unwrap();
+        let magic = imported
+            .patches
+            .iter()
+            .find(|patch| patch.name == "Laser Beam")
+            .expect("exported Laser Beam");
+        assert_eq!(magic.category, Category::Magic);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

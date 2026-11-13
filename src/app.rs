@@ -4,26 +4,18 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use igui_app::{App, AppConfig, AppLogic, EventContext, FrameContext, InitContext};
-use igui_backend_wgpu::FontConfig;
-use igui_core::{
-    Color, Cursor, EventResult, InputEvent, Key, Modifiers, PointerButton, Rect, Size, Vec2,
-};
-use igui_headless::{HeadlessPlugin, RecordingHandle};
+use igui_app::{AppLogic, EventContext, FrameContext, InitContext};
+use igui_core::{Cursor, EventResult, InputEvent, Key, Modifiers, PointerButton, Rect, Size, Vec2};
 use igui_render::PaintContext;
 use igui_ui::{ApproxTextMeasurer, TextMeasurer};
-use igui_winit::{
-    ClipboardPlugin, GpuConfig, KeyboardPlugin, PointerPlugin, TextMeasurePlugin, TitlebarMode,
-    WgpuPlugin, WindowConfig, WinitPlugin,
-};
 
 use crate::audio::AudioEngine;
 use crate::model::{
-    AutomationKind, Category, Clip, ClipField, Layer, LayerField, MusicField, MusicWave, Patch,
-    Project, Wave,
+    AutomationKind, Category, Clip, ClipField, Layer, LayerField, MusicField, Patch, Project, Wave,
 };
-use crate::synth;
-use crate::{export, model, theme, tres, ui};
+use crate::project_io::{display_name, open_folder};
+use crate::synth::{self, Envelope};
+use crate::{export, model, theme, ui};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
@@ -31,16 +23,27 @@ pub enum Tab {
     Music,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ModalAction {
     NewPatch,
     RenamePatch,
+    /// Discard the current dirty project and open this folder.
+    ConfirmOpen(PathBuf),
 }
 
 pub struct Modal {
     pub title: String,
     pub text: String,
     pub action: ModalAction,
+}
+
+impl Modal {
+    pub fn is_input(&self) -> bool {
+        matches!(
+            self.action,
+            ModalAction::NewPatch | ModalAction::RenamePatch
+        )
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -99,15 +102,29 @@ pub struct State {
     pub automation_lane: AutomationKind,
     pub patch_scroll: usize,
     pub layer_scroll: usize,
-    pub undo: Vec<Project>,
-    pub redo: Vec<Project>,
+    pub undo: Vec<(String, Project)>,
+    pub redo: Vec<(String, Project)>,
+    /// Project clone captured at pointer-down; committed on pointer-up only if
+    /// something actually changed.
+    pub pending_edit: Option<Project>,
     pub status: String,
     pub dirty: bool,
+    /// Patch/document revision; invalidates the patch render cache.
     pub version: u64,
+    /// Music revision; invalidates the music render cache independently.
+    pub music_version: u64,
+    /// Pure view revision (selection/scroll/playhead); never renders audio.
+    pub view_version: u64,
     pub cache_version: u64,
+    pub music_cache_version: u64,
     pub cache_rate: u32,
+    pub music_cache_rate: u32,
     pub cache: Vec<f32>,
+    pub cache_peak: f32,
+    pub cache_envelope: Envelope,
     pub music_cache: Vec<f32>,
+    pub music_cache_peak: f32,
+    pub music_envelope: Envelope,
     pub loop_play: bool,
     pub playhead: f32,
     pub seeked: bool,
@@ -122,11 +139,18 @@ pub struct State {
     pub audio_rate: u32,
     pub cursor: Vec2,
     pub toast: Option<(String, Instant)>,
+    /// Time of the last actual preview render; throttles drag-time renders.
+    pub last_render: Instant,
     pub category_filter: Option<Category>,
     pub favorites_only: bool,
     pub search: String,
     pub search_focus: bool,
     pub inspector_scroll: f32,
+    /// Top-left system menu (all file/export actions live here).
+    pub menu_open: bool,
+    /// Defer the next preview render by one frame so the shell/tab paints
+    /// before a potentially slow music/patch render blocks the UI thread.
+    pub defer_render: bool,
 }
 
 impl State {
@@ -144,13 +168,22 @@ impl State {
             layer_scroll: 0,
             undo: Vec::new(),
             redo: Vec::new(),
+            pending_edit: None,
             status: "OPEN a Godot project folder · demo loaded".into(),
             dirty: false,
             version: 1,
+            music_version: 1,
+            view_version: 1,
             cache_version: 0,
-            cache_rate: 0,
+            music_cache_version: 0,
+            cache_rate: 22050,
+            music_cache_rate: 11025,
             cache: Vec::new(),
+            cache_peak: 0.0,
+            cache_envelope: Envelope::default(),
             music_cache: Vec::new(),
+            music_cache_peak: 0.0,
+            music_envelope: Envelope::default(),
             loop_play: false,
             playhead: 0.0,
             seeked: false,
@@ -165,11 +198,14 @@ impl State {
             audio_rate: 22050,
             cursor: Vec2::ZERO,
             toast: None,
+            last_render: Instant::now(),
             category_filter: None,
             favorites_only: false,
             search: String::new(),
             search_focus: false,
             inspector_scroll: 0.0,
+            menu_open: false,
+            defer_render: true,
         }
     }
 
@@ -216,11 +252,21 @@ impl State {
 
     pub fn mark_dirty(&mut self) {
         self.version = self.version.wrapping_add(1);
+        self.view_version = self.view_version.wrapping_add(1);
+        self.redo.clear();
+        self.dirty = true;
+    }
+
+    /// Music edits only invalidate the music cache; patch previews stay warm.
+    pub fn mark_music_dirty(&mut self) {
+        self.music_version = self.music_version.wrapping_add(1);
+        self.view_version = self.view_version.wrapping_add(1);
+        self.redo.clear();
         self.dirty = true;
     }
 
     pub fn bump_view(&mut self) {
-        self.version = self.version.wrapping_add(1);
+        self.view_version = self.view_version.wrapping_add(1);
     }
 
     pub fn select_patch(&mut self, index: usize) {
@@ -231,6 +277,10 @@ impl State {
                 .selected_layer
                 .min(self.project.patches[index].layers.len().saturating_sub(1));
             self.bump_view();
+            // Selecting a different patch must re-render the preview even
+            // though the document itself is unchanged.
+            self.cache_version = 0;
+            self.defer_render = true;
             self.playhead = 0.0;
             self.seeked = false;
             self.selected_clip = None;
@@ -253,8 +303,7 @@ impl State {
     }
 
     pub fn ensure_visible(&mut self) {
-        let body_h = self.viewport.height - theme::TOP_H - theme::STATUS_H - theme::PAD_H;
-        let patch_capacity = (((body_h - 76.0 - 28.0 - 8.0) / 24.0).floor() as usize).max(1);
+        let patch_capacity = ui::library_capacity(self.viewport);
         let visible = self.visible_patches();
         let position = visible
             .iter()
@@ -269,8 +318,7 @@ impl State {
             .patch_scroll
             .min(visible.len().saturating_sub(patch_capacity));
 
-        let timeline_h = (body_h - theme::HEADER_H - theme::AUTOMATION_H - 152.0).max(180.0);
-        let layer_capacity = (((timeline_h - ui::RULER_H) / ui::TRACK_H).floor() as usize).max(1);
+        let layer_capacity = ui::layer_capacity(self.viewport);
         if self.selected_layer < self.layer_scroll {
             self.layer_scroll = self.selected_layer;
         } else if self.selected_layer >= self.layer_scroll + layer_capacity {
@@ -278,38 +326,78 @@ impl State {
         }
     }
 
-    pub fn push_undo(&mut self) {
-        self.undo.push(self.project.clone());
+    /// Capture the pre-edit state once per pointer gesture. The snapshot is
+    /// only pushed if the project actually changes (see [`Self::commit_edit`]).
+    pub fn begin_edit(&mut self) {
+        if self.pending_edit.is_none() {
+            self.pending_edit = Some(self.project.clone());
+        }
+    }
+
+    /// Commit a gesture snapshot. No-op clicks / drags that change nothing do
+    /// not pollute the undo stack.
+    pub fn commit_edit(&mut self) {
+        let Some(before) = self.pending_edit.take() else {
+            return;
+        };
+        if before != self.project {
+            self.push_snapshot("edit", before);
+        }
+    }
+
+    fn push_snapshot(&mut self, label: impl Into<String>, project: Project) {
+        self.undo.push((label.into(), project));
         if self.undo.len() > 64 {
             self.undo.remove(0);
         }
         self.redo.clear();
     }
 
-    pub fn undo(&mut self) {
-        if let Some(previous) = self.undo.pop() {
-            self.redo.push(self.project.clone());
-            self.project = previous;
-            self.clamp_selection();
-            self.mark_dirty();
-            self.cache_version = 0;
-            self.playhead = 0.0;
-            self.seeked = false;
-            self.ensure_visible();
-        }
+    pub fn push_undo(&mut self) {
+        self.push_undo_label("edit");
     }
 
-    pub fn redo(&mut self) {
-        if let Some(next) = self.redo.pop() {
-            self.undo.push(self.project.clone());
-            self.project = next;
-            self.clamp_selection();
-            self.mark_dirty();
-            self.cache_version = 0;
-            self.playhead = 0.0;
-            self.seeked = false;
-            self.ensure_visible();
+    pub fn push_undo_label(&mut self, label: impl Into<String>) {
+        self.commit_edit();
+        self.push_snapshot(label, self.project.clone());
+    }
+
+    pub fn undo(&mut self) -> Option<String> {
+        self.commit_edit();
+        let (label, previous) = self.undo.pop()?;
+        self.redo.push((label.clone(), self.project.clone()));
+        self.project = previous;
+        self.clamp_selection();
+        self.invalidate_document();
+        Some(label)
+    }
+
+    pub fn redo(&mut self) -> Option<String> {
+        self.commit_edit();
+        let (label, next) = self.redo.pop()?;
+        self.undo.push((label.clone(), self.project.clone()));
+        if self.undo.len() > 64 {
+            self.undo.remove(0);
         }
+        self.project = next;
+        self.clamp_selection();
+        self.invalidate_document();
+        Some(label)
+    }
+
+    fn invalidate_document(&mut self) {
+        // Undo/redo must keep the opposite stack alive, so this deliberately
+        // does not go through `mark_dirty` (which clears redo).
+        self.version = self.version.wrapping_add(1);
+        self.music_version = self.music_version.wrapping_add(1);
+        self.view_version = self.view_version.wrapping_add(1);
+        self.dirty = true;
+        self.cache_version = 0;
+        self.music_cache_version = 0;
+        self.defer_render = true;
+        self.playhead = 0.0;
+        self.seeked = false;
+        self.ensure_visible();
     }
 
     fn clamp_selection(&mut self) {
@@ -352,201 +440,62 @@ impl State {
     }
 
     pub fn ensure_cache(&mut self, rate: u32) {
-        if self.cache_version == self.version && self.cache_rate == rate {
+        const ENVELOPE_BINS: usize = 2048;
+        let want_patch = self.tab == Tab::Patches;
+        let want_music = self.tab == Tab::Music;
+        let patch_dirty =
+            want_patch && (self.cache_version != self.version || self.cache_rate != rate);
+        let music_dirty = want_music
+            && (self.music_cache_version != self.music_version || self.music_cache_rate != rate);
+        if !patch_dirty && !music_dirty {
             return;
         }
-        self.cache = self
-            .patch()
-            .map(|patch| synth::render_patch(patch, rate))
-            .unwrap_or_default();
-        self.music_cache = synth::render_music(&self.project.music, rate);
-        self.cache_version = self.version;
-        self.cache_rate = rate;
+        if patch_dirty {
+            self.cache = self
+                .patch()
+                .map(|patch| synth::render_patch(patch, rate))
+                .unwrap_or_default();
+            self.cache_peak = synth::peak(&self.cache);
+            self.cache_envelope = synth::envelope(&self.cache, ENVELOPE_BINS);
+            self.cache_version = self.version;
+            self.cache_rate = rate;
+        }
+        if music_dirty {
+            self.music_cache = synth::render_music(&self.project.music, rate);
+            self.music_cache_peak = synth::peak(&self.music_cache);
+            self.music_envelope = synth::envelope(&self.music_cache, ENVELOPE_BINS);
+            self.music_cache_version = self.music_version;
+            self.music_cache_rate = rate;
+        }
+        self.last_render = Instant::now();
+    }
+
+    /// Render at most ~12×/s while a slider is being dragged. `play()` always
+    /// calls [`Self::ensure_cache`] directly, so pressing play never waits.
+    pub fn ensure_cache_soon(&mut self, rate: u32) {
+        let already_rendered = self.cache_version != 0 || self.music_cache_version != 0;
+        if already_rendered && self.last_render.elapsed() < Duration::from_millis(80) {
+            return;
+        }
+        self.ensure_cache(rate);
+    }
+
+    /// True when the active tab's preview cache is stale. Used by
+    /// `needs_frame` so the deferred render gets a follow-up frame.
+    pub fn preview_pending(&self) -> bool {
+        let rate = self.preview_rate();
+        match self.tab {
+            Tab::Patches => self.cache_version != self.version || self.cache_rate != rate,
+            Tab::Music => {
+                self.music_cache_version != self.music_version || self.music_cache_rate != rate
+            }
+        }
     }
 
     pub fn toast(&mut self, text: impl Into<String>) {
         let text = text.into();
         self.status = text.clone();
         self.toast = Some((text, Instant::now() + Duration::from_secs(4)));
-    }
-}
-
-pub fn run() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|arg| arg == "--selfcheck") {
-        selfcheck();
-        return;
-    }
-    if let Some(index) = args.iter().position(|arg| arg == "--bake") {
-        if let Some(path) = args.get(index + 1) {
-            let folder = PathBuf::from(path);
-            let project =
-                model::load_project(&folder).unwrap_or_else(|| tres::import_project(&folder));
-            match export::bake(&project, &folder) {
-                Ok(message) => println!("{message}"),
-                Err(error) => {
-                    eprintln!("bake failed: {error}");
-                    std::process::exit(1);
-                }
-            }
-        }
-        return;
-    }
-    if let Some(index) = args.iter().position(|arg| arg == "--export") {
-        if let Some(path) = args.get(index + 1) {
-            let folder = PathBuf::from(path);
-            let project =
-                model::load_project(&folder).unwrap_or_else(|| tres::import_project(&folder));
-            match export::export_tres(&project, &folder) {
-                Ok(message) => println!("{message}"),
-                Err(error) => {
-                    eprintln!("export failed: {error}");
-                    std::process::exit(1);
-                }
-            }
-        }
-        return;
-    }
-    if let Some(index) = args.iter().position(|arg| arg == "--dump") {
-        if let Some(path) = args.get(index + 1) {
-            let folder = PathBuf::from(path);
-            let project =
-                model::load_project(&folder).unwrap_or_else(|| tres::import_project(&folder));
-            println!(
-                "{}: {} patches, music {} bpm / {} bars",
-                project.name,
-                project.patches.len(),
-                project.music.bpm,
-                project.music.bars
-            );
-            for patch in &project.patches {
-                let layer = patch.layers.first();
-                println!(
-                    "  {:<14} layers={} wave={} duration={:.3}s gain={:.2}",
-                    patch.name,
-                    patch.layers.len(),
-                    layer.map(|l| l.wave.label()).unwrap_or("—"),
-                    patch.end(),
-                    layer.map(|l| l.gain).unwrap_or(0.0)
-                );
-            }
-        } else {
-            eprintln!("--dump needs a project folder");
-            std::process::exit(2);
-        }
-        return;
-    }
-    let mut state = State::new();
-    if let Some(index) = args.iter().position(|arg| arg == "--project") {
-        if let Some(path) = args.get(index + 1) {
-            open_folder(&mut state, PathBuf::from(path));
-        }
-    }
-    build_app(state, false).run();
-}
-
-fn build_app(state: State, headless: bool) -> App {
-    let builder = App::new(AppConfig {
-        title: "SFX LAB".into(),
-        size: (theme::VIEW_W as f64, theme::VIEW_H as f64),
-        ..Default::default()
-    });
-    let builder = if headless {
-        builder.plugin(HeadlessPlugin::new(theme::VIEW_W, theme::VIEW_H))
-    } else {
-        builder
-            .plugin(WinitPlugin::new(WindowConfig {
-                title: "SFX LAB".into(),
-                size: (theme::VIEW_W as f64, theme::VIEW_H as f64),
-                titlebar: TitlebarMode::Native,
-                ime: false,
-            }))
-            .plugin(WgpuPlugin::new(GpuConfig {
-                clear_color: theme::BG,
-                font: FontConfig {
-                    default_family: Some("Helvetica Neue".into()),
-                    device_pixel_rasterization: true,
-                    em_size: true,
-                    ..Default::default()
-                },
-                ..Default::default()
-            }))
-            .plugin(PointerPlugin)
-            .plugin(KeyboardPlugin)
-            .plugin(TextMeasurePlugin)
-            .plugin(ClipboardPlugin)
-    };
-    builder.logic(SfxLogic::new(state)).build()
-}
-
-fn selfcheck() {
-    let mut app = build_app(State::new(), true);
-    let recording = app
-        .services()
-        .get::<RecordingHandle>()
-        .expect("headless recording handle")
-        .0
-        .clone();
-    app.run_headless(2);
-    let recording = recording.borrow();
-    let frames = recording.frame_count();
-    let (commands, text_commands, labels, in_bounds, parameters_visible) = recording
-        .last_frame()
-        .map(|frame| {
-            let mut texts = 0;
-            let mut labels = Vec::new();
-            let mut in_bounds = true;
-            let mut parameters_visible = false;
-            for command in frame.commands() {
-                if let igui_render::DrawCommand::DrawText { text, position, .. } = command {
-                    texts += 1;
-                    labels.push(text.clone());
-                    if text == "PARAMETERS" && position.x >= theme::VIEW_W - theme::RIGHT_W {
-                        parameters_visible = true;
-                    }
-                    if position.x < 0.0
-                        || position.y < 0.0
-                        || position.x > theme::VIEW_W
-                        || position.y > theme::VIEW_H
-                    {
-                        in_bounds = false;
-                    }
-                }
-            }
-            (
-                frame.command_count(),
-                texts,
-                labels,
-                in_bounds,
-                parameters_visible,
-            )
-        })
-        .unwrap_or((0, 0, Vec::new(), false, false));
-    let required = [
-        "SFX LAB",
-        "LIBRARY",
-        "PARAMETERS",
-        "TRIGGER PAD",
-        "SOUND",
-        "MUSIC",
-    ];
-    let labels_ok = required
-        .iter()
-        .all(|needle| labels.iter().any(|text| text == needle));
-    println!(
-        "sfx-studio selfcheck: {frames} frames, {commands} commands, {text_commands} text runs"
-    );
-    if frames == 0
-        || commands < 100
-        || text_commands < 20
-        || !labels_ok
-        || !in_bounds
-        || !parameters_visible
-    {
-        eprintln!(
-            "selfcheck failed: labels_ok={labels_ok} in_bounds={in_bounds} parameters_visible={parameters_visible}"
-        );
-        std::process::exit(1);
     }
 }
 
@@ -557,7 +506,7 @@ pub struct SfxLogic {
 }
 
 impl SfxLogic {
-    fn new(mut state: State) -> Self {
+    pub(crate) fn new(mut state: State) -> Self {
         let audio = AudioEngine::new();
         if let Some(engine) = &audio {
             state.audio_ok = true;
@@ -575,6 +524,8 @@ impl SfxLogic {
 
     fn activate(&mut self, action: ui::Action) {
         use ui::Action as A;
+        self.state.menu_open = false;
+        self.state.commit_edit();
         let snapshot = matches!(
             action,
             A::DeletePatch
@@ -585,6 +536,7 @@ impl SfxLogic {
                 | A::SetWave(_)
                 | A::SetFilter(_)
                 | A::SetEnv(_)
+                | A::SetToneEnv(_)
                 | A::BassWave(_)
                 | A::ArpWave(_)
                 | A::TogglePatterns
@@ -613,12 +565,14 @@ impl SfxLogic {
             A::TabPatches => {
                 self.state.tab = Tab::Patches;
                 self.state.inspector_scroll = 0.0;
+                self.state.defer_render = true;
                 self.state.bump_view();
                 self.state.playhead = 0.0;
             }
             A::TabMusic => {
                 self.state.tab = Tab::Music;
                 self.state.inspector_scroll = 0.0;
+                self.state.defer_render = true;
                 self.state.bump_view();
                 self.state.playhead = 0.0;
             }
@@ -715,29 +669,35 @@ impl SfxLogic {
                     self.state.mark_dirty();
                 }
             }
+            A::SetToneEnv(tone_env) => {
+                if let Some(layer) = self.state.layer_mut() {
+                    layer.tone_env = tone_env;
+                    self.state.mark_dirty();
+                }
+            }
             A::BassWave(wave) => {
                 self.state.project.music.bass_wave = wave;
-                self.state.mark_dirty();
+                self.state.mark_music_dirty();
             }
             A::ArpWave(wave) => {
                 self.state.project.music.arp_wave = wave;
-                self.state.mark_dirty();
+                self.state.mark_music_dirty();
             }
             A::TogglePatterns => {
                 self.state.project.music.use_patterns = !self.state.project.music.use_patterns;
-                self.state.mark_dirty();
+                self.state.mark_music_dirty();
             }
             A::ChordPreset(index) => {
                 apply_chord_preset(&mut self.state.project.music, index);
-                self.state.mark_dirty();
+                self.state.mark_music_dirty();
             }
             A::Transpose(delta) => {
                 self.state.project.music.transpose(delta);
-                self.state.mark_dirty();
+                self.state.mark_music_dirty();
             }
             A::ResetPatterns => {
                 self.state.project.music.reset_patterns();
-                self.state.mark_dirty();
+                self.state.mark_music_dirty();
             }
             A::AddClip => {
                 let playhead = self.state.playhead;
@@ -774,8 +734,16 @@ impl SfxLogic {
                 self.state.selected_env_point = None;
                 self.state.bump_view();
             }
-            A::Undo => self.state.undo(),
-            A::Redo => self.state.redo(),
+            A::Undo => {
+                if let Some(label) = self.state.undo() {
+                    self.state.toast(format!("undo {label}"));
+                }
+            }
+            A::Redo => {
+                if let Some(label) = self.state.redo() {
+                    self.state.toast(format!("redo {label}"));
+                }
+            }
         }
         self.state.ensure_visible();
     }
@@ -791,21 +759,55 @@ impl SfxLogic {
         else {
             return;
         };
-        open_folder(&mut self.state, folder);
-        self.state.toast("project loaded");
+        if self.state.dirty {
+            self.state.modal = Some(Modal {
+                title: "DISCARD CHANGES?".into(),
+                text: folder.display().to_string(),
+                action: ModalAction::ConfirmOpen(folder),
+            });
+            self.state.bump_view();
+            return;
+        }
+        self.open_folder_now(folder);
+    }
+
+    fn open_folder_now(&mut self, folder: PathBuf) {
+        match open_folder(&mut self.state, folder) {
+            Ok(warnings) => {
+                let message = if warnings.is_empty() {
+                    "project loaded".to_string()
+                } else {
+                    format!("project loaded · {}", warnings.join("; "))
+                };
+                self.state.toast(message);
+            }
+            Err(error) => self.state.toast(format!("open failed: {error}")),
+        }
     }
 
     fn save(&mut self) {
         let Some(root) = self.ensure_root() else {
             return;
         };
+        self.state.project.migrate();
+        let warnings = self.state.project.validate();
+        // Validation may clamp values; make the rendered preview match what
+        // was just persisted.
+        self.state.cache_version = 0;
+        self.state.music_cache_version = 0;
         match model::save_project(&root, &self.state.project) {
             Ok(()) => {
                 self.state.dirty = false;
-                self.state.toast(format!(
-                    "saved {}",
-                    root.join(model::PROJECT_FILE).display()
-                ));
+                let message = if warnings.is_empty() {
+                    format!("saved {}", root.join(model::PROJECT_FILE).display())
+                } else {
+                    format!(
+                        "saved {} · {}",
+                        root.join(model::PROJECT_FILE).display(),
+                        warnings.join("; ")
+                    )
+                };
+                self.state.toast(message);
             }
             Err(error) => self.state.toast(format!("save failed: {error}")),
         }
@@ -875,7 +877,6 @@ impl SfxLogic {
         let Some(base) = self.state.patch().cloned() else {
             return;
         };
-        self.push_undo();
         let start = self.state.selected_patch;
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -995,26 +996,24 @@ impl SfxLogic {
     fn play(&mut self) {
         let rate = self.state.preview_rate();
         self.state.ensure_cache(rate);
+        self.state.defer_render = false;
         let Some(audio) = &self.audio else {
             self.state.toast("no audio device");
             return;
         };
         match self.state.tab {
             Tab::Patches => {
-                let mut samples = self.state.cache.clone();
+                let samples = self.state.cache.clone();
                 let offset = if self.state.seeked {
                     (self.state.playhead * rate as f32) as usize
                 } else {
                     0
                 };
-                if offset < samples.len() {
-                    samples.drain(0..offset);
-                }
-                if samples.is_empty() {
+                if samples.is_empty() || offset >= samples.len() {
                     self.state.toast("nothing to play");
                     return;
                 }
-                audio.play(samples, self.state.loop_play);
+                audio.play(samples, offset, self.state.loop_play);
                 if !self.state.seeked {
                     self.state.playhead = 0.0;
                 }
@@ -1025,12 +1024,26 @@ impl SfxLogic {
                 for sample in &mut samples {
                     *sample *= gain;
                 }
-                audio.play(samples, true);
+                audio.play(samples, 0, true);
                 self.state.playhead = 0.0;
             }
         }
         self.state.seeked = false;
         self.state.was_playing = true;
+    }
+
+    /// Seek while paused. Stopping the stream avoids the UI and the audio
+    /// thread disagreeing about the current position.
+    fn seek(&mut self, time: f32) {
+        if let Some(audio) = &self.audio {
+            if audio.is_playing() {
+                audio.stop();
+            }
+        }
+        self.state.was_playing = false;
+        self.state.playhead = time.max(0.0);
+        self.state.seeked = true;
+        self.state.bump_view();
     }
 
     fn stop(&mut self) {
@@ -1046,9 +1059,11 @@ impl SfxLogic {
         let Some(modal) = self.state.modal.take() else {
             return;
         };
-        let name = model::sanitize(&modal.text);
+        let name = display_name(&modal.text);
         match modal.action {
+            ModalAction::ConfirmOpen(folder) => self.open_folder_now(folder),
             ModalAction::NewPatch => {
+                self.push_undo();
                 self.state
                     .project
                     .patches
@@ -1069,22 +1084,24 @@ impl SfxLogic {
     }
 
     fn handle_modal(&mut self, event: &InputEvent) -> bool {
-        if self.state.modal.is_none() {
+        let Some(input) = self.state.modal.as_ref().map(Modal::is_input) else {
             return false;
-        }
+        };
         match event {
             InputEvent::TextInput { text } => {
-                if let Some(modal) = self.state.modal.as_mut() {
-                    for ch in text.chars() {
-                        if !ch.is_control() && modal.text.len() < 48 {
-                            modal.text.push(ch);
+                if input {
+                    if let Some(modal) = self.state.modal.as_mut() {
+                        for ch in text.chars() {
+                            if !ch.is_control() && modal.text.len() < 48 {
+                                modal.text.push(ch);
+                            }
                         }
                     }
                 }
                 true
             }
             InputEvent::KeyDown { key } => match key {
-                Key::Backspace => {
+                Key::Backspace if input => {
                     if let Some(modal) = self.state.modal.as_mut() {
                         modal.text.pop();
                     }
@@ -1188,7 +1205,12 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::Escape => {
-                        self.stop();
+                        if self.state.menu_open {
+                            self.state.menu_open = false;
+                            self.state.bump_view();
+                        } else {
+                            self.stop();
+                        }
                         return EventResult::Handled;
                     }
                     Key::Delete => {
@@ -1317,6 +1339,30 @@ impl AppLogic for SfxLogic {
                 if pointer_hit != Some(ui::Hit::Search) {
                     self.state.search_focus = false;
                 }
+                if self.state.menu_open {
+                    match pointer_hit {
+                        Some(ui::Hit::MenuToggle) => {
+                            self.state.menu_open = false;
+                        }
+                        Some(ui::Hit::MenuItem(action)) => {
+                            self.state.menu_open = false;
+                            self.activate(action);
+                        }
+                        Some(ui::Hit::MenuPanel) => {}
+                        _ => {
+                            // Click outside closes the menu without also
+                            // activating whatever is underneath it.
+                            self.state.menu_open = false;
+                        }
+                    }
+                    self.state.bump_view();
+                    return EventResult::Handled;
+                }
+                if pointer_hit == Some(ui::Hit::MenuToggle) {
+                    self.state.menu_open = true;
+                    self.state.bump_view();
+                    return EventResult::Handled;
+                }
                 match pointer_hit {
                     Some(ui::Hit::Search) => {
                         self.state.search_focus = true;
@@ -1325,10 +1371,6 @@ impl AppLogic for SfxLogic {
                     Some(ui::Hit::Action(action)) => {
                         self.state.hover = Some(action);
                         self.activate(action);
-                        return EventResult::Handled;
-                    }
-                    Some(ui::Hit::Pad(index)) => {
-                        self.trigger_pad(index);
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::CategoryFilter) => {
@@ -1340,7 +1382,7 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::LayerField(field)) => {
-                        self.push_undo();
+                        self.state.begin_edit();
                         self.set_param_from_x(*position, ui::Hit::LayerField(field), &layout);
                         self.state.drag = Drag::Layer {
                             field,
@@ -1349,7 +1391,7 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::MusicField(field)) => {
-                        self.push_undo();
+                        self.state.begin_edit();
                         self.set_param_from_x(*position, ui::Hit::MusicField(field), &layout);
                         self.state.drag = Drag::Music {
                             field,
@@ -1359,7 +1401,7 @@ impl AppLogic for SfxLogic {
                     }
                     Some(ui::Hit::ClipField(field)) => {
                         if let Some(index) = self.state.selected_clip {
-                            self.push_undo();
+                            self.state.begin_edit();
                             self.set_param_from_x(*position, ui::Hit::ClipField(field), &layout);
                             self.state.drag = Drag::ClipField {
                                 layer: self.state.selected_layer,
@@ -1379,7 +1421,7 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::Timeline { layer, clip, mode }) => {
-                        self.push_undo();
+                        self.state.begin_edit();
                         self.state.select_layer(layer);
                         let mut index = clip;
                         if index.is_none() {
@@ -1409,17 +1451,13 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::Ruler(time)) => {
-                        self.state.playhead = time;
-                        self.state.seeked = true;
                         self.state.drag = Drag::Seek { waveform: false };
-                        self.state.bump_view();
+                        self.seek(time);
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::Waveform(time)) => {
-                        self.state.playhead = time;
-                        self.state.seeked = true;
                         self.state.drag = Drag::Seek { waveform: true };
-                        self.state.bump_view();
+                        self.seek(time);
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::InspectorScrollbar) => {
@@ -1437,7 +1475,7 @@ impl AppLogic for SfxLogic {
                     }
                     Some(ui::Hit::AutomationPoint(index)) => {
                         if let Some(clip) = self.state.selected_clip {
-                            self.push_undo();
+                            self.state.begin_edit();
                             self.state.selected_env_point = Some(index);
                             self.state.drag = Drag::AutomationPoint {
                                 layer: self.state.selected_layer,
@@ -1447,9 +1485,14 @@ impl AppLogic for SfxLogic {
                         }
                         return EventResult::Handled;
                     }
+                    Some(ui::Hit::MenuToggle)
+                    | Some(ui::Hit::MenuItem(_))
+                    | Some(ui::Hit::MenuPanel) => {
+                        return EventResult::Handled;
+                    }
                     Some(ui::Hit::AutomationLane { time, value }) => {
                         if let Some(clip_index) = self.state.selected_clip {
-                            self.push_undo();
+                            self.state.begin_edit();
                             let layer_index = self.state.selected_layer;
                             let kind = self.state.automation_lane;
                             let mut added = None;
@@ -1488,6 +1531,7 @@ impl AppLogic for SfxLogic {
                 return EventResult::Handled;
             }
             InputEvent::PointerLeave => {
+                self.state.commit_edit();
                 self.state.hover = None;
                 self.state.hover_hit = None;
                 return EventResult::Handled;
@@ -1540,13 +1584,14 @@ impl AppLogic for SfxLogic {
                         self.push_undo();
                         let default = model::Music::default();
                         field.set(&mut self.state.project.music, field.get(&default));
-                        self.state.mark_dirty();
+                        self.state.mark_music_dirty();
                     }
                     _ => {}
                 }
                 return EventResult::Handled;
             }
             InputEvent::PointerUp { position, .. } => {
+                self.state.commit_edit();
                 self.state.drag = Drag::None;
                 self.state.hover_hit = ui::hit(&self.state, &layout, *position);
                 return EventResult::Handled;
@@ -1557,9 +1602,7 @@ impl AppLogic for SfxLogic {
                 let rows = (delta.y.abs() / 24.0).max(1.0) as i32;
                 let step = if delta.y > 0.0 { -rows } else { rows };
                 if layout.left.contains(*position) {
-                    let body_h =
-                        self.state.viewport.height - theme::TOP_H - theme::STATUS_H - theme::PAD_H;
-                    let capacity = (((body_h - 76.0 - 28.0 - 8.0) / 24.0).floor() as usize).max(1);
+                    let capacity = ui::library_capacity(self.state.viewport);
                     let max_start = self.state.visible_patches().len().saturating_sub(capacity);
                     self.state.patch_scroll =
                         (self.state.patch_scroll as i32 + step).clamp(0, max_start as i32) as usize;
@@ -1574,7 +1617,8 @@ impl AppLogic for SfxLogic {
                 }
                 if layout.timeline.contains(*position) {
                     if let Some(patch) = self.state.patch() {
-                        let max_start = patch.layers.len().saturating_sub(9);
+                        let capacity = ui::layer_capacity(self.state.viewport);
+                        let max_start = patch.layers.len().saturating_sub(capacity);
                         self.state.layer_scroll = (self.state.layer_scroll as i32 + rows)
                             .clamp(0, max_start as i32)
                             as usize;
@@ -1596,7 +1640,11 @@ impl AppLogic for SfxLogic {
             }
         }
         let rate = self.state.preview_rate();
-        self.state.ensure_cache(rate);
+        if self.state.defer_render {
+            self.state.defer_render = false;
+        } else {
+            self.state.ensure_cache_soon(rate);
+        }
         if let Some(audio) = &self.audio {
             let playing = audio.is_playing();
             if playing {
@@ -1624,10 +1672,13 @@ impl AppLogic for SfxLogic {
     }
 
     fn needs_frame(&self) -> bool {
-        self.audio
-            .as_ref()
-            .map(|audio| audio.is_playing())
-            .unwrap_or(false)
+        self.state.defer_render
+            || self.state.preview_pending()
+            || self
+                .audio
+                .as_ref()
+                .map(|audio| audio.is_playing())
+                .unwrap_or(false)
     }
 
     fn cursor(&self) -> Option<Cursor> {
@@ -1661,10 +1712,12 @@ impl AppLogic for SfxLogic {
             }
             Some(
                 ui::Hit::Action(_)
+                | ui::Hit::MenuToggle
+                | ui::Hit::MenuItem(_)
+                | ui::Hit::MenuPanel
                 | ui::Hit::PatchRow(_)
                 | ui::Hit::LayerRow(_)
                 | ui::Hit::Pattern(_, _)
-                | ui::Hit::Pad(_)
                 | ui::Hit::CategoryFilter
                 | ui::Hit::FavoriteFilter,
             ) => Some(Cursor::Pointer),
@@ -1682,8 +1735,8 @@ impl SfxLogic {
         let t = ((position.x - track.left()) / track.size.width.max(1.0)).clamp(0.0, 1.0);
         match target {
             ui::Hit::LayerField(field) => {
-                let (min, max, step) = field.range();
-                let value = snap_to(min + t * (max - min), step).clamp(min, max);
+                let spec = field.spec();
+                let value = spec.snap(field.denorm(t)).clamp(spec.min, spec.max);
                 if let Some(layer) = self.state.layer_mut() {
                     field.set(layer, value);
                     self.state.mark_dirty();
@@ -1698,8 +1751,8 @@ impl SfxLogic {
                         .and_then(|patch| patch.layers.get(layer_index))
                         .map(|layer| layer.duration)
                         .unwrap_or(3.0);
-                    let (min, max, step) = field.range();
-                    let value = snap_to(min + t * (max - min), step).clamp(min, max);
+                    let spec = field.spec();
+                    let value = spec.snap(field.denorm(t)).clamp(spec.min, spec.max);
                     if let Some(clip) = self
                         .state
                         .patch_mut()
@@ -1713,10 +1766,10 @@ impl SfxLogic {
                 }
             }
             ui::Hit::MusicField(field) => {
-                let (min, max, step) = field.range();
-                let value = snap_to(min + t * (max - min), step).clamp(min, max);
+                let spec = field.spec();
+                let value = spec.snap(field.denorm(t)).clamp(spec.min, spec.max);
                 field.set(&mut self.state.project.music, value);
-                self.state.mark_dirty();
+                self.state.mark_music_dirty();
             }
             _ => {}
         }
@@ -1755,7 +1808,7 @@ impl SfxLogic {
                     let delta = (position.x - last_x) * step * fine;
                     let old = field.get(&self.state.project.music);
                     field.set(&mut self.state.project.music, old + delta);
-                    self.state.mark_dirty();
+                    self.state.mark_music_dirty();
                 } else {
                     self.set_param_from_x(position, ui::Hit::MusicField(field), layout);
                 }
@@ -1806,9 +1859,7 @@ impl SfxLogic {
                 } else {
                     layout.x_time(position.x).clamp(0.0, total)
                 };
-                self.state.playhead = time;
-                self.state.seeked = true;
-                self.state.bump_view();
+                self.seek(time);
                 self.state.drag = Drag::Seek { waveform };
             }
             Drag::InspectorScroll {
@@ -1922,20 +1973,6 @@ impl SfxLogic {
     }
 }
 
-fn open_folder(state: &mut State, folder: PathBuf) {
-    let project = model::load_project(&folder).unwrap_or_else(|| tres::import_project(&folder));
-    state.project = project;
-    state.root = Some(folder);
-    state.selected_patch = 0;
-    state.selected_layer = 0;
-    state.tab = Tab::Patches;
-    state.playhead = 0.0;
-    state.seeked = false;
-    state.dirty = false;
-    state.version = state.version.wrapping_add(1);
-    state.cache_version = 0;
-}
-
 fn param_row_rect(layout: &ui::Layout, target: ui::Hit) -> Option<Rect> {
     for item in &layout.items {
         if let ui::Item::Param { hit, rect, .. } = item {
@@ -1945,14 +1982,6 @@ fn param_row_rect(layout: &ui::Layout, target: ui::Hit) -> Option<Rect> {
         }
     }
     None
-}
-
-fn snap_to(value: f32, step: f32) -> f32 {
-    if step > 0.0 {
-        (value / step).round() * step
-    } else {
-        value
-    }
 }
 
 fn randomize_layer(layer: &mut Layer, rng: &mut synth::Rng, amount: f32) {
@@ -2086,9 +2115,6 @@ fn toggle_pattern(music: &mut model::Music, row: ui::PatternRow, step: usize) {
     }
 }
 
-#[allow(dead_code)]
-fn _keep(_: Color, _: MusicWave) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2164,15 +2190,85 @@ mod tests {
     }
 
     #[test]
+    fn display_names_keep_unicode() {
+        assert_eq!(display_name("  Laser 01 "), "Laser 01");
+        assert_eq!(display_name("金币 01"), "金币 01");
+        assert_eq!(display_name("   "), "patch");
+        assert_eq!(crate::model::sanitize("金币 01"), "sound");
+    }
+
+    #[test]
+    fn startup_render_is_deferred_and_then_resolved() {
+        let mut state = State::new();
+        assert!(state.defer_render);
+        assert!(state.preview_pending());
+        state.ensure_cache(state.preview_rate());
+        assert!(!state.preview_pending());
+        state.select_patch(1);
+        assert!(state.defer_render);
+        assert!(state.preview_pending());
+    }
+
+    #[test]
+    fn view_changes_do_not_rerender_audio() {
+        let mut state = State::new();
+        state.ensure_cache(8000);
+        let rendered = state.cache_version;
+        let samples = state.cache.len();
+        state.bump_view();
+        state.ensure_cache(8000);
+        assert_eq!(state.cache_version, rendered);
+        assert_eq!(state.cache.len(), samples);
+        state.mark_dirty();
+        state.ensure_cache(8000);
+        assert_ne!(state.cache_version, rendered);
+    }
+
+    #[test]
+    fn clicking_the_cutoff_track_midpoint_uses_a_log_curve() {
+        let mut logic = SfxLogic {
+            state: State::new(),
+            measurer: None,
+            audio: None,
+        };
+        logic.state.project.patches[0].layers[0] = Layer::new(Wave::Sine);
+        let layout = ui::Layout::new(&logic.state, logic.state.viewport);
+        let hit = ui::Hit::LayerField(LayerField::CutoffStart);
+        let rect = param_row_rect(&layout, hit).expect("cutoff row");
+        let track = ui::param_track(rect);
+        let position = Vec2::new(track.center().x, track.center().y);
+        logic.set_param_from_x(position, hit, &layout);
+        let cutoff = logic.state.layer().unwrap().cutoff_start;
+        // sqrt(20 * 18000) ≈ 600 Hz, far from the linear midpoint (9010).
+        assert!((500.0..750.0).contains(&cutoff), "cutoff was {cutoff}");
+    }
+
+    #[test]
+    fn undo_transactions_ignore_noop_gestures() {
+        let mut state = State::new();
+        state.begin_edit();
+        state.commit_edit();
+        assert!(state.undo.is_empty());
+        let original = state.layer().unwrap().gain;
+        state.begin_edit();
+        state.layer_mut().unwrap().gain = 0.42;
+        state.commit_edit();
+        assert_eq!(state.undo.len(), 1);
+        assert!((state.layer().unwrap().gain - 0.42).abs() < 0.001);
+        let _ = state.undo();
+        assert!((state.layer().unwrap().gain - original).abs() < 0.001);
+    }
+
+    #[test]
     fn undo_redo_restores_clips() {
         let mut state = State::new();
         state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
         state.push_undo();
         state.layer_mut().unwrap().ensure_clips();
         assert_eq!(state.layer().unwrap().clips.len(), 1);
-        state.undo();
+        let _ = state.undo();
         assert!(state.layer().unwrap().clips.is_empty());
-        state.redo();
+        let _ = state.redo();
         assert_eq!(state.layer().unwrap().clips.len(), 1);
     }
 }

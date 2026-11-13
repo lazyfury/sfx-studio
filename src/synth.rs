@@ -1,12 +1,12 @@
 //! Deterministic synthesis. Mirrors the Godot `sfx_synth.gd` / `sfx_layer.gd`
 //! formulas so a project sounds the same in the app and in-game.
 
-use crate::model::{EnvShape, FilterMode, Layer, Music, MusicWave, Patch, Wave};
+use crate::model::{EnvShape, FilterMode, Layer, Music, MusicWave, Patch, ToneEnv, Wave};
 
 const TAU: f32 = std::f32::consts::TAU;
 
 pub fn render_patch(patch: &Patch, rate: u32) -> Vec<f32> {
-    let rate = rate.max(8_000);
+    let rate = rate.clamp(8_000, 192_000);
     let mut total = 0usize;
     for layer in &patch.layers {
         if layer.enabled {
@@ -16,6 +16,9 @@ pub fn render_patch(patch: &Patch, rate: u32) -> Vec<f32> {
     if total == 0 {
         return Vec::new();
     }
+    // Defensive cap: a hand-edited / corrupt project must not allocate for
+    // minutes of audio on the UI thread.
+    let total = total.min((rate as f32 * 30.0) as usize);
     let mut buf = vec![0.0f32; total];
     for layer in &patch.layers {
         if !layer.enabled {
@@ -71,8 +74,12 @@ pub fn render_patch(patch: &Patch, rate: u32) -> Vec<f32> {
 }
 
 pub fn render_layer(layer: &Layer, rate: u32) -> Vec<f32> {
-    let rate = rate.max(8_000);
-    if !layer.enabled || layer.duration <= 0.0 {
+    let rate = rate.clamp(8_000, 192_000);
+    if !layer.enabled
+        || !layer.duration.is_finite()
+        || layer.duration <= 0.0
+        || layer.duration > 30.0
+    {
         return Vec::new();
     }
     match layer.wave {
@@ -89,10 +96,15 @@ pub fn render_layer(layer: &Layer, rate: u32) -> Vec<f32> {
 }
 
 pub fn render_music(music: &Music, rate: u32) -> Vec<f32> {
-    let rate = rate.max(8_000);
+    let rate = rate.clamp(8_000, 192_000);
+    // Match the Godot `.tres` behaviour: no notes/chords means no stream.
+    if music.bass_notes.is_empty() || music.chords.is_empty() {
+        return Vec::new();
+    }
     let beat = 60.0 / music.bpm.max(20.0);
     let bar = beat * 4.0;
-    let total = (rate as f32 * bar * music.bars as f32).round() as usize;
+    let total = ((rate as f32 * bar * music.bars as f32).round() as usize)
+        .min((rate as f32 * 300.0) as usize);
     let mut buf = vec![0.0f32; total];
     let mut rng = Rng::new(music.seed as u64);
 
@@ -262,16 +274,18 @@ fn render_tone(layer: &Layer, rate: u32) -> Vec<f32> {
         let (nl, nb, filtered) = filter(layer, raw, low, band, k, rate);
         low = nl;
         band = nb;
-        *slot = filtered
-            * adsr(
+        let env = match layer.tone_env {
+            ToneEnv::Exp => (-layer.exp_decay * k).exp() * (t / layer.attack.max(0.0001)).min(1.0),
+            ToneEnv::Adsr => adsr(
                 t,
                 layer.duration,
                 layer.attack,
                 layer.decay,
                 layer.sustain,
                 layer.release,
-            )
-            * layer.gain;
+            ),
+        };
+        *slot = filtered * env * layer.gain;
     }
     out
 }
@@ -453,6 +467,7 @@ fn render_clap(layer: &Layer, rate: u32) -> Vec<f32> {
     out
 }
 
+#[allow(clippy::too_many_arguments)] // deliberate: a note is a flat DSP record
 fn note(
     buf: &mut [f32],
     rate: u32,
@@ -626,6 +641,53 @@ pub fn peak(samples: &[f32]) -> f32 {
     samples.iter().fold(0.0f32, |acc, s| acc.max(s.abs()))
 }
 
+/// Min/max buckets for fast waveform painting. Rendering a multi-second cache
+/// every frame is wasteful, so the UI reads this small envelope instead.
+#[derive(Clone, Debug, Default)]
+pub struct Envelope {
+    pub min: Vec<f32>,
+    pub max: Vec<f32>,
+}
+
+impl Envelope {
+    pub fn is_empty(&self) -> bool {
+        self.min.is_empty()
+    }
+}
+
+pub fn envelope(samples: &[f32], bins: usize) -> Envelope {
+    let bins = bins.max(1);
+    if samples.is_empty() {
+        return Envelope::default();
+    }
+    let mut envelope = Envelope {
+        min: vec![0.0; bins],
+        max: vec![0.0; bins],
+    };
+    for (bin, (lo, hi)) in envelope
+        .min
+        .iter_mut()
+        .zip(envelope.max.iter_mut())
+        .enumerate()
+    {
+        let first = bin * samples.len() / bins;
+        let last = (((bin + 1) * samples.len()) / bins)
+            .max(first + 1)
+            .min(samples.len());
+        let mut min = 0.0f32;
+        let mut max = 0.0f32;
+        for value in &samples[first..last] {
+            if value.is_finite() {
+                min = min.min(*value);
+                max = max.max(*value);
+            }
+        }
+        *lo = min;
+        *hi = max;
+    }
+    envelope
+}
+
 pub fn db(amplitude: f32) -> f32 {
     if amplitude <= 1e-6 {
         -120.0
@@ -657,10 +719,7 @@ pub fn encode_wav(samples: &[f32], rate: u32) -> Vec<u8> {
 }
 
 pub fn write_wav(path: &std::path::Path, samples: &[f32], rate: u32) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, encode_wav(samples, rate))
+    crate::model::write_atomic(path, &encode_wav(samples, rate))
 }
 
 /// Small deterministic RNG (xorshift64*), matching "same seed -> same noise".
@@ -688,7 +747,7 @@ impl Rng {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Layer, Music, Patch, Wave};
+    use crate::model::{Layer, Music, Patch, ToneEnv, Wave};
 
     #[test]
     fn every_wave_renders_finite_samples() {
@@ -708,8 +767,10 @@ mod tests {
 
     #[test]
     fn layers_mix_to_the_longest_delay() {
-        let mut patch = Patch::default();
-        patch.layers = vec![Layer::new(Wave::Sine), Layer::new(Wave::Noise)];
+        let mut patch = Patch {
+            layers: vec![Layer::new(Wave::Sine), Layer::new(Wave::Noise)],
+            ..Patch::default()
+        };
         patch.layers[0].duration = 0.1;
         patch.layers[1].delay = 0.05;
         patch.layers[1].duration = 0.2;
@@ -795,6 +856,15 @@ mod tests {
     }
 
     #[test]
+    fn music_without_notes_is_empty_like_the_godot_plugin() {
+        let music = Music {
+            bass_notes: Vec::new(),
+            ..Music::default()
+        };
+        assert!(render_music(&music, 8000).is_empty());
+    }
+
+    #[test]
     fn music_has_expected_length() {
         let music = Music {
             bars: 1,
@@ -815,5 +885,26 @@ mod tests {
         assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 22050);
         assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()), 1);
         assert_eq!(u16::from_le_bytes(wav[34..36].try_into().unwrap()), 16);
+    }
+
+    #[test]
+    fn exp_tone_envelope_matches_godot_formula() {
+        let mut layer = Layer::new(Wave::Sine);
+        layer.duration = 0.2;
+        layer.attack = 0.001;
+        layer.exp_decay = 6.0;
+        layer.tone_env = ToneEnv::Exp;
+        let samples = render_layer(&layer, 8000);
+        assert!(samples[0].abs() < 0.05);
+        assert!(peak(&samples) > 0.0);
+        assert!(samples[samples.len() - 1].abs() < samples[samples.len() / 2].abs());
+    }
+
+    #[test]
+    fn envelope_buckets_track_min_and_max() {
+        let buckets = envelope(&[0.0, 1.0, -1.0, 0.5], 2);
+        assert_eq!(buckets.min, vec![0.0, -1.0]);
+        assert_eq!(buckets.max, vec![1.0, 0.5]);
+        assert!(envelope(&[], 8).is_empty());
     }
 }

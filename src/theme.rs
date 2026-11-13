@@ -1,7 +1,7 @@
 //! SFX LAB — Minimal Studio tokens and compact paint helpers.
 //!
-//! Light surfaces from the product spec, one lime accent, hairline borders,
-//! and a dark "playback" surface so the waveform stays the visual anchor.
+//! Dark near-black surfaces, one lime accent, hairline borders, and a darker
+//! "playback" surface so the waveform stays the visual anchor.
 
 use igui_core::{Color, Rect, Vec2};
 use igui_render::{PaintContext, TextAlign};
@@ -32,7 +32,6 @@ pub const SMALL: f32 = 10.0;
 pub const TITLE: f32 = 13.0;
 pub const TOP_H: f32 = 32.0;
 pub const STATUS_H: f32 = 24.0;
-pub const PAD_H: f32 = 74.0;
 pub const LEFT_W: f32 = 240.0;
 pub const RIGHT_W: f32 = 360.0;
 pub const HEADER_H: f32 = 34.0;

@@ -9,6 +9,20 @@ use serde::{Deserialize, Serialize};
 
 pub const PROJECT_FILE: &str = "sfx.project.json";
 
+/// Current on-disk project schema. Bump this whenever a migration is needed.
+pub const PROJECT_VERSION: u32 = 2;
+
+/// Current DSP formula generation. Reserved for versioned render dispatch.
+pub const DSP_VERSION: u32 = 1;
+
+fn default_project_version() -> u32 {
+    1
+}
+
+fn default_dsp_version() -> u32 {
+    DSP_VERSION
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Wave {
@@ -168,6 +182,52 @@ impl Category {
             .unwrap_or(0);
         Self::ALL[(index + 1) % Self::ALL.len()]
     }
+
+    /// Stable, human-readable group name shared with the Godot `SfxPatch.group`.
+    pub fn group(self) -> &'static str {
+        self.label()
+    }
+
+    /// Parse a `.tres` group back into an app category (case-insensitive).
+    pub fn from_group(group: &str) -> Option<Self> {
+        let group = group.trim();
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|category| category.label().eq_ignore_ascii_case(group))
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToneEnv {
+    #[default]
+    Adsr,
+    Exp,
+}
+
+impl ToneEnv {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Adsr => "ADSR",
+            Self::Exp => "EXP",
+        }
+    }
+
+    pub fn godot_id(self) -> u32 {
+        match self {
+            Self::Adsr => 0,
+            Self::Exp => 1,
+        }
+    }
+
+    pub fn from_godot_id(id: u32) -> Self {
+        if id == 1 {
+            Self::Exp
+        } else {
+            Self::Adsr
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -277,6 +337,15 @@ impl Clip {
         !self.cutoff_points.is_empty()
     }
 
+    fn sanitize(&mut self) {
+        self.start = finite(self.start, 0.0).clamp(0.0, 8.0);
+        self.duration = finite(self.duration, 0.15).clamp(0.005, 3.0);
+        self.gain = finite(self.gain, 1.0).clamp(0.0, 2.0);
+        self.pitch = finite(self.pitch, 0.0).clamp(-24.0, 24.0);
+        sanitize_points(&mut self.gain_points, 0.0, 2.0, self.duration);
+        sanitize_points(&mut self.cutoff_points, 20.0, 18000.0, self.duration);
+    }
+
     /// Linear gain envelope at `t` seconds inside the clip.
     pub fn gain_at(&self, t: f32) -> f32 {
         if self.gain_points.is_empty() {
@@ -342,7 +411,7 @@ impl Clip {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Layer {
     pub wave: Wave,
@@ -356,10 +425,14 @@ pub struct Layer {
     pub duty: f32,
     pub vibrato_rate: f32,
     pub vibrato_depth: f32,
+    /// Tone envelope shape. `Adsr` is the legacy/Godot default.
+    pub tone_env: ToneEnv,
     pub attack: f32,
     pub decay: f32,
     pub sustain: f32,
     pub release: f32,
+    /// Decay speed for `ToneEnv::Exp` (Godot `exp_decay`).
+    pub exp_decay: f32,
     pub filter: FilterMode,
     pub cutoff_start: f32,
     pub cutoff_end: f32,
@@ -397,10 +470,12 @@ impl Default for Layer {
             duty: 0.5,
             vibrato_rate: 0.0,
             vibrato_depth: 0.0,
+            tone_env: ToneEnv::Adsr,
             attack: 0.002,
             decay: 0.06,
             sustain: 0.0,
             release: 0.03,
+            exp_decay: 4.0,
             filter: FilterMode::None,
             cutoff_start: 12000.0,
             cutoff_end: 12000.0,
@@ -474,9 +549,59 @@ impl Layer {
         copy.drum_tone = (copy.drum_tone * factor).clamp(0.25, 4.0);
         copy
     }
+
+    /// Clamp untrusted values loaded from JSON / `.tres` into the ranges the
+    /// editor and DSP can handle. Never panics on NaN or absurd values.
+    fn sanitize(&mut self) {
+        self.delay = finite(self.delay, 0.0).clamp(0.0, 8.0);
+        self.duration = finite(self.duration, 0.15).clamp(0.005, 3.0);
+        self.gain = finite(self.gain, 0.3).clamp(0.0, 1.0);
+        self.freq_start = finite(self.freq_start, 440.0).clamp(20.0, 12000.0);
+        self.freq_end = finite(self.freq_end, 440.0).clamp(20.0, 12000.0);
+        self.harsh = finite(self.harsh, 0.0).clamp(0.0, 1.0);
+        self.duty = finite(self.duty, 0.5).clamp(0.05, 0.95);
+        self.vibrato_rate = finite(self.vibrato_rate, 0.0).clamp(0.0, 20.0);
+        self.vibrato_depth = finite(self.vibrato_depth, 0.0).clamp(0.0, 12.0);
+        self.attack = finite(self.attack, 0.002).clamp(0.0, 2.0);
+        self.decay = finite(self.decay, 0.06).clamp(0.0, 3.0);
+        self.sustain = finite(self.sustain, 0.0).clamp(0.0, 1.0);
+        self.release = finite(self.release, 0.03).clamp(0.0, 3.0);
+        self.exp_decay = finite(self.exp_decay, 4.0).clamp(0.5, 30.0);
+        self.cutoff_start = finite(self.cutoff_start, 12000.0).clamp(20.0, 18000.0);
+        self.cutoff_end = finite(self.cutoff_end, 12000.0).clamp(20.0, 18000.0);
+        self.resonance = finite(self.resonance, 0.707).clamp(0.5, 5.0);
+        self.step = finite(self.step, 0.06).clamp(0.01, 0.5);
+        self.lowpass_from = finite(self.lowpass_from, 0.35).clamp(0.01, 1.0);
+        self.lowpass_to = finite(self.lowpass_to, 0.35).clamp(0.01, 1.0);
+        self.noise_gain = finite(self.noise_gain, 0.85).clamp(0.0, 1.0);
+        self.sweep_gain = finite(self.sweep_gain, 0.45).clamp(0.0, 1.0);
+        self.fm_ratio = finite(self.fm_ratio, 2.0).clamp(0.25, 12.0);
+        self.fm_index = finite(self.fm_index, 2.0).clamp(0.0, 20.0);
+        self.fm_decay = finite(self.fm_decay, 4.0).clamp(0.5, 30.0);
+        self.pluck_damping = finite(self.pluck_damping, 0.996).clamp(0.9, 0.9999);
+        self.pluck_brightness = finite(self.pluck_brightness, 0.5).clamp(0.0, 1.0);
+        self.drum_tone = finite(self.drum_tone, 1.0).clamp(0.25, 4.0);
+        self.drum_snap = finite(self.drum_snap, 1.0).clamp(0.0, 2.0);
+        self.seed = self.seed.min(99_999_999);
+
+        self.arp_freqs
+            .retain(|freq| freq.is_finite() && *freq > 0.0);
+        for freq in &mut self.arp_freqs {
+            *freq = freq.clamp(20.0, 12000.0);
+        }
+        self.arp_freqs.truncate(16);
+        if self.wave == Wave::Arp && self.arp_freqs.is_empty() {
+            self.arp_freqs = vec![523.25, 659.25, 783.99];
+        }
+
+        self.clips.truncate(64);
+        for clip in &mut self.clips {
+            clip.sanitize();
+        }
+    }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Patch {
     pub name: String,
@@ -484,6 +609,9 @@ pub struct Patch {
     pub favorite: bool,
     pub rate: u32,
     pub normalize: bool,
+    /// DSP formula generation reserved for future versioned rendering.
+    #[serde(default = "default_dsp_version")]
+    pub dsp_version: u32,
     pub layers: Vec<Layer>,
 }
 
@@ -495,6 +623,7 @@ impl Default for Patch {
             favorite: false,
             rate: 22050,
             normalize: true,
+            dsp_version: DSP_VERSION,
             layers: vec![Layer::default()],
         }
     }
@@ -525,7 +654,7 @@ impl Patch {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Music {
     pub bpm: f32,
@@ -621,8 +750,11 @@ impl Music {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Project {
+    /// On-disk schema version. Files written before versioning default to 1.
+    #[serde(default = "default_project_version")]
+    pub version: u32,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -631,9 +763,21 @@ pub struct Project {
     pub music: Music,
 }
 
+impl Default for Project {
+    fn default() -> Self {
+        Self {
+            version: PROJECT_VERSION,
+            name: String::new(),
+            patches: Vec::new(),
+            music: Music::default(),
+        }
+    }
+}
+
 impl Project {
     pub fn demo(name: impl Into<String>) -> Self {
         let mut project = Self {
+            version: PROJECT_VERSION,
             name: name.into(),
             patches: Vec::new(),
             music: Music::default(),
@@ -1007,24 +1151,298 @@ pub fn sanitize(name: &str) -> String {
             out.push('_');
         }
     }
-    let trimmed = out.trim_matches('_').to_string();
-    if trimmed.is_empty() {
+    let trimmed = out.trim_matches('_').chars().take(48).collect::<String>();
+    let trimmed = trimmed.trim_matches('_').to_string();
+    // A name made only of non-ASCII characters and digits would otherwise
+    // collapse to "" or "2", causing every such patch to share a file name.
+    if trimmed.is_empty() || !trimmed.chars().any(|ch| ch.is_ascii_alphabetic()) {
         "sound".into()
     } else {
         trimmed
     }
 }
 
-pub fn load_project(root: &Path) -> Option<Project> {
+pub fn load_project(root: &Path) -> Result<Option<Project>, String> {
     let path = root.join(PROJECT_FILE);
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            let mut project: Project = serde_json::from_str(&text)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            project.migrate();
+            Ok(Some(project))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
 }
 
 pub fn save_project(root: &Path, project: &Project) -> std::io::Result<()> {
     let path = root.join(PROJECT_FILE);
-    let text = serde_json::to_string_pretty(project).unwrap_or_default();
-    std::fs::write(path, text)
+    let text = serde_json::to_string_pretty(project)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    if path.exists() {
+        let _ = std::fs::copy(&path, path.with_extension("json.bak"));
+    }
+    write_atomic(&path, text.as_bytes())
+}
+
+/// Write through a sibling temp file + rename so a crash cannot truncate a
+/// project or an exported asset.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension(format!(
+        "{}.tmp",
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("tmp")
+    ));
+    std::fs::write(&temp, bytes)?;
+    std::fs::rename(&temp, path)
+}
+
+fn finite(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
+}
+
+fn sanitize_points(points: &mut Vec<AutomationPoint>, low: f32, high: f32, max_time: f32) {
+    points.retain(|point| point.time.is_finite() && point.value.is_finite());
+    for point in points.iter_mut() {
+        point.time = point.time.clamp(0.0, max_time.max(0.0));
+        point.value = point.value.clamp(low, high);
+    }
+    points.sort_by(|a, b| {
+        a.time
+            .partial_cmp(&b.time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    points.dedup_by(|a, b| (a.time - b.time).abs() < 0.0005);
+    points.truncate(512);
+}
+
+impl Music {
+    fn sanitize(&mut self) {
+        self.bpm = finite(self.bpm, 132.0).clamp(40.0, 240.0);
+        self.bars = self.bars.clamp(1, 32);
+        self.rate = self.rate.clamp(8000, 48000);
+        self.volume_db = finite(self.volume_db, -17.0).clamp(-60.0, 6.0);
+        self.swing = finite(self.swing, 0.0).clamp(0.0, 0.5);
+        self.seed = self.seed.min(99_999_999);
+        for value in [
+            &mut self.bass_gain,
+            &mut self.bass_harsh,
+            &mut self.arp_gain,
+            &mut self.arp_harsh,
+            &mut self.kick_gain,
+            &mut self.hat_gain,
+        ] {
+            *value = finite(*value, 0.0).clamp(0.0, 1.0);
+        }
+        self.bass_decay = finite(self.bass_decay, 2.2).clamp(0.5, 30.0);
+        self.arp_decay = finite(self.arp_decay, 9.0).clamp(0.5, 30.0);
+
+        self.bass_notes
+            .retain(|note| note.is_finite() && *note > 0.0);
+        for note in &mut self.bass_notes {
+            *note = note.clamp(20.0, 12000.0);
+        }
+        self.bass_notes.truncate(64);
+        self.chords.truncate(64);
+        for chord in &mut self.chords {
+            chord.retain(|note| note.is_finite() && *note > 0.0);
+            for note in chord.iter_mut() {
+                *note = note.clamp(20.0, 12000.0);
+            }
+            chord.truncate(8);
+        }
+        self.chords.retain(|chord| !chord.is_empty());
+
+        for pattern in [&mut self.arp_pattern, &mut self.bass_pattern] {
+            pattern.truncate(16);
+            pattern.resize(16, -1);
+        }
+        self.kick_steps &= 0xFFFF;
+        self.hat_steps &= 0xFFFF;
+    }
+}
+
+impl Project {
+    /// Bring an older file up to [`PROJECT_VERSION`].
+    pub fn migrate(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if self.version < PROJECT_VERSION {
+            warnings.push(format!(
+                "project schema {} → {PROJECT_VERSION}",
+                self.version
+            ));
+            self.version = PROJECT_VERSION;
+        }
+        for patch in &mut self.patches {
+            if patch.dsp_version == 0 {
+                patch.dsp_version = DSP_VERSION;
+            }
+        }
+        warnings
+    }
+
+    /// Clamp untrusted data and guarantee unique patch names. Returns a short
+    /// list of structural repairs the UI can surface.
+    pub fn validate(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if self.name.trim().is_empty() {
+            self.name = "untitled".into();
+        }
+        if self.music.bass_notes.is_empty() || self.music.chords.is_empty() {
+            warnings.push("music has no notes/chords".into());
+        }
+        self.music.sanitize();
+
+        if self.patches.len() > 512 {
+            warnings.push("library truncated to 512 patches".into());
+            self.patches.truncate(512);
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for (index, patch) in self.patches.iter_mut().enumerate() {
+            patch.name = patch
+                .name
+                .chars()
+                .map(|ch| if ch.is_control() { ' ' } else { ch })
+                .collect::<String>()
+                .trim()
+                .to_string();
+            if patch.name.is_empty() {
+                patch.name = format!("patch_{:02}", index + 1);
+            }
+            if patch.name.chars().count() > 64 {
+                patch.name = patch.name.chars().take(64).collect();
+                warnings.push(format!("patch {} name truncated to 64 chars", index + 1));
+            }
+            let base = patch.name.clone();
+            let mut candidate = base.clone();
+            let mut suffix = 2;
+            while !seen.insert(candidate.to_lowercase()) {
+                candidate = format!("{base}_{suffix}");
+                suffix += 1;
+            }
+            if candidate != base {
+                warnings.push(format!("renamed duplicate patch '{base}' → '{candidate}'"));
+                patch.name = candidate;
+            }
+            patch.rate = patch.rate.clamp(8000, 48000);
+            if patch.dsp_version == 0 {
+                patch.dsp_version = DSP_VERSION;
+            }
+            if patch.layers.is_empty() {
+                patch.layers.push(Layer::default());
+            }
+            if patch.layers.len() > 32 {
+                warnings.push(format!("{}: layers truncated to 32", patch.name));
+                patch.layers.truncate(32);
+            }
+            for layer in &mut patch.layers {
+                layer.sanitize();
+            }
+        }
+        warnings
+    }
+}
+
+/// How a parameter maps to a 0..1 slider track.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Scale {
+    Linear,
+    Log,
+}
+
+/// Single source of truth for a parameter's label, unit, range and mapping.
+/// The UI slider, mouse-to-value conversion and formatting all use this.
+#[derive(Clone, Copy, Debug)]
+pub struct FieldSpec {
+    pub label: &'static str,
+    pub unit: &'static str,
+    pub min: f32,
+    pub max: f32,
+    pub step: f32,
+    pub scale: Scale,
+}
+
+impl FieldSpec {
+    pub const fn new(
+        label: &'static str,
+        unit: &'static str,
+        min: f32,
+        max: f32,
+        step: f32,
+        scale: Scale,
+    ) -> Self {
+        Self {
+            label,
+            unit,
+            min,
+            max,
+            step,
+            scale,
+        }
+    }
+
+    pub fn norm(&self, value: f32) -> f32 {
+        match self.scale {
+            Scale::Linear => {
+                ((value - self.min) / (self.max - self.min).max(0.0001)).clamp(0.0, 1.0)
+            }
+            Scale::Log if self.min > 0.0 && self.max > self.min => {
+                let low = self.min.ln();
+                let high = self.max.ln();
+                ((value.clamp(self.min, self.max).max(1e-6).ln() - low) / (high - low))
+                    .clamp(0.0, 1.0)
+            }
+            Scale::Log => self.norm_linear(value),
+        }
+    }
+
+    fn norm_linear(&self, value: f32) -> f32 {
+        ((value - self.min) / (self.max - self.min).max(0.0001)).clamp(0.0, 1.0)
+    }
+
+    pub fn denorm(&self, norm: f32) -> f32 {
+        let norm = norm.clamp(0.0, 1.0);
+        match self.scale {
+            Scale::Linear => self.min + norm * (self.max - self.min),
+            Scale::Log if self.min > 0.0 && self.max > self.min => {
+                (self.min.ln() + norm * (self.max.ln() - self.min.ln())).exp()
+            }
+            Scale::Log => self.min + norm * (self.max - self.min),
+        }
+    }
+
+    pub fn snap(&self, value: f32) -> f32 {
+        if self.step > 0.0 {
+            (value / self.step).round() * self.step
+        } else {
+            value
+        }
+    }
+
+    pub fn format(&self, value: f32) -> String {
+        let decimals = if self.step >= 1.0 {
+            0
+        } else if self.step >= 0.01 {
+            2
+        } else {
+            3
+        };
+        if self.unit.is_empty() {
+            format!("{value:.decimals$}")
+        } else {
+            format!("{value:.decimals$}{}", self.unit)
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1042,6 +1460,7 @@ pub enum LayerField {
     Decay,
     Sustain,
     Release,
+    ExpDecay,
     CutoffStart,
     CutoffEnd,
     Resonance,
@@ -1065,113 +1484,61 @@ pub enum LayerField {
 }
 
 impl LayerField {
-    pub fn label(self) -> &'static str {
+    pub fn spec(self) -> FieldSpec {
+        use Scale::{Linear, Log};
         match self {
-            Self::Delay => "DELAY",
-            Self::Duration => "LENGTH",
-            Self::Gain => "GAIN",
-            Self::FreqStart => "FREQ A",
-            Self::FreqEnd => "FREQ B",
-            Self::Harsh => "SQUARE",
-            Self::Duty => "DUTY",
-            Self::VibratoRate => "VIB RATE",
-            Self::VibratoDepth => "VIB DEPTH",
-            Self::Attack => "ATTACK",
-            Self::Decay => "DECAY",
-            Self::Sustain => "SUSTAIN",
-            Self::Release => "RELEASE",
-            Self::CutoffStart => "CUTOFF A",
-            Self::CutoffEnd => "CUTOFF B",
-            Self::Resonance => "RESONANCE",
-            Self::Step => "STEP",
-            Self::LowpassFrom => "LP A",
-            Self::LowpassTo => "LP B",
-            Self::NoiseGain => "NOISE",
-            Self::SweepGain => "SWEEP",
-            Self::FmRatio => "FM RATIO",
-            Self::FmIndex => "FM INDEX",
-            Self::FmDecay => "FM DECAY",
-            Self::PluckDamping => "DAMPING",
-            Self::PluckBrightness => "BRIGHT",
-            Self::DrumTone => "TONE",
-            Self::DrumSnap => "SNAP",
-            Self::Seed => "SEED",
-            Self::Arp0 => "ARP 1",
-            Self::Arp1 => "ARP 2",
-            Self::Arp2 => "ARP 3",
-            Self::Arp3 => "ARP 4",
+            Self::Delay => FieldSpec::new("DELAY", "s", 0.0, 2.0, 0.001, Linear),
+            Self::Duration => FieldSpec::new("LENGTH", "s", 0.005, 3.0, 0.001, Linear),
+            Self::Gain => FieldSpec::new("GAIN", "", 0.0, 1.0, 0.001, Linear),
+            Self::FreqStart => FieldSpec::new("FREQ A", "Hz", 20.0, 12000.0, 1.0, Log),
+            Self::FreqEnd => FieldSpec::new("FREQ B", "Hz", 20.0, 12000.0, 1.0, Log),
+            Self::Harsh => FieldSpec::new("HARSH", "", 0.0, 1.0, 0.001, Linear),
+            Self::Duty => FieldSpec::new("DUTY", "", 0.05, 0.95, 0.01, Linear),
+            Self::VibratoRate => FieldSpec::new("VIB RATE", "Hz", 0.0, 20.0, 0.1, Linear),
+            Self::VibratoDepth => FieldSpec::new("VIB DEPTH", "", 0.0, 12.0, 0.01, Linear),
+            Self::Attack => FieldSpec::new("ATTACK", "s", 0.0, 2.0, 0.001, Linear),
+            Self::Decay => FieldSpec::new("DECAY", "s", 0.0, 3.0, 0.001, Linear),
+            Self::Sustain => FieldSpec::new("SUSTAIN", "", 0.0, 1.0, 0.001, Linear),
+            Self::Release => FieldSpec::new("RELEASE", "s", 0.0, 3.0, 0.001, Linear),
+            Self::ExpDecay => FieldSpec::new("EXP DECAY", "", 0.5, 30.0, 0.1, Linear),
+            Self::CutoffStart => FieldSpec::new("CUTOFF A", "Hz", 20.0, 18000.0, 1.0, Log),
+            Self::CutoffEnd => FieldSpec::new("CUTOFF B", "Hz", 20.0, 18000.0, 1.0, Log),
+            Self::Resonance => FieldSpec::new("RESONANCE", "", 0.5, 5.0, 0.01, Linear),
+            Self::Step => FieldSpec::new("STEP", "s", 0.01, 0.5, 0.001, Linear),
+            Self::LowpassFrom => FieldSpec::new("LP A", "", 0.01, 1.0, 0.001, Linear),
+            Self::LowpassTo => FieldSpec::new("LP B", "", 0.01, 1.0, 0.001, Linear),
+            Self::NoiseGain => FieldSpec::new("NOISE", "", 0.0, 1.0, 0.001, Linear),
+            Self::SweepGain => FieldSpec::new("SWEEP", "", 0.0, 1.0, 0.001, Linear),
+            Self::FmRatio => FieldSpec::new("FM RATIO", "", 0.25, 12.0, 0.01, Linear),
+            Self::FmIndex => FieldSpec::new("FM INDEX", "", 0.0, 20.0, 0.1, Linear),
+            Self::FmDecay => FieldSpec::new("FM DECAY", "", 0.5, 30.0, 0.1, Linear),
+            Self::PluckDamping => FieldSpec::new("DAMPING", "", 0.9, 0.9999, 0.0001, Linear),
+            Self::PluckBrightness => FieldSpec::new("BRIGHT", "", 0.0, 1.0, 0.001, Linear),
+            Self::DrumTone => FieldSpec::new("TONE", "", 0.25, 2.0, 0.01, Linear),
+            Self::DrumSnap => FieldSpec::new("SNAP", "", 0.0, 2.0, 0.01, Linear),
+            Self::Seed => FieldSpec::new("SEED", "", 0.0, 99_999_999.0, 1.0, Linear),
+            Self::Arp0 => FieldSpec::new("ARP 1", "Hz", 20.0, 5000.0, 1.0, Log),
+            Self::Arp1 => FieldSpec::new("ARP 2", "Hz", 20.0, 5000.0, 1.0, Log),
+            Self::Arp2 => FieldSpec::new("ARP 3", "Hz", 20.0, 5000.0, 1.0, Log),
+            Self::Arp3 => FieldSpec::new("ARP 4", "Hz", 20.0, 5000.0, 1.0, Log),
         }
     }
 
-    pub fn unit(self) -> &'static str {
-        match self {
-            Self::Delay
-            | Self::Duration
-            | Self::Attack
-            | Self::Decay
-            | Self::Release
-            | Self::Step => "s",
-            Self::FreqStart
-            | Self::FreqEnd
-            | Self::CutoffStart
-            | Self::CutoffEnd
-            | Self::Arp0
-            | Self::Arp1
-            | Self::Arp2
-            | Self::Arp3 => "Hz",
-            Self::VibratoRate => "Hz",
-            Self::VibratoDepth
-            | Self::Resonance
-            | Self::FmRatio
-            | Self::FmIndex
-            | Self::FmDecay
-            | Self::Sustain
-            | Self::LowpassFrom
-            | Self::LowpassTo
-            | Self::NoiseGain
-            | Self::SweepGain
-            | Self::Duty
-            | Self::Harsh
-            | Self::Gain
-            | Self::PluckBrightness
-            | Self::DrumSnap => "",
-            Self::DrumTone | Self::PluckDamping => "",
-            Self::Seed => "",
-        }
+    pub fn label(self) -> &'static str {
+        self.spec().label
     }
 
     pub fn range(self) -> (f32, f32, f32) {
-        match self {
-            Self::Delay => (0.0, 2.0, 0.001),
-            Self::Duration => (0.005, 3.0, 0.001),
-            Self::Gain
-            | Self::Harsh
-            | Self::Sustain
-            | Self::LowpassFrom
-            | Self::LowpassTo
-            | Self::NoiseGain
-            | Self::SweepGain
-            | Self::PluckBrightness => (0.0, 1.0, 0.001),
-            Self::Duty => (0.05, 0.95, 0.01),
-            Self::FreqStart | Self::FreqEnd | Self::CutoffStart | Self::CutoffEnd => {
-                (20.0, 12000.0, 1.0)
-            }
-            Self::VibratoRate => (0.0, 20.0, 0.1),
-            Self::VibratoDepth => (0.0, 12.0, 0.01),
-            Self::Attack => (0.0, 2.0, 0.001),
-            Self::Decay => (0.0, 3.0, 0.001),
-            Self::Release => (0.0, 3.0, 0.001),
-            Self::Resonance => (0.5, 5.0, 0.01),
-            Self::Step => (0.01, 0.5, 0.001),
-            Self::FmRatio => (0.25, 12.0, 0.01),
-            Self::FmIndex => (0.0, 20.0, 0.1),
-            Self::FmDecay => (0.5, 30.0, 0.1),
-            Self::PluckDamping => (0.9, 0.9999, 0.0001),
-            Self::DrumTone => (0.25, 2.0, 0.01),
-            Self::DrumSnap => (0.0, 2.0, 0.01),
-            Self::Seed => (0.0, 99_999_999.0, 1.0),
-            Self::Arp0 | Self::Arp1 | Self::Arp2 | Self::Arp3 => (20.0, 5000.0, 1.0),
-        }
+        let spec = self.spec();
+        (spec.min, spec.max, spec.step)
+    }
+
+    pub fn norm(self, value: f32) -> f32 {
+        self.spec().norm(value)
+    }
+
+    pub fn denorm(self, norm: f32) -> f32 {
+        self.spec().denorm(norm)
     }
 
     pub fn get(self, layer: &Layer) -> f32 {
@@ -1189,6 +1556,7 @@ impl LayerField {
             Self::Decay => layer.decay,
             Self::Sustain => layer.sustain,
             Self::Release => layer.release,
+            Self::ExpDecay => layer.exp_decay,
             Self::CutoffStart => layer.cutoff_start,
             Self::CutoffEnd => layer.cutoff_end,
             Self::Resonance => layer.resonance,
@@ -1227,6 +1595,7 @@ impl LayerField {
             Self::Decay => layer.decay = value.max(0.0),
             Self::Sustain => layer.sustain = value.clamp(0.0, 1.0),
             Self::Release => layer.release = value.max(0.0),
+            Self::ExpDecay => layer.exp_decay = value.clamp(0.5, 30.0),
             Self::CutoffStart => layer.cutoff_start = value.max(20.0),
             Self::CutoffEnd => layer.cutoff_end = value.max(20.0),
             Self::Resonance => layer.resonance = value.clamp(0.5, 5.0),
@@ -1262,23 +1631,7 @@ impl LayerField {
     }
 
     pub fn format(self, value: f32) -> String {
-        if self == Self::Seed {
-            return format!("{}", value as u32);
-        }
-        let (_, _, step) = self.range();
-        let decimals = if step >= 1.0 {
-            0
-        } else if step >= 0.01 {
-            2
-        } else {
-            3
-        };
-        let unit = self.unit();
-        if unit.is_empty() {
-            format!("{value:.decimals$}")
-        } else {
-            format!("{value:.decimals$}{unit}")
-        }
+        self.spec().format(value)
     }
 }
 
@@ -1301,37 +1654,41 @@ pub enum MusicField {
 }
 
 impl MusicField {
-    pub fn label(self) -> &'static str {
+    pub fn spec(self) -> FieldSpec {
+        use Scale::{Linear, Log};
         match self {
-            Self::Bpm => "BPM",
-            Self::Bars => "BARS",
-            Self::Rate => "RATE",
-            Self::Volume => "VOLUME",
-            Self::Swing => "SWING",
-            Self::BassGain => "BASS GAIN",
-            Self::BassHarsh => "BASS SQR",
-            Self::BassDecay => "BASS DECAY",
-            Self::ArpGain => "ARP GAIN",
-            Self::ArpHarsh => "ARP SQR",
-            Self::ArpDecay => "ARP DECAY",
-            Self::KickGain => "KICK",
-            Self::HatGain => "HAT",
-            Self::Seed => "SEED",
+            Self::Bpm => FieldSpec::new("BPM", "", 40.0, 240.0, 1.0, Linear),
+            Self::Bars => FieldSpec::new("BARS", "", 1.0, 16.0, 1.0, Linear),
+            Self::Rate => FieldSpec::new("BAKE RATE", "Hz", 8000.0, 48000.0, 100.0, Log),
+            Self::Volume => FieldSpec::new("VOLUME", "", -40.0, 0.0, 0.5, Linear),
+            Self::Swing => FieldSpec::new("SWING", "", 0.0, 0.5, 0.01, Linear),
+            Self::BassGain => FieldSpec::new("BASS GAIN", "", 0.0, 1.0, 0.005, Linear),
+            Self::BassHarsh => FieldSpec::new("BASS SQR", "", 0.0, 1.0, 0.01, Linear),
+            Self::BassDecay => FieldSpec::new("BASS DECAY", "", 0.5, 30.0, 0.1, Linear),
+            Self::ArpGain => FieldSpec::new("ARP GAIN", "", 0.0, 1.0, 0.005, Linear),
+            Self::ArpHarsh => FieldSpec::new("ARP SQR", "", 0.0, 1.0, 0.01, Linear),
+            Self::ArpDecay => FieldSpec::new("ARP DECAY", "", 0.5, 30.0, 0.1, Linear),
+            Self::KickGain => FieldSpec::new("KICK", "", 0.0, 1.0, 0.005, Linear),
+            Self::HatGain => FieldSpec::new("HAT", "", 0.0, 1.0, 0.005, Linear),
+            Self::Seed => FieldSpec::new("SEED", "", 0.0, 99_999_999.0, 1.0, Linear),
         }
     }
 
+    pub fn label(self) -> &'static str {
+        self.spec().label
+    }
+
     pub fn range(self) -> (f32, f32, f32) {
-        match self {
-            Self::Bpm => (40.0, 240.0, 1.0),
-            Self::Bars => (1.0, 16.0, 1.0),
-            Self::Rate => (8000.0, 48000.0, 100.0),
-            Self::Volume => (-40.0, 0.0, 0.5),
-            Self::Swing => (0.0, 0.5, 0.01),
-            Self::BassGain | Self::ArpGain | Self::KickGain | Self::HatGain => (0.0, 1.0, 0.005),
-            Self::BassHarsh | Self::ArpHarsh => (0.0, 1.0, 0.01),
-            Self::BassDecay | Self::ArpDecay => (0.5, 30.0, 0.1),
-            Self::Seed => (0.0, 99_999_999.0, 1.0),
-        }
+        let spec = self.spec();
+        (spec.min, spec.max, spec.step)
+    }
+
+    pub fn norm(self, value: f32) -> f32 {
+        self.spec().norm(value)
+    }
+
+    pub fn denorm(self, norm: f32) -> f32 {
+        self.spec().denorm(norm)
     }
 
     pub fn get(self, music: &Music) -> f32 {
@@ -1418,17 +1775,19 @@ mod tests {
 
     #[test]
     fn cutoff_envelope_interpolates() {
-        let mut clip = Clip::default();
-        clip.cutoff_points = vec![
-            AutomationPoint {
-                time: 0.0,
-                value: 200.0,
-            },
-            AutomationPoint {
-                time: 0.1,
-                value: 10000.0,
-            },
-        ];
+        let clip = Clip {
+            cutoff_points: vec![
+                AutomationPoint {
+                    time: 0.0,
+                    value: 200.0,
+                },
+                AutomationPoint {
+                    time: 0.1,
+                    value: 10000.0,
+                },
+            ],
+            ..Clip::default()
+        };
         assert!((clip.cutoff_at(0.05) - 5100.0).abs() < 1.0);
     }
 
@@ -1463,6 +1822,98 @@ mod tests {
     fn sanitize_names() {
         assert_eq!(sanitize("Laser Beam!"), "laser_beam");
         assert_eq!(sanitize("  "), "sound");
+        assert_eq!(sanitize("金币 2"), "sound");
+    }
+
+    #[test]
+    fn validate_repairs_untrusted_values_and_duplicate_names() {
+        let mut project = Project::demo("validate");
+        project.patches[0].rate = 0;
+        project.patches[0].layers[0].duration = f32::NAN;
+        project.patches[0].layers[0].freq_start = -50.0;
+        project.patches[0].layers[0].clips.push(Clip {
+            start: f32::INFINITY,
+            duration: 99.0,
+            gain: 99.0,
+            ..Clip::default()
+        });
+        let duplicate = project.patches[0].clone();
+        project.patches.push(duplicate);
+        let warnings = project.validate();
+        assert!(!warnings.is_empty());
+        assert!(project.patches[0].rate >= 8000);
+        assert!(project.patches[0].layers[0].duration.is_finite());
+        assert!(project.patches[0].layers[0].freq_start >= 20.0);
+        assert!((project.patches[0].layers[0].clips[0].gain - 2.0).abs() < 0.001);
+        assert_ne!(project.patches[0].name, project.patches[1].name);
+    }
+
+    #[test]
+    fn migrate_stamps_the_current_schema() {
+        let mut project = Project::demo("old");
+        project.version = 1;
+        project.patches[0].dsp_version = 0;
+        let warnings = project.migrate();
+        assert!(!warnings.is_empty());
+        assert_eq!(project.version, PROJECT_VERSION);
+        assert_eq!(project.patches[0].dsp_version, DSP_VERSION);
+    }
+
+    #[test]
+    fn save_is_atomic_and_roundtrips() {
+        let root = std::env::temp_dir().join(format!(
+            "sfx-studio-save-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let project = Project::demo("atomic");
+        save_project(&root, &project).unwrap();
+        assert!(!root.join("sfx.project.json.tmp").exists());
+        let loaded = load_project(&root).unwrap().unwrap();
+        assert_eq!(loaded.name, "atomic");
+        assert_eq!(loaded.patches.len(), project.patches.len());
+        // A corrupt file must be an error, not a silent demo fallback.
+        std::fs::write(root.join(PROJECT_FILE), "{ not json").unwrap();
+        assert!(load_project(&root).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn log_fields_map_to_a_geometric_midpoint() {
+        for field in [
+            LayerField::FreqStart,
+            LayerField::CutoffStart,
+            LayerField::Arp0,
+        ] {
+            let spec = field.spec();
+            let mid = field.denorm(0.5);
+            let expected = (spec.min * spec.max).sqrt();
+            assert!(
+                (mid - expected).abs() / expected < 0.01,
+                "{:?} midpoint {mid} != {expected}",
+                field
+            );
+            let roundtrip = field.norm(field.denorm(0.37));
+            assert!((roundtrip - 0.37).abs() < 0.001);
+        }
+        // Linear fields still behave linearly.
+        assert!((LayerField::Gain.denorm(0.5) - 0.5).abs() < 0.001);
+        assert!((LayerField::Gain.norm(0.5) - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn tone_env_survives_json() {
+        let mut project = Project::demo("tone");
+        project.patches[0].layers[0].tone_env = ToneEnv::Exp;
+        project.patches[0].layers[0].exp_decay = 7.5;
+        let text = serde_json::to_string(&project).unwrap();
+        let back: Project = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.patches[0].layers[0].tone_env, ToneEnv::Exp);
+        assert!((back.patches[0].layers[0].exp_decay - 7.5).abs() < 0.001);
     }
 }
 
@@ -1488,7 +1939,7 @@ impl AutomationKind {
         }
     }
 
-    pub fn points(self, clip: &Clip) -> &Vec<AutomationPoint> {
+    pub fn points(self, clip: &Clip) -> &[AutomationPoint] {
         match self {
             Self::Gain => &clip.gain_points,
             Self::Cutoff => &clip.cutoff_points,
@@ -1535,22 +1986,31 @@ pub enum ClipField {
 }
 
 impl ClipField {
-    pub fn label(self) -> &'static str {
+    pub fn spec(self) -> FieldSpec {
+        use Scale::Linear;
         match self {
-            Self::Start => "START",
-            Self::Duration => "LENGTH",
-            Self::Gain => "GAIN",
-            Self::Pitch => "PITCH",
+            Self::Start => FieldSpec::new("START", "s", 0.0, 8.0, 0.001, Linear),
+            Self::Duration => FieldSpec::new("LENGTH", "s", 0.005, 3.0, 0.001, Linear),
+            Self::Gain => FieldSpec::new("GAIN", "", 0.0, 2.0, 0.005, Linear),
+            Self::Pitch => FieldSpec::new("PITCH", "st", -24.0, 24.0, 0.1, Linear),
         }
     }
 
+    pub fn label(self) -> &'static str {
+        self.spec().label
+    }
+
     pub fn range(self) -> (f32, f32, f32) {
-        match self {
-            Self::Start => (0.0, 8.0, 0.001),
-            Self::Duration => (0.005, 3.0, 0.001),
-            Self::Gain => (0.0, 2.0, 0.005),
-            Self::Pitch => (-24.0, 24.0, 0.1),
-        }
+        let spec = self.spec();
+        (spec.min, spec.max, spec.step)
+    }
+
+    pub fn norm(self, value: f32) -> f32 {
+        self.spec().norm(value)
+    }
+
+    pub fn denorm(self, norm: f32) -> f32 {
+        self.spec().denorm(norm)
     }
 
     pub fn get(self, clip: &Clip) -> f32 {

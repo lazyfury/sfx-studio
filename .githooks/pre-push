@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Mandatory before pushing: quality gate + independent second-review record.
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+
+"$root/scripts/preflight.sh"
+"$root/scripts/review_gate.sh"

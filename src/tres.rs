@@ -7,15 +7,21 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::model::{EnvShape, FilterMode, Layer, Music, MusicWave, Patch, Project, Wave};
+use crate::model::{
+    Category, EnvShape, FilterMode, Layer, Music, MusicWave, Patch, Project, ToneEnv, Wave,
+    PROJECT_VERSION,
+};
 
-pub fn import_project(root: &Path) -> Project {
+/// Import a Godot project folder. `Ok(None)` means the folder has no SFX
+/// resources at all; a malformed project JSON is an error, never a silent demo.
+pub fn import_project(root: &Path) -> Result<Option<Project>, String> {
     let name = root
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("project")
         .to_string();
     let mut project = Project {
+        version: PROJECT_VERSION,
         name: name.clone(),
         patches: Vec::new(),
         music: Music::default(),
@@ -28,7 +34,7 @@ pub fn import_project(root: &Path) -> Project {
             if path.extension().and_then(|s| s.to_str()) != Some("tres") {
                 continue;
             }
-            if let Some(text) = std::fs::read_to_string(&path).ok() {
+            if let Ok(text) = std::fs::read_to_string(&path) {
                 if let Some(mut patch) = parse_patch(&text) {
                     if patch.name.is_empty() {
                         patch.name = path
@@ -45,17 +51,19 @@ pub fn import_project(root: &Path) -> Project {
     project.patches.sort_by(|a, b| a.name.cmp(&b.name));
 
     let music_path = root.join("audio").join("music.tres");
+    let mut found_music = false;
     if let Ok(text) = std::fs::read_to_string(music_path) {
         if let Some(music) = parse_music(&text) {
             project.music = music;
+            found_music = true;
         }
     }
 
-    if project.patches.is_empty() {
-        Project::demo(name)
-    } else {
-        project
+    if project.patches.is_empty() && !found_music {
+        return Ok(None);
     }
+    project.migrate();
+    Ok(Some(project))
 }
 
 #[derive(Default)]
@@ -88,10 +96,22 @@ pub fn parse_patch(text: &str) -> Option<Patch> {
         return None;
     }
 
-    patch.rate = int(&sections.resource, "rate").unwrap_or(22050).max(8000) as u32;
-    patch.normalize = float(&sections.resource, "normalize_layers")
-        .map(|v| v != 0.0)
+    patch.rate = int(&sections.resource, "rate")
+        .unwrap_or(22050)
+        .clamp(8000, 48000) as u32;
+    patch.normalize = sections
+        .resource
+        .get("normalize_layers")
+        .map(|value| bool_value(value))
         .unwrap_or(true);
+    if let Some(name) = sections.resource.get("resource_name") {
+        patch.name = unquote(name);
+    }
+    if let Some(group) = sections.resource.get("group") {
+        if let Some(category) = Category::from_group(&unquote(group)) {
+            patch.category = category;
+        }
+    }
     Some(patch)
 }
 
@@ -280,6 +300,7 @@ fn layer_from_fields(
     set_f32(fields, "decay", &mut layer.decay);
     set_f32(fields, "sustain", &mut layer.sustain);
     set_f32(fields, "release", &mut layer.release);
+    set_f32(fields, "exp_decay", &mut layer.exp_decay);
     set_f32(fields, "cutoff_start", &mut layer.cutoff_start);
     set_f32(fields, "cutoff_end", &mut layer.cutoff_end);
     set_f32(fields, "resonance", &mut layer.resonance);
@@ -312,6 +333,9 @@ fn layer_from_fields(
         } else {
             EnvShape::Exp
         };
+    }
+    if let Some(v) = int(fields, "tone_env") {
+        layer.tone_env = ToneEnv::from_godot_id(v as u32);
     }
     if let Some(v) = int(fields, "seed_value") {
         layer.seed = v as u32;
@@ -402,7 +426,16 @@ fn int(fields: &HashMap<String, String>, key: &str) -> Option<i64> {
 }
 
 fn bool_value(value: &str) -> bool {
-    matches!(value, "true" | "True" | "1")
+    matches!(value.trim(), "true" | "True" | "1")
+}
+
+fn unquote(value: &str) -> String {
+    let value = value.trim();
+    let inner = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(value);
+    inner.replace("\\\"", "\"").replace("\\\\", "\\")
 }
 
 fn float_array(value: &str) -> Vec<f32> {
