@@ -1,0 +1,33 @@
+[package]
+name = "sfx-studio"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+description = "SFX LAB — compact standalone game-audio synthesizer built on igui"
+
+[[bin]]
+name = "sfx-studio"
+path = "src/main.rs"
+
+[dependencies]
+# UI layers from the sibling igui checkout.
+igui_core = { path = "../igui/crates/core/igui_core" }
+igui_render = { path = "../igui/crates/core/igui_render" }
+igui_ui = { path = "../igui/crates/core/igui_ui" }
+igui_svg = { path = "../igui/crates/assets/igui_svg" }
+igui_app = { path = "../igui/crates/app/igui_app" }
+igui_winit = { path = "../igui/crates/window/igui_winit" }
+igui_backend_wgpu = { path = "../igui/crates/platform/wgpu/igui_backend_wgpu" }
+igui_headless = { path = "../igui/crates/app/igui_headless" }
+igui_backend_recording = { path = "../igui/crates/platform/recording/igui_backend_recording" }
+cpal = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = "symbols"

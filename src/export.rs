@@ -1,0 +1,390 @@
+//! Export the project for Godot:
+//! - baked mono WAVs + `audio/sfx_manifest.json`
+//! - `.tres` resources for the `sfx_studio` addon
+
+use std::fmt::Write as _;
+use std::path::Path;
+
+use crate::model::{Layer, Music, Patch, Project};
+use crate::synth;
+
+pub fn bake(project: &Project, root: &Path) -> Result<String, String> {
+    let baked = root.join("audio").join("baked");
+    std::fs::create_dir_all(&baked).map_err(|e| e.to_string())?;
+
+    let mut entries = Vec::new();
+    for patch in &project.patches {
+        let name = patch.safe_name();
+        let samples = synth::render_patch(patch, patch.rate);
+        write_baked_wav(&baked.join(format!("{name}.wav")), &samples, patch.rate)?;
+        entries.push(serde_json::json!({
+            "name": name,
+            "wav": format!("res://audio/baked/{name}.wav"),
+            "rate": patch.rate,
+            "duration": samples.len() as f32 / patch.rate as f32,
+            "loop": false
+        }));
+    }
+
+    let music_samples = synth::render_music(&project.music, project.music.rate);
+    synth::write_wav(&baked.join("music.wav"), &music_samples, project.music.rate)
+        .map_err(|e| e.to_string())?;
+
+    let manifest = serde_json::json!({
+        "version": 1,
+        "project": project.name,
+        "sounds": entries,
+        "music": {
+            "wav": "res://audio/baked/music.wav",
+            "rate": project.music.rate,
+            "duration": music_samples.len() as f32 / project.music.rate as f32,
+            "loop": true,
+            "db": project.music.volume_db
+        }
+    });
+    write_json(&root.join("audio").join("sfx_manifest.json"), &manifest)?;
+    Ok(format!(
+        "baked {} patch(es) + music → audio/baked/",
+        project.patches.len()
+    ))
+}
+
+pub fn export_tres(project: &Project, root: &Path) -> Result<String, String> {
+    let dir = root.join("audio").join("sfx");
+    let baked_dir = root.join("audio").join("baked");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&baked_dir).map_err(|e| e.to_string())?;
+    let mut baked_count = 0;
+    for patch in &project.patches {
+        let text = if patch.has_automation() {
+            // Automation cannot be flattened to SfxLayer. Bake the exact result
+            // and point `baked` at it; the layer parameters stay in the file.
+            let name = patch.safe_name();
+            let samples = synth::render_patch(patch, patch.rate);
+            write_baked_wav(&baked_dir.join(format!("{name}.wav")), &samples, patch.rate)?;
+            baked_count += 1;
+            patch_tres_baked(patch, &format!("res://audio/baked/{name}.wav"))
+        } else {
+            patch_tres(patch)
+        };
+        let path = dir.join(format!("{}.tres", patch.safe_name()));
+        std::fs::write(path, text).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(
+        root.join("audio").join("music.tres"),
+        music_tres(&project.music),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "exported {} .tres patch(es) + music.tres ({baked_count} baked with automation)",
+        project.patches.len()
+    ))
+}
+
+fn write_baked_wav(path: &Path, samples: &[f32], rate: u32) -> Result<(), String> {
+    synth::write_wav(path, samples, rate).map_err(|e| e.to_string())?;
+    // Force PCM import. Godot 4.7's default WAV import is QOA (lossy); a minimal
+    // sidecar with `compress/mode=0` makes the editor fill the rest and keep PCM.
+    let sidecar = path.with_extension("wav.import");
+    std::fs::write(sidecar, "[params]\n\ncompress/mode=0\n").map_err(|e| e.to_string())
+}
+
+fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    std::fs::write(path, text).map_err(|e| e.to_string())
+}
+
+pub fn patch_tres(patch: &Patch) -> String {
+    patch_tres_inner(patch, None)
+}
+
+/// A patch with automation exports the exact rendered WAV as `baked`.
+pub fn patch_tres_baked(patch: &Patch, wav_path: &str) -> String {
+    patch_tres_inner(patch, Some(wav_path))
+}
+
+fn patch_tres_inner(patch: &Patch, baked: Option<&str>) -> String {
+    let mut out = String::new();
+    out.push_str("[gd_resource type=\"Resource\" script_class=\"SfxPatch\" format=3]\n\n");
+    if let Some(path) = baked {
+        let _ = writeln!(
+            out,
+            "[ext_resource type=\"AudioStreamWAV\" path=\"{path}\" id=\"1_audio\"]"
+        );
+    }
+    out.push_str("[ext_resource type=\"Script\" path=\"res://addons/sfx_studio/core/sfx_layer.gd\" id=\"1_layer\"]\n");
+    out.push_str("[ext_resource type=\"Script\" path=\"res://addons/sfx_studio/core/sfx_patch.gd\" id=\"2_patch\"]\n\n");
+
+    let mut ids = Vec::new();
+    for (index, layer) in patch.layers.iter().enumerate() {
+        if layer.clips.is_empty() {
+            let id = format!("layer_{index}");
+            ids.push(id.clone());
+            let _ = writeln!(out, "[sub_resource type=\"Resource\" id=\"{id}\"]");
+            out.push_str("script = ExtResource(\"1_layer\")\n");
+            write_layer(&mut out, layer);
+            out.push('\n');
+        } else {
+            for (clip_index, clip) in layer.clips.iter().enumerate() {
+                let id = format!("layer_{index}_{clip_index}");
+                ids.push(id.clone());
+                let mut copy = layer.with_pitch(clip.pitch);
+                copy.delay = clip.start;
+                copy.duration = clip.duration.min(layer.duration);
+                copy.gain = layer.gain * clip.gain;
+                copy.clips.clear();
+                let _ = writeln!(out, "[sub_resource type=\"Resource\" id=\"{id}\"]");
+                out.push_str("script = ExtResource(\"1_layer\")\n");
+                write_layer(&mut out, &copy);
+                out.push('\n');
+            }
+        }
+    }
+    out.push_str("[resource]\n");
+    out.push_str("script = ExtResource(\"2_patch\")\n");
+    if baked.is_some() {
+        out.push_str("baked = ExtResource(\"1_audio\")\n");
+    }
+    let _ = writeln!(out, "rate = {}", patch.rate);
+    let _ = writeln!(out, "normalize_layers = {}", bool_lit(patch.normalize));
+    out.push_str("layers = Array[ExtResource(\"1_layer\")]([");
+    for (index, id) in ids.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "SubResource(\"{id}\")");
+    }
+    out.push_str("])\n");
+    out
+}
+
+fn write_layer(out: &mut String, layer: &Layer) {
+    let _ = writeln!(out, "wave = {}", layer.wave.godot_id());
+    let _ = writeln!(out, "enabled = {}", bool_lit(layer.enabled));
+    let _ = writeln!(out, "delay = {}", f(layer.delay));
+    let _ = writeln!(out, "duration = {}", f(layer.duration));
+    let _ = writeln!(out, "gain = {}", f(layer.gain));
+    let _ = writeln!(out, "freq_start = {}", f(layer.freq_start));
+    let _ = writeln!(out, "freq_end = {}", f(layer.freq_end));
+    let _ = writeln!(out, "harsh = {}", f(layer.harsh));
+    let _ = writeln!(out, "duty = {}", f(layer.duty));
+    let _ = writeln!(out, "vibrato_rate = {}", f(layer.vibrato_rate));
+    let _ = writeln!(out, "vibrato_depth = {}", f(layer.vibrato_depth));
+    let _ = writeln!(out, "attack = {}", f(layer.attack));
+    let _ = writeln!(out, "decay = {}", f(layer.decay));
+    let _ = writeln!(out, "sustain = {}", f(layer.sustain));
+    let _ = writeln!(out, "release = {}", f(layer.release));
+    let _ = writeln!(out, "filter_mode = {}", layer.filter as u32);
+    let _ = writeln!(out, "cutoff_start = {}", f(layer.cutoff_start));
+    let _ = writeln!(out, "cutoff_end = {}", f(layer.cutoff_end));
+    let _ = writeln!(out, "resonance = {}", f(layer.resonance));
+    let _ = writeln!(out, "arp_freqs = {}", float_array(&layer.arp_freqs));
+    let _ = writeln!(out, "step = {}", f(layer.step));
+    let _ = writeln!(out, "lowpass_from = {}", f(layer.lowpass_from));
+    let _ = writeln!(out, "lowpass_to = {}", f(layer.lowpass_to));
+    let _ = writeln!(out, "noise_gain = {}", f(layer.noise_gain));
+    let _ = writeln!(out, "sweep_gain = {}", f(layer.sweep_gain));
+    let _ = writeln!(out, "env_shape = {}", layer.env_shape as u32);
+    let _ = writeln!(out, "seed_value = {}", layer.seed);
+    let _ = writeln!(out, "fm_ratio = {}", f(layer.fm_ratio));
+    let _ = writeln!(out, "fm_index = {}", f(layer.fm_index));
+    let _ = writeln!(out, "fm_decay = {}", f(layer.fm_decay));
+    let _ = writeln!(out, "pluck_damping = {}", f(layer.pluck_damping));
+    let _ = writeln!(out, "pluck_brightness = {}", f(layer.pluck_brightness));
+    let _ = writeln!(out, "drum_tone = {}", f(layer.drum_tone));
+    let _ = writeln!(out, "drum_snap = {}", f(layer.drum_snap));
+}
+
+pub fn music_tres(music: &Music) -> String {
+    let mut out = String::new();
+    out.push_str("[gd_resource type=\"Resource\" script_class=\"SfxMusic\" format=3]\n\n");
+    out.push_str("[ext_resource type=\"Script\" path=\"res://addons/sfx_studio/core/sfx_music.gd\" id=\"1_music\"]\n\n");
+    out.push_str("[resource]\n");
+    out.push_str("script = ExtResource(\"1_music\")\n");
+    let _ = writeln!(out, "bpm = {}", f(music.bpm));
+    let _ = writeln!(out, "bars = {}", music.bars);
+    let _ = writeln!(out, "rate = {}", music.rate);
+    let _ = writeln!(out, "volume_db = {}", f(music.volume_db));
+    let _ = writeln!(out, "seed_value = {}", music.seed);
+    let _ = writeln!(out, "bass_notes = {}", float_array(&music.bass_notes));
+    out.push_str("chords = Array[PackedFloat64Array]([");
+    for (index, chord) in music.chords.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&float_array(chord));
+    }
+    out.push_str("])\n");
+    let _ = writeln!(out, "bass_wave = {}", music.bass_wave as u32);
+    let _ = writeln!(out, "arp_wave = {}", music.arp_wave as u32);
+    let _ = writeln!(out, "swing = {}", f(music.swing));
+    let _ = writeln!(out, "use_patterns = {}", bool_lit(music.use_patterns));
+    let _ = writeln!(out, "arp_pattern = {}", int_array(&music.arp_pattern));
+    let _ = writeln!(out, "bass_pattern = {}", int_array(&music.bass_pattern));
+    let _ = writeln!(out, "kick_steps = {}", music.kick_steps);
+    let _ = writeln!(out, "hat_steps = {}", music.hat_steps);
+    let _ = writeln!(out, "bass_gain = {}", f(music.bass_gain));
+    let _ = writeln!(out, "bass_harsh = {}", f(music.bass_harsh));
+    let _ = writeln!(out, "bass_decay = {}", f(music.bass_decay));
+    let _ = writeln!(out, "arp_gain = {}", f(music.arp_gain));
+    let _ = writeln!(out, "arp_harsh = {}", f(music.arp_harsh));
+    let _ = writeln!(out, "arp_decay = {}", f(music.arp_decay));
+    let _ = writeln!(out, "kick_gain = {}", f(music.kick_gain));
+    let _ = writeln!(out, "hat_gain = {}", f(music.hat_gain));
+    let _ = writeln!(out, "normalize = {}", bool_lit(music.normalize));
+    out
+}
+
+fn f(value: f32) -> String {
+    let mut text = format!("{value:.5}");
+    while text.contains('.') && text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.push('0');
+    }
+    text
+}
+
+fn bool_lit(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
+    }
+}
+
+fn float_array(values: &[f32]) -> String {
+    let mut out = String::from("PackedFloat64Array(");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&f(*value));
+    }
+    out.push(')');
+    out
+}
+
+fn int_array(values: &[i32]) -> String {
+    let mut out = String::from("PackedInt32Array(");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{value}");
+    }
+    out.push(')');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tres;
+
+    #[test]
+    fn patch_tres_roundtrips_through_the_reader() {
+        let patch = crate::model::Patch::new_layer("laser", crate::model::Wave::Pulse);
+        let text = patch_tres(&patch);
+        assert!(text.contains("script_class=\"SfxPatch\""));
+        assert!(text.contains("wave = 3"));
+        let back = tres::parse_patch(&text).expect("parse");
+        assert_eq!(back.layers.len(), 1);
+        assert_eq!(back.layers[0].wave, crate::model::Wave::Pulse);
+    }
+
+    #[test]
+    fn clips_are_flattened_to_layers_for_godot() {
+        use crate::model::{Clip, Layer, Patch, Wave};
+        let mut layer = Layer::new(Wave::Sine);
+        layer.duration = 0.1;
+        layer.clips = vec![
+            Clip {
+                start: 0.0,
+                duration: 0.1,
+                gain: 1.0,
+                ..Clip::default()
+            },
+            Clip {
+                start: 0.2,
+                duration: 0.1,
+                gain: 0.5,
+                ..Clip::default()
+            },
+        ];
+        let patch = Patch {
+            name: "clipped".into(),
+            layers: vec![layer],
+            ..Patch::default()
+        };
+        let text = patch_tres(&patch);
+        let back = tres::parse_patch(&text).expect("parse");
+        assert_eq!(back.layers.len(), 2);
+        assert!((back.layers[1].delay - 0.2).abs() < 0.001);
+        assert!((back.layers[1].gain - 0.15).abs() < 0.001);
+    }
+
+    #[test]
+    fn clip_pitch_is_applied_when_flattened() {
+        use crate::model::{Clip, Layer, Patch, Wave};
+        let mut layer = Layer::new(Wave::Sine);
+        layer.freq_start = 440.0;
+        layer.freq_end = 440.0;
+        layer.duration = 0.1;
+        layer.clips = vec![Clip {
+            start: 0.0,
+            duration: 0.1,
+            pitch: 12.0,
+            ..Clip::default()
+        }];
+        let patch = Patch {
+            name: "pitch".into(),
+            layers: vec![layer],
+            ..Patch::default()
+        };
+        let back = tres::parse_patch(&patch_tres(&patch)).expect("parse");
+        assert!((back.layers[0].freq_start - 880.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn automated_patch_uses_baked_wav_reference() {
+        use crate::model::{AutomationPoint, Clip, Layer, Patch, Wave};
+        let mut layer = Layer::new(Wave::Sine);
+        layer.duration = 0.1;
+        layer.clips = vec![Clip {
+            start: 0.0,
+            duration: 0.1,
+            gain: 1.0,
+            ..Clip::default()
+        }];
+        layer.clips[0].gain_points = vec![
+            AutomationPoint {
+                time: 0.0,
+                value: 0.0,
+            },
+            AutomationPoint {
+                time: 0.1,
+                value: 1.0,
+            },
+        ];
+        let patch = Patch {
+            name: "auto".into(),
+            layers: vec![layer],
+            ..Patch::default()
+        };
+        assert!(patch.has_automation());
+        let text = patch_tres_baked(&patch, "res://audio/baked/auto.wav");
+        assert!(text.contains("baked = ExtResource(\"1_audio\")"));
+        assert!(text.contains("type=\"AudioStreamWAV\""));
+        assert!(text.contains("path=\"res://audio/baked/auto.wav\""));
+    }
+
+    #[test]
+    fn music_tres_contains_patterns() {
+        let text = music_tres(&crate::model::Music::default());
+        assert!(text.contains("bass_notes = PackedFloat64Array"));
+        assert!(text.contains("arp_pattern = PackedInt32Array"));
+        assert!(tres::parse_music(&text).is_some());
+    }
+}
