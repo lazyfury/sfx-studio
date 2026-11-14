@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾；app/ui 主体拆分与后台渲染见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分；后台渲染见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -79,7 +79,7 @@
 
 ## 2. 本轮验收证据
 
-审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`、`0008-timeline-zoom-and-library.md`（status: approved，source_hash 匹配）。
+审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`、`0008-timeline-zoom-and-library.md`、`0009-module-split.md`（status: approved，source_hash 匹配）。
 
 ```bash
 cargo fmt --check
@@ -99,7 +99,7 @@ cargo run -- --selfcheck   # 2 frames / 2552 commands / 118 text runs
 
 ## 3. Backlog（下一迭代，按依赖排序）
 
-1. **状态拆分（继续）**：`State { doc, view, playback, ui }`；`app.rs` 拆 `commands/input/audio_bridge`；`ui.rs` 拆 `layout/hit/paint/*`。（`cli.rs` / `project_io.rs` 已完成）
+1. **State 拆分（继续）**：`State { doc, view, playback, ui }`。文件层 `app/{input,commands,audio_bridge}` 与 `ui/{layout,paint,hit}` 已在 0009 完成。
 2. **后台渲染**：`RenderRequest { revision, tab, rate }` → worker → `RenderResult { generation, samples, envelope, peak }`；UI 只接受最新 generation，拖动期间不阻塞。
 3. **稳定 ID + 迁移 v3**：`Patch/Layer/Clip.id`；选区/撤销/导出引用 ID；`Project.version` 升 3 并提供迁移。
 4. **音频 RT 化**：无锁 ring buffer、设备热插拔、48k 固定渲染 + `rubato` 重采样、欠载统计。
@@ -173,7 +173,14 @@ cargo run -- --selfcheck   # 2 frames / 2552 commands / 118 text runs
 - 标尺末端放不下的 tick 文案不再被卡片裁切。
 - 新增 7 条测试（缩放映射、库滚动条、分类菜单、Music 注册表、Shift 关闭吸附、分类过滤）：`cargo test` 62 passed。
 
-## 12. Definition of Done（每个 PR 必须满足）
+## 12. 本轮增量（0009）
+
+- **ui 拆分**：`ui.rs` 3300 → 620 行（共享 Action/Hit/RawItem/Item/Button + 常量 + 测试），新增 `ui/layout.rs`（634）、`ui/paint.rs`（1893）、`ui/hit.rs`（176）；`pub use` 保持 `ui::Layout`、`ui::hit`、`ui::paint` 等外部接口不变。
+- **app 拆分**：`app.rs` 2488 → 891 行（State/Tab/Drag/Modal + 工具函数 + 测试），新增 `app/input.rs`（963，AppLogic + 指针拖拽）、`app/commands.rs`（587，文件/导出/编辑命令）、`app/audio_bridge.rs`（67，play/seek/stop）。
+- 跨子模块调用的方法改为 `pub(super)`；子模块统一 `use super::*;` 复用父模块导入，无重复依赖声明。
+- 纯结构调整：62 tests、selfcheck `2552 commands / 118 text runs` 与拆分前完全一致，默认界面截图无变化。
+
+## 13. Definition of Done（每个 PR 必须满足）
 
 - [ ] `docs/PLAN.md` 对应条目状态更新。
 - [ ] `scripts/preflight.sh` 全绿（fmt / clippy -D warnings / test / selfcheck）。

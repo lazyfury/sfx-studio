@@ -16,8 +16,10 @@ crate, no symlinked Rust sources.
 ├── scripts/               # preflight / review gate / source hash / hooks
 ├── src/
 │   ├── main.rs
-│   ├── app.rs             # igui AppLogic, input, undo, audio bridge
-│   ├── ui.rs              # dark compact workspace, waveform, timeline, menu
+│   ├── app.rs             # AppLogic state machine + undo/history
+│   ├── app/               # input events, commands, audio bridge
+│   ├── ui.rs              # shared actions/hit types + widget contracts
+│   ├── ui/                # layout, paint and hit-testing modules
 │   ├── model.rs           # Project / Patch / Layer / Clip / categories
 │   ├── synth.rs           # oscillators, noise, FM, pluck, drums, music
 │   ├── audio.rs           # cpal playback
