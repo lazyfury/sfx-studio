@@ -1,35 +1,36 @@
 //! SFX LAB — Minimal Studio tokens and compact paint helpers.
 //!
-//! Dark near-black surfaces, one lime accent, hairline borders, and a darker
-//! "playback" surface so the waveform stays the visual anchor.
+//! Neutral graphite surfaces (no colour wash), hairline borders, one lime
+//! accent reserved for indicators, and a darker "playback" surface so the
+//! waveform stays the visual anchor.
 
 use igui_core::{Color, Rect, Vec2};
 use igui_render::{PaintContext, TextAlign};
 use igui_svg::SvgDocument;
 use igui_ui::TextMeasurer;
 
-pub const BG: Color = hex(0x141714);
-pub const PANEL: Color = hex(0x1C201C);
-pub const RAISED: Color = hex(0x242A24);
-pub const BORDER: Color = hex(0x303830);
-pub const BORDER_HI: Color = hex(0x44503F);
-pub const TEXT: Color = hex(0xE6ECE3);
-pub const DIM: Color = hex(0x9AA393);
-pub const FAINT: Color = hex(0x6E776A);
+pub const BG: Color = hex(0x141414);
+pub const PANEL: Color = hex(0x1C1C1C);
+pub const RAISED: Color = hex(0x242424);
+pub const BORDER: Color = hex(0x303030);
+pub const BORDER_HI: Color = hex(0x4A4A4A);
+pub const TEXT: Color = hex(0xE8E8E8);
+pub const DIM: Color = hex(0x9C9C9C);
+pub const FAINT: Color = hex(0x6F6F6F);
 pub const ACCENT: Color = hex(0xA8CE86);
 pub const ACCENT_DARK: Color = hex(0x7FA35F);
-/// Muted accent washes for active states: a hint of color instead of a solid
-/// brand block, so the waveform and timeline stay the visual anchors.
-pub const ACCENT_TINT: Color = Color::new(0.659, 0.808, 0.525, 0.14);
+/// Accent hairline used for focus/active outlines; active fills stay neutral.
 pub const ACCENT_LINE: Color = Color::new(0.659, 0.808, 0.525, 0.5);
 pub const ACCENT2: Color = hex(0x8DBBEA);
 pub const WARN: Color = hex(0xE4B45A);
-pub const HOVER: Color = hex(0x232A22);
-pub const ACTIVE: Color = hex(0x2C3529);
-pub const DARK: Color = hex(0x0D100D);
-pub const DARK_DIM: Color = hex(0x8F9A8A);
+pub const HOVER: Color = hex(0x232323);
+pub const ACTIVE: Color = hex(0x2D2D2D);
+pub const DARK: Color = hex(0x0D0D0D);
+pub const DARK_DIM: Color = hex(0x909090);
 /// Slightly lifted surface for the timeline body so clips read brighter.
-pub const TRACK_BG: Color = hex(0x212621);
+pub const TRACK_BG: Color = hex(0x202020);
+/// Neutral "step on" cell for the pattern grid.
+pub const CELL_ON: Color = hex(0x363636);
 
 pub const VIEW_W: f32 = 1440.0;
 pub const VIEW_H: f32 = 900.0;
@@ -156,7 +157,7 @@ pub fn button_icon(
     active: bool,
 ) {
     let bg = if active {
-        ACCENT_TINT
+        ACTIVE
     } else if hovered {
         HOVER
     } else {

@@ -145,7 +145,7 @@ cargo run -- --selfcheck   # 2 frames / 2537 commands / 118 text runs
 - 左侧列表修复收藏星标与波形标签重叠：星标固定槽位、标签统一右对齐、名称省略宽度按实测文本计算。
 - 面板边距统一：检查器内容内缩 6px（分隔线/滑杆/按钮不贴边）、中央标题卡按钮垂直居中并留右内边距、自动化 tabs 留边距。
 - 标题栏对齐：左侧 LIBRARY 与右侧 PARAMETERS 使用同一套 26px raised 标题条。
-- 播放头时间标签加暗色底片，消除与标尺 0.00 的叠字；主题色弱化、时间线表面提亮。
+- 播放头时间标签加暗色底片，消除与标尺 0.00 的叠字；面板表面统一为中性石墨灰（不叠加主题色），时间线表面提亮，主题色仅用于指示/交互反馈。
 - `scripts/source_hash.sh` 纳入 `assets/`，图标资源不再绕过审查门禁。
 - 新增 `inspector_controls_keep_panel_margins` 布局测试；`cargo test` 48 passed。
 

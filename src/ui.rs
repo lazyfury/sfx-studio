@@ -1906,7 +1906,7 @@ fn paint_patterns(
         let on = pattern_on(&state.project.music, *row, *step);
         let hovered = rect.contains(state.cursor);
         let color = if on {
-            Color::new(ACCENT.r, ACCENT.g, ACCENT.b, 0.45)
+            CELL_ON
         } else if hovered {
             BORDER_HI
         } else {
