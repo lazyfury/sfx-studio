@@ -24,7 +24,8 @@ pub(super) struct RenderKey {
     pub rate: u32,
     pub version: u64,
     pub music_version: u64,
-    pub patch: usize,
+    /// Stable patch id (0 only if the project is empty).
+    pub patch: u32,
 }
 
 enum RenderPayload {
@@ -218,7 +219,7 @@ impl SfxLogic {
             rate,
             version: self.state.doc.version,
             music_version: self.state.doc.music_version,
-            patch: self.state.view.selected_patch,
+            patch: self.state.patch().map(|patch| patch.id).unwrap_or(0),
         }
     }
 

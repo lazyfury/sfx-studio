@@ -8,7 +8,8 @@
 
 ```json
 {
-  "version": 2,
+  "version": 3,
+  "next_id": 128,
   "name": "my_game",
   "patches": [],
   "music": {}
@@ -18,6 +19,7 @@
 | 字段 | 说明 |
 |---|---|
 | `version` | 工程 schema 版本。缺失时按 1 处理，加载后迁移到当前版本。 |
+| `next_id` | 稳定 ID 发号器；旧文件缺失时自动补全并顺延。 |
 | `name` | 工程显示名。导出 manifest 会用到。 |
 | `patches` | 音效列表，最多 512。 |
 | `music` | 背景音乐参数。 |
@@ -26,6 +28,7 @@
 
 | 字段 | 说明 |
 |---|---|
+| `id` | 工程内稳定 ID（Patch/Layer/Clip 共享一个发号器），加载/编辑时补全并去重。 |
 | `name` | 显示名，允许中文/空格。导出时转成安全文件名并去重。 |
 | `category` | `impact/laser/ui/movement/magic/environment/combat`；导出为 `.tres` 的 `group`。 |
 | `favorite` | 仅 Rust 端库筛选使用；不写入 `.tres`。 |
@@ -85,7 +88,7 @@ audio/
 ```json
 {
   "version": 2,
-  "schema_version": 2,
+  "schema_version": 3,
   "project": "my_game",
   "sounds": [
     {
@@ -123,5 +126,6 @@ audio/
 |---|---|
 | 1 | 无 `version` 字段的初始格式。 |
 | 2 | 增加 `version`、`Patch.dsp_version`、`Layer.tone_env/exp_decay`；加载时自动迁移。 |
+| 3 | 增加稳定 ID：`Project.next_id`、`Patch/Layer/Clip.id`；缺失/重复时自动分配，加载时迁移。 |
 
 迁移函数：`model::Project::migrate`。新增字段一律 `#[serde(default)]`，保证旧文件可读。

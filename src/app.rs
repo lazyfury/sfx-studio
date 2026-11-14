@@ -310,6 +310,9 @@ impl State {
     }
 
     pub fn mark_dirty(&mut self) {
+        // Structural edits (add/duplicate) can introduce id-less objects;
+        // assign stable IDs before the snapshot/version moves on.
+        self.doc.project.ensure_ids();
         self.doc.version = self.doc.version.wrapping_add(1);
         self.view.view_version = self.view.view_version.wrapping_add(1);
         self.doc.redo.clear();

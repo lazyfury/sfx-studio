@@ -22,6 +22,7 @@ pub fn import_project(root: &Path) -> Result<Option<Project>, String> {
         .to_string();
     let mut project = Project {
         version: PROJECT_VERSION,
+        next_id: 1,
         name: name.clone(),
         patches: Vec::new(),
         music: Music::default(),

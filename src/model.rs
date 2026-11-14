@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub const PROJECT_FILE: &str = "sfx.project.json";
 
 /// Current on-disk project schema. Bump this whenever a migration is needed.
-pub const PROJECT_VERSION: u32 = 2;
+pub const PROJECT_VERSION: u32 = 3;
 
 /// Current DSP formula generation. Reserved for versioned render dispatch.
 pub const DSP_VERSION: u32 = 1;
@@ -299,6 +299,9 @@ impl Default for AutomationPoint {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Clip {
+    /// Stable identity within the project; assigned on load/edit.
+    #[serde(default)]
+    pub id: u32,
     pub start: f32,
     pub duration: f32,
     /// Multiplier on the layer gain (1.0 = unchanged).
@@ -314,6 +317,7 @@ pub struct Clip {
 impl Default for Clip {
     fn default() -> Self {
         Self {
+            id: 0,
             start: 0.0,
             duration: 0.15,
             gain: 1.0,
@@ -414,6 +418,9 @@ impl Clip {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Layer {
+    /// Stable identity within the project; assigned on load/edit.
+    #[serde(default)]
+    pub id: u32,
     pub wave: Wave,
     pub enabled: bool,
     pub delay: f32,
@@ -459,6 +466,7 @@ pub struct Layer {
 impl Default for Layer {
     fn default() -> Self {
         Self {
+            id: 0,
             wave: Wave::Sine,
             enabled: true,
             delay: 0.0,
@@ -503,6 +511,7 @@ impl Default for Layer {
 impl Layer {
     pub fn new(wave: Wave) -> Self {
         Self {
+            id: 0,
             wave,
             ..Default::default()
         }
@@ -518,6 +527,7 @@ impl Layer {
 
     pub fn implicit_clip(&self) -> Clip {
         Clip {
+            id: 0,
             start: self.delay,
             duration: self.duration,
             gain: 1.0,
@@ -604,6 +614,9 @@ impl Layer {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Patch {
+    /// Stable identity within the project; assigned on load/edit.
+    #[serde(default)]
+    pub id: u32,
     pub name: String,
     pub category: Category,
     pub favorite: bool,
@@ -618,6 +631,7 @@ pub struct Patch {
 impl Default for Patch {
     fn default() -> Self {
         Self {
+            id: 0,
             name: String::new(),
             category: Category::Impact,
             favorite: false,
@@ -755,6 +769,9 @@ pub struct Project {
     /// On-disk schema version. Files written before versioning default to 1.
     #[serde(default = "default_project_version")]
     pub version: u32,
+    /// Monotonic ID source for patches/layers/clips.
+    #[serde(default)]
+    pub next_id: u32,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -767,6 +784,7 @@ impl Default for Project {
     fn default() -> Self {
         Self {
             version: PROJECT_VERSION,
+            next_id: 1,
             name: String::new(),
             patches: Vec::new(),
             music: Music::default(),
@@ -774,10 +792,22 @@ impl Default for Project {
     }
 }
 
+fn assign_id(id: &mut u32, seen: &mut Vec<u32>, next: &mut u32) {
+    if *id == 0 || seen.contains(id) {
+        while seen.contains(next) {
+            *next += 1;
+        }
+        *id = *next;
+        *next += 1;
+    }
+    seen.push(*id);
+}
+
 impl Project {
     pub fn demo(name: impl Into<String>) -> Self {
         let mut project = Self {
             version: PROJECT_VERSION,
+            next_id: 1,
             name: name.into(),
             patches: Vec::new(),
             music: Music::default(),
@@ -1107,7 +1137,25 @@ impl Project {
                 l.decay = 0.3;
                 l.release = 0.1;
             }));
+        project.ensure_ids();
         project
+    }
+
+    /// Assign stable IDs to any patch/layer/clip that lacks one (or repeats
+    /// an existing ID). Safe to call after every structural edit.
+    pub fn ensure_ids(&mut self) {
+        let mut seen: Vec<u32> = Vec::new();
+        let mut next = self.next_id.max(1);
+        for patch in &mut self.patches {
+            assign_id(&mut patch.id, &mut seen, &mut next);
+            for layer in &mut patch.layers {
+                assign_id(&mut layer.id, &mut seen, &mut next);
+                for clip in &mut layer.clips {
+                    assign_id(&mut clip.id, &mut seen, &mut next);
+                }
+            }
+        }
+        self.next_id = next.max(self.next_id);
     }
 
     pub fn next_patch_name(&self) -> String {
@@ -1287,6 +1335,7 @@ impl Project {
                 patch.dsp_version = DSP_VERSION;
             }
         }
+        self.ensure_ids();
         warnings
     }
 
@@ -1294,6 +1343,7 @@ impl Project {
     /// list of structural repairs the UI can surface.
     pub fn validate(&mut self) -> Vec<String> {
         let mut warnings = Vec::new();
+        self.ensure_ids();
         if self.name.trim().is_empty() {
             self.name = "untitled".into();
         }
@@ -2097,6 +2147,18 @@ mod tests {
         assert_eq!(back.patches.len(), project.patches.len());
         assert!((back.patches[0].layers[0].freq_start - 123.4).abs() < 0.001);
         assert!(back.music.use_patterns);
+        assert_eq!(back.next_id, project.next_id);
+        assert_eq!(
+            back.patches
+                .iter()
+                .map(|patch| patch.id)
+                .collect::<Vec<_>>(),
+            project
+                .patches
+                .iter()
+                .map(|patch| patch.id)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -2193,6 +2255,55 @@ mod tests {
         assert!(!warnings.is_empty());
         assert_eq!(project.version, PROJECT_VERSION);
         assert_eq!(project.patches[0].dsp_version, DSP_VERSION);
+    }
+
+    #[test]
+    fn migrate_assigns_unique_stable_ids() {
+        let mut project = Project::demo("ids");
+        project.version = 2;
+        project.next_id = 1;
+        for patch in &mut project.patches {
+            patch.id = 0;
+            for layer in &mut patch.layers {
+                layer.id = 0;
+                layer.ensure_clips();
+                for clip in &mut layer.clips {
+                    clip.id = 3;
+                }
+            }
+        }
+        project.migrate();
+        assert_eq!(project.version, PROJECT_VERSION);
+        let mut ids = Vec::new();
+        for patch in &project.patches {
+            assert!(patch.id > 0);
+            ids.push(patch.id);
+            for layer in &patch.layers {
+                assert!(layer.id > 0);
+                ids.push(layer.id);
+                for clip in &layer.clips {
+                    assert!(clip.id > 0);
+                    ids.push(clip.id);
+                }
+            }
+        }
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "ids must be unique");
+        assert!(project.next_id > *ids.iter().max().unwrap());
+    }
+
+    #[test]
+    fn demo_already_has_stable_ids() {
+        let project = Project::demo("ids");
+        assert!(project.next_id > 1);
+        for patch in &project.patches {
+            assert!(patch.id > 0);
+            for layer in &patch.layers {
+                assert!(layer.id > 0);
+            }
+        }
     }
 
     #[test]

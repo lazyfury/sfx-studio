@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染与 0011 State 字段分组；稳定 ID 与音频 RT 化见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组与 0012 稳定 ID/schema v3；ID 化选区与音频 RT 化见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -79,12 +79,12 @@
 
 ## 2. 本轮验收证据
 
-审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`、`0008-timeline-zoom-and-library.md`、`0009-module-split.md`、`0010-background-preview-render.md`、`0011-state-field-groups.md`（status: approved，source_hash 匹配）。
+审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`、`0008-timeline-zoom-and-library.md`、`0009-module-split.md`、`0010-background-preview-render.md`、`0011-state-field-groups.md`、`0012-stable-ids.md`（status: approved，source_hash 匹配）。
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                 # 64 passed
+cargo test                 # 66 passed
 cargo run -- --selfcheck   # 2 frames / 2552 commands / 118 text runs
 ./scripts/preflight.sh
 ./scripts/review_gate.sh   # 需要 docs/reviews/*.md 中 approved + 匹配 source_hash
@@ -99,7 +99,7 @@ cargo run -- --selfcheck   # 2 frames / 2552 commands / 118 text runs
 
 ## 3. Backlog（下一迭代，按依赖排序）
 
-1. **稳定 ID + 迁移 v3**：`Patch/Layer/Clip.id`；选区/撤销/导出引用 ID；`Project.version` 升 3 并提供迁移。
+1. **ID 化选区与引用**：用 `Patch/Layer/Clip.id` 替换索引型 `selected_patch/layer/clip`，撤销/导出/manifest 引用稳定 ID。
 2. **音频 RT 化**：无锁 ring buffer、设备热插拔、48k 固定渲染 + `rubato` 重采样、欠载统计。
 3. **跨语言一致性**：PCG32 测试向量、相位回绕、f32/f64 策略、容差 golden（见 `docs/PARITY.md`）。
 4. **采样波形**：`Wave::Sample` + WAV 导入 + `sample_pitch/loop` 导入导出。
@@ -198,7 +198,15 @@ cargo run -- --selfcheck   # 2 frames / 2552 commands / 118 text runs
 - 纯结构调整：64 tests、selfcheck `2552 commands / 118 text runs` 与拆分前一致，无行为变化。
 - 稳定 ID / schema v3 未包含在本轮，仍为 Backlog 第 1 项。
 
-## 15. Definition of Done（每个 PR 必须满足）
+## 15. 本轮增量（0012）
+
+- `Patch` / `Layer` / `Clip` 新增 `#[serde(default)] id: u32`；`Project` 新增 `next_id` 发号器。
+- `Project::ensure_ids()`：补全缺失 ID、修复重复 ID、顺延 `next_id`；`migrate()` / `validate()` / `demo()` / `State::mark_dirty()` 调用，新增对象在编辑后立即获得稳定 ID。
+- `PROJECT_VERSION` 2 → 3；`docs/FORMAT.md` 增加 `next_id` / `id` 字段与 v3 迁移说明，manifest `schema_version` 随之为 3。
+- 渲染 worker 的 `RenderKey.patch` 改为稳定 patch id，切换/重排 patch 后旧结果不会误用。
+- 新增 3 条测试：迁移后 ID 唯一且 `next_id` 顺延、demo 自带 ID、JSON 往返保留 IDs；`cargo test` 66 passed。
+
+## 16. Definition of Done（每个 PR 必须满足）
 
 - [ ] `docs/PLAN.md` 对应条目状态更新。
 - [ ] `scripts/preflight.sh` 全绿（fmt / clippy -D warnings / test / selfcheck）。

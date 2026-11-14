@@ -212,6 +212,7 @@ impl SfxLogic {
                     layer.ensure_clips();
                     let duration = layer.duration.clamp(0.02, 0.5);
                     layer.clips.push(Clip {
+                        id: 0,
                         start: playhead.max(0.0),
                         duration,
                         gain: 1.0,
