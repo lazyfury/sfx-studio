@@ -7,7 +7,7 @@
 //! - play / stop / seek ramp over ~5 ms to avoid clicks;
 //! - looping wraps the frame cursor without re-reading frame 0.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -74,6 +74,9 @@ impl Default for Playback {
 pub struct AudioEngine {
     shared: Arc<Mutex<Playback>>,
     playing: Arc<AtomicBool>,
+    /// Frame cursor published by the callback once per buffer; the UI reads it
+    /// lock-free so polling the playhead cannot block behind the audio thread.
+    position: Arc<AtomicU64>,
     rate: u32,
     _stream: cpal::Stream,
 }
@@ -87,6 +90,7 @@ impl AudioEngine {
         let channels = supported.channels() as usize;
         let shared = Arc::new(Mutex::new(Playback::default()));
         let playing = Arc::new(AtomicBool::new(false));
+        let position = Arc::new(AtomicU64::new(0));
         let stream = match supported.sample_format() {
             SampleFormat::F32 => build::<f32>(
                 &device,
@@ -95,6 +99,7 @@ impl AudioEngine {
                 rate,
                 shared.clone(),
                 playing.clone(),
+                position.clone(),
             ),
             SampleFormat::I16 => build::<i16>(
                 &device,
@@ -103,6 +108,7 @@ impl AudioEngine {
                 rate,
                 shared.clone(),
                 playing.clone(),
+                position.clone(),
             ),
             SampleFormat::U16 => build::<u16>(
                 &device,
@@ -111,6 +117,7 @@ impl AudioEngine {
                 rate,
                 shared.clone(),
                 playing.clone(),
+                position.clone(),
             ),
             _ => None,
         }?;
@@ -118,6 +125,7 @@ impl AudioEngine {
         Some(Self {
             shared,
             playing,
+            position,
             rate,
             _stream: stream,
         })
@@ -144,6 +152,7 @@ impl AudioEngine {
                 playback.fade = 0.0;
             }
         }
+        self.position.store(start as u64, Ordering::Release);
         self.playing.store(true, Ordering::Release);
     }
 
@@ -160,10 +169,7 @@ impl AudioEngine {
     }
 
     pub fn position(&self) -> f32 {
-        self.shared
-            .lock()
-            .map(|playback| playback.pos as f32 / self.rate as f32)
-            .unwrap_or(0.0)
+        self.position.load(Ordering::Acquire) as f32 / self.rate.max(1) as f32
     }
 }
 
@@ -174,6 +180,7 @@ fn build<T>(
     rate: u32,
     shared: Arc<Mutex<Playback>>,
     playing: Arc<AtomicBool>,
+    position: Arc<AtomicU64>,
 ) -> Option<cpal::Stream>
 where
     T: SizedSample + FromSample<f32> + 'static,
@@ -200,6 +207,7 @@ where
                         *sample = T::from_sample(value);
                     }
                 }
+                position.store(playback.pos as u64, Ordering::Release);
             },
             error,
             None,

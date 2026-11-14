@@ -59,7 +59,7 @@ cargo run -- --help
 ## Workflow
 
 - **Library** — search (`/`), category filter (`ALL` / `C`), favorites filter
-  (star), selectable sound list.
+  (star), selectable sound list; each row's star toggles its favourite.
 - **Sound** — waveform, play/stop/loop, randomize, A/B/C variations, favorite.
 - **Parameters** — scrollable panel; click a slider to jump, drag to adjust,
   Shift/Alt for fine control, double-click to reset. Waveform/ruler can be

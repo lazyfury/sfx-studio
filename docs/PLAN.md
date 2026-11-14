@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染与 0005 UI 打磨（Lucide 图标、面板边距、列表行布局）；app/ui 主体拆分与后台渲染见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨与 0006 时间线/音频交互修复；app/ui 主体拆分与后台渲染见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -79,13 +79,13 @@
 
 ## 2. 本轮验收证据
 
-审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`（status: approved，source_hash 匹配）。
+审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`（status: approved，source_hash 匹配）。
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                 # 48 passed
-cargo run -- --selfcheck   # 2 frames / 2537 commands / 118 text runs
+cargo test                 # 53 passed
+cargo run -- --selfcheck   # 2 frames / 2550 commands / 118 text runs
 ./scripts/preflight.sh
 ./scripts/review_gate.sh   # 需要 docs/reviews/*.md 中 approved + 匹配 source_hash
 ```
@@ -109,7 +109,7 @@ cargo run -- --selfcheck   # 2 frames / 2537 commands / 118 text runs
 8. **采样波形**：`Wave::Sample` + WAV 导入 + `sample_pitch/loop` 导入导出。
 9. **i18n 与可访问性**：文案表、焦点遍历、键盘可达全部操作。
 10. **CLI 产品化**：`clap` 子命令、`--golden` 渲染校验、批量导出接入游戏仓库 CI。
-11. **UI 体验跟进（0005 审查遗留）**：拖动 Clip 时冻结时间线比例、收藏星标点击切换、音频 playhead 无锁读取、自适应时间线/波形高度、时间线缩放/网格、图标表一致性测试。
+11. **UI 体验跟进（0006 之后）**：时间线缩放/横向滚动、库列表滚动条、分类下拉、拖拽吸附步长可切换（Shift 关闭）、Clip Move 上界校验。
 
 ## 4. 已验证的端到端场景
 
@@ -149,7 +149,17 @@ cargo run -- --selfcheck   # 2 frames / 2537 commands / 118 text runs
 - `scripts/source_hash.sh` 纳入 `assets/`，图标资源不再绕过审查门禁。
 - 新增 `inspector_controls_keep_panel_margins` 布局测试；`cargo test` 48 passed。
 
-## 9. Definition of Done（每个 PR 必须满足）
+## 9. 本轮增量（0006）
+
+- **Clip 拖拽不再改变比例**：手势开始时把 `State::timeline_span()` 固定到 `timeline_pin`，`Layout` 与拖拽换算都用冻结比例；松开后重新 fit。时间线内容裁剪到卡片内，溢出不再画到相邻卡片。
+- **共享吸附网格**：新增 `CLIP_SNAP = 5ms` 与 `ui::snap_time()`，Clip Move/Resize/Trim 与自动化点共用；状态栏拖拽提示显示 `SNAP 5ms`。
+- **收藏星标可点击**：新增 `Hit::PatchFavorite(usize)` 与 `patch_star_rect()`；点击星标切换收藏、不动当前选中、hover 变主题色、可撤销；仍支持收藏过滤。
+- **播放头无锁**：音频回调每 buffer 把帧位置写入 `AtomicU64`，`AudioEngine::position()` 直接读原子；UI 不再每帧抢 `Mutex<Playback>`。
+- **自适应高度**：时间线按图层数收缩（3 行下限，音乐页按 pattern 行数），剩余高度给波形；时间线加入与标尺对齐的淡竖网格。
+- `Icon` 表新增一致性测试，`document()` 改为安全 `get()`，避免新增图标时静默越界。
+- 新增 4 条测试：星标命中、pin 比例稳定、自适应高度、星标点击撤销；`cargo test` 53 passed。
+
+## 10. Definition of Done（每个 PR 必须满足）
 
 - [ ] `docs/PLAN.md` 对应条目状态更新。
 - [ ] `scripts/preflight.sh` 全绿（fmt / clippy -D warnings / test / selfcheck）。

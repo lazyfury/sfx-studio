@@ -188,7 +188,9 @@ pub fn document(icon: Icon) -> Option<&'static SvgDocument> {
             .map(|icon| SvgDocument::parse(icon.svg()).ok())
             .collect()
     });
-    cache[icon.index()].as_ref()
+    cache
+        .get(icon.index())
+        .and_then(|document| document.as_ref())
 }
 
 /// Paints `icon` centred in `rect` using `color` for `currentColor`.
@@ -211,6 +213,14 @@ pub fn paint(ctx: &mut PaintContext, icon: Icon, rect: Rect, color: Color) {
 mod tests {
     use super::*;
     use igui_render::DrawCommand;
+
+    #[test]
+    fn icon_indices_match_the_all_table() {
+        for (slot, icon) in Icon::ALL.iter().enumerate() {
+            assert_eq!(icon.index(), slot, "{icon:?} index drifted from ALL");
+            assert!(document(*icon).is_some(), "{icon:?} has no document");
+        }
+    }
 
     #[test]
     fn every_icon_parses_and_draws() {

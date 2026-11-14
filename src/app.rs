@@ -146,6 +146,9 @@ pub struct State {
     pub search: String,
     pub search_focus: bool,
     pub inspector_scroll: f32,
+    /// Timeline span (seconds) frozen while a clip gesture is in flight, so
+    /// the scale cannot drift under the cursor as the clip grows.
+    pub timeline_pin: Option<f32>,
     /// Top-left system menu (all file/export actions live here).
     pub menu_open: bool,
     /// Defer the next preview render by one frame so the shell/tab paints
@@ -204,6 +207,7 @@ impl State {
             search: String::new(),
             search_focus: false,
             inspector_scroll: 0.0,
+            timeline_pin: None,
             menu_open: false,
             defer_render: true,
         }
@@ -211,6 +215,15 @@ impl State {
 
     pub fn patch(&self) -> Option<&Patch> {
         self.project.patches.get(self.selected_patch)
+    }
+
+    /// Seconds represented by the timeline. Pinned during clip drags.
+    pub fn timeline_span(&self) -> f32 {
+        self.timeline_pin.unwrap_or_else(|| {
+            self.patch()
+                .map(|patch| patch.end().max(0.05))
+                .unwrap_or(0.2)
+        })
     }
 
     pub fn patch_mut(&mut self) -> Option<&mut Patch> {
@@ -318,7 +331,8 @@ impl State {
             .patch_scroll
             .min(visible.len().saturating_sub(patch_capacity));
 
-        let layer_capacity = ui::layer_capacity(self.viewport);
+        let layers = self.patch().map(|patch| patch.layers.len()).unwrap_or(1);
+        let layer_capacity = ui::layer_capacity(self.viewport, layers);
         if self.selected_layer < self.layer_scroll {
             self.layer_scroll = self.selected_layer;
         } else if self.selected_layer >= self.layer_scroll + layer_capacity {
@@ -918,6 +932,27 @@ impl SfxLogic {
         }
     }
 
+    fn toggle_patch_favorite(&mut self, index: usize) {
+        let Some(patch) = self.state.project.patches.get(index) else {
+            return;
+        };
+        let favorite = !patch.favorite;
+        self.state.begin_edit();
+        self.state.project.patches[index].favorite = favorite;
+        self.state.mark_dirty();
+        if self.state.favorites_only {
+            self.refresh_filter();
+        } else {
+            self.state.bump_view();
+        }
+        self.state.toast(if favorite {
+            "added to favorites"
+        } else {
+            "removed from favorites"
+        });
+        self.state.commit_edit();
+    }
+
     fn cycle_category(&mut self) {
         let next = match self.state.category_filter {
             None => Some(Category::ALL[0]),
@@ -1119,13 +1154,6 @@ impl SfxLogic {
             },
             _ => true,
         }
-    }
-
-    fn timeline_geometry(&self, layout: &ui::Layout) -> (f32, f32) {
-        let total = self.state.patch().map(|p| p.end().max(0.05)).unwrap_or(0.2);
-        let scale =
-            ((layout.timeline.size.width - ui::TIMELINE_LABEL - 8.0) / (total + 0.08)).max(8.0);
-        (scale, total)
     }
 }
 
@@ -1412,6 +1440,10 @@ impl AppLogic for SfxLogic {
                         }
                         return EventResult::Handled;
                     }
+                    Some(ui::Hit::PatchFavorite(index)) => {
+                        self.toggle_patch_favorite(index);
+                        return EventResult::Handled;
+                    }
                     Some(ui::Hit::PatchRow(index)) => {
                         self.state.select_patch(index);
                         return EventResult::Handled;
@@ -1422,6 +1454,9 @@ impl AppLogic for SfxLogic {
                     }
                     Some(ui::Hit::Timeline { layer, clip, mode }) => {
                         self.state.begin_edit();
+                        if self.state.timeline_pin.is_none() {
+                            self.state.timeline_pin = Some(self.state.timeline_span());
+                        }
                         self.state.select_layer(layer);
                         let mut index = clip;
                         if index.is_none() {
@@ -1593,6 +1628,7 @@ impl AppLogic for SfxLogic {
             InputEvent::PointerUp { position, .. } => {
                 self.state.commit_edit();
                 self.state.drag = Drag::None;
+                self.state.timeline_pin = None;
                 self.state.hover_hit = ui::hit(&self.state, &layout, *position);
                 return EventResult::Handled;
             }
@@ -1617,7 +1653,7 @@ impl AppLogic for SfxLogic {
                 }
                 if layout.timeline.contains(*position) {
                     if let Some(patch) = self.state.patch() {
-                        let capacity = ui::layer_capacity(self.state.viewport);
+                        let capacity = ui::layer_capacity(self.state.viewport, patch.layers.len());
                         let max_start = patch.layers.len().saturating_sub(capacity);
                         self.state.layer_scroll = (self.state.layer_scroll as i32 + rows)
                             .clamp(0, max_start as i32)
@@ -1634,6 +1670,9 @@ impl AppLogic for SfxLogic {
 
     fn update(&mut self, ctx: &FrameContext<'_>) {
         self.state.viewport = ctx.viewport().logical_size();
+        if matches!(self.state.drag, Drag::None) {
+            self.state.timeline_pin = None;
+        }
         if let Some((_, deadline)) = &self.state.toast {
             if Instant::now() > *deadline {
                 self.state.toast = None;
@@ -1716,6 +1755,7 @@ impl AppLogic for SfxLogic {
                 | ui::Hit::MenuItem(_)
                 | ui::Hit::MenuPanel
                 | ui::Hit::PatchRow(_)
+                | ui::Hit::PatchFavorite(_)
                 | ui::Hit::LayerRow(_)
                 | ui::Hit::Pattern(_, _)
                 | ui::Hit::CategoryFilter
@@ -1911,7 +1951,7 @@ impl SfxLogic {
                     };
                     let (lo, hi, _) = kind.range();
                     if let Some(point) = points.get_mut(index) {
-                        point.time = ((time * 200.0).round() / 200.0).clamp(min, max);
+                        point.time = ui::snap_time(time).clamp(min, max);
                         let decimals = if kind == AutomationKind::Gain {
                             100.0
                         } else {
@@ -1931,7 +1971,7 @@ impl SfxLogic {
                 start,
                 duration,
             } => {
-                let (scale, _) = self.timeline_geometry(layout);
+                let scale = layout.timeline_scale;
                 let dt = (position.x - start_x) / scale;
                 if let Some(patch) = self.state.patch_mut() {
                     let max_duration = patch.layers.get(layer).map(|l| l.duration).unwrap_or(3.0);
@@ -1942,16 +1982,14 @@ impl SfxLogic {
                     {
                         match mode {
                             TimelineDrag::Move => {
-                                clip.start = ((start + dt) * 200.0).round() / 200.0;
-                                clip.start = clip.start.max(0.0);
+                                clip.start = ui::snap_time(start + dt).max(0.0);
                             }
                             TimelineDrag::Resize => {
-                                clip.duration = ((duration + dt) * 200.0).round() / 200.0;
-                                clip.duration = clip.duration.clamp(0.005, max_duration);
+                                clip.duration =
+                                    ui::snap_time(duration + dt).clamp(0.005, max_duration);
                             }
                             TimelineDrag::ResizeLeft => {
-                                let new_start = ((start + dt) * 200.0).round() / 200.0;
-                                let new_start = new_start.max(0.0);
+                                let new_start = ui::snap_time(start + dt).max(0.0);
                                 let delta = new_start - start;
                                 clip.start = new_start;
                                 clip.duration = (duration - delta).clamp(0.005, max_duration);
@@ -2187,6 +2225,24 @@ mod tests {
             gain > 0.95,
             "gain should jump to the slider maximum: {gain}"
         );
+    }
+
+    #[test]
+    fn star_click_toggles_favorite_without_changing_selection() {
+        let mut logic = SfxLogic {
+            state: State::new(),
+            measurer: None,
+            audio: None,
+        };
+        logic.state.selected_patch = 0;
+        let target = 2;
+        let before = logic.state.project.patches[target].favorite;
+        logic.toggle_patch_favorite(target);
+        assert_eq!(logic.state.project.patches[target].favorite, !before);
+        assert_eq!(logic.state.selected_patch, 0);
+        assert_eq!(logic.state.undo.len(), 1);
+        logic.state.undo();
+        assert_eq!(logic.state.project.patches[target].favorite, before);
     }
 
     #[test]

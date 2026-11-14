@@ -20,6 +20,8 @@ pub const INSPECTOR_LABEL: f32 = 82.0;
 /// Inner breathing room for inspector rows so controls never touch the panel
 /// card edges.
 pub const INSPECTOR_PAD: f32 = 6.0;
+/// Time grid used by clip/automation drags (5 ms).
+pub const CLIP_SNAP: f32 = 0.005;
 
 /// Shared layout metrics. `app.rs` uses these helpers instead of re-deriving
 /// row capacity, so a metrics change cannot silently desync scrolling.
@@ -42,8 +44,30 @@ pub fn timeline_height(viewport: Size) -> f32 {
     (body_height(viewport) - theme::HEADER_H - theme::AUTOMATION_H - 152.0).max(180.0)
 }
 
-pub fn layer_capacity(viewport: Size) -> usize {
-    (((timeline_height(viewport) - RULER_H) / TRACK_H).max(1.0) as usize).max(1)
+/// Timeline height for the current layer count: grows with content but never
+/// eats the space reserved for the waveform. The floor keeps three tracks
+/// visible; any extra height goes to the waveform.
+pub fn timeline_height_for(viewport: Size, layers: usize) -> f32 {
+    let min_h = RULER_H + 3.0 * TRACK_H + 8.0;
+    let wanted = RULER_H + layers.max(1) as f32 * TRACK_H + 8.0;
+    wanted.clamp(min_h, timeline_height(viewport))
+}
+
+pub fn layer_capacity(viewport: Size, layers: usize) -> usize {
+    (((timeline_height_for(viewport, layers) - RULER_H) / TRACK_H).max(1.0) as usize).max(1)
+}
+
+/// Snaps a drag time onto the shared clip grid.
+pub fn snap_time(time: f32) -> f32 {
+    (time / CLIP_SNAP).round() * CLIP_SNAP
+}
+
+/// Clickable favourite slot at the right edge of a library row.
+pub fn patch_star_rect(row: Rect) -> Rect {
+    Rect::from_min_size(
+        Vec2::new(row.right() - 22.0, row.top()),
+        Size::new(20.0, row.size.height),
+    )
 }
 
 /// Hit/drag area for a parameter slider row (shared by paint and input).
@@ -107,6 +131,7 @@ pub enum PatternRow {
 pub enum Hit {
     Action(Action),
     PatchRow(usize),
+    PatchFavorite(usize),
     LayerRow(usize),
     LayerField(LayerField),
     MusicField(MusicField),
@@ -405,7 +430,15 @@ impl Layout {
             ));
         }
 
-        let timeline_h = timeline_height(viewport);
+        let layer_count = state.patch().map(|p| p.layers.len()).unwrap_or(0);
+        let timeline_h = if state.tab == Tab::Music {
+            // The pattern grid needs its own height; layer count is irrelevant.
+            let rows = pattern_rows(state).len() as f32;
+            (22.0 + rows * 19.0 + 8.0)
+                .clamp(RULER_H + 3.0 * TRACK_H + 8.0, timeline_height(viewport))
+        } else {
+            timeline_height_for(viewport, layer_count)
+        };
         let timeline = Rect::from_min_size(
             Vec2::new(center.left() + pad, header.bottom() + 6.0),
             Size::new(center.size.width - pad * 2.0, timeline_h),
@@ -414,17 +447,20 @@ impl Layout {
             Vec2::new(center.left() + pad, timeline.bottom() + 6.0),
             Size::new(center.size.width - pad * 2.0, AUTOMATION_H),
         );
+        // Card gaps + header + automation consume 120px; the waveform takes
+        // every remaining pixel so the shell always fills the body.
+        let waveform_h = (body_h - 120.0 - timeline_h).max(96.0);
         let waveform = Rect::from_min_size(
             Vec2::new(center.left() + pad, automation.bottom() + 6.0),
-            Size::new(center.size.width - pad * 2.0, 128.0),
+            Size::new(center.size.width - pad * 2.0, waveform_h),
         );
 
-        let total = state.patch().map(|p| p.end().max(0.05)).unwrap_or(0.2);
+        let total = state.timeline_span();
         let timeline_scale =
             ((timeline.size.width - TIMELINE_LABEL - 8.0) / (total + 0.08)).max(8.0);
         let mut layer_rows = Vec::new();
         if let Some(patch) = state.patch() {
-            let visible = layer_capacity(viewport);
+            let visible = layer_capacity(viewport, layer_count);
             let start = state.layer_scroll.min(patch.layers.len().saturating_sub(1));
             for offset in 0..visible {
                 let index = start + offset;
@@ -723,6 +759,9 @@ pub fn hit(state: &State, layout: &Layout, pos: Vec2) -> Option<Hit> {
     }
     for (index, rect) in &layout.patch_rows {
         if rect.contains(pos) {
+            if patch_star_rect(*rect).contains(pos) {
+                return Some(Hit::PatchFavorite(*index));
+            }
             return Some(Hit::PatchRow(*index));
         }
     }
@@ -1098,14 +1137,22 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         // right-aligned before it so the two never share pixels.
         let label_right = rect.right() - 26.0;
         if patch.favorite {
+            let star = patch_star_rect(*rect);
+            let hovered = state.hover_hit == Some(Hit::PatchFavorite(*index));
             icons::paint(
                 ctx,
                 Icon::Star,
                 Rect::from_min_size(
-                    Vec2::new(rect.right() - 20.0, rect.center().y - 5.0),
+                    Vec2::new(star.center().x - 5.0, star.center().y - 5.0),
                     Size::splat(10.0),
                 ),
-                if selected { ACCENT_DARK } else { WARN },
+                if hovered {
+                    ACCENT
+                } else if selected {
+                    ACCENT_DARK
+                } else {
+                    WARN
+                },
             );
         }
         let name_width =
@@ -1534,11 +1581,20 @@ fn paint_timeline(
     let ruler = Rect::from_min_size(rect.origin, Size::new(rect.size.width, RULER_H));
     fill(ctx, ruler, RAISED);
     hline(ctx, rect.left(), rect.right(), ruler.bottom(), BORDER);
+    ctx.save();
+    ctx.clip_rect(rect);
 
     let step = tick_step(layout.timeline_total);
     let mut time = 0.0;
     while time <= layout.timeline_total + 0.001 {
         let x = layout.time_x(time);
+        vline(
+            ctx,
+            x,
+            ruler.bottom(),
+            rect.bottom(),
+            Color::new(1.0, 1.0, 1.0, 0.045),
+        );
         vline(ctx, x, ruler.top(), ruler.bottom(), BORDER_HI);
         text_top(
             ctx,
@@ -1652,6 +1708,7 @@ fn paint_timeline(
         SMALL,
         WARN,
     );
+    ctx.restore();
 }
 
 fn paint_automation(
@@ -2743,7 +2800,7 @@ fn drag_info(state: &State) -> Option<String> {
                 TimelineDrag::ResizeLeft => "TRIM",
             };
             Some(format!(
-                "CLIP {:02}  {action}  START {:.3}s  LEN {:.3}s  GAIN {:.2}",
+                "CLIP {:02}  {action}  START {:.3}s  LEN {:.3}s  GAIN {:.2}  ·  SNAP 5ms",
                 clip + 1,
                 data.start,
                 data.duration,
@@ -2963,6 +3020,62 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn favorite_star_hit_is_split_from_the_row() {
+        let state = State::new();
+        let layout = Layout::new(&state, state.viewport);
+        let (index, row) = layout.patch_rows[0];
+        assert_eq!(
+            hit(&state, &layout, patch_star_rect(row).center()),
+            Some(Hit::PatchFavorite(index))
+        );
+        let body = Vec2::new(row.left() + 40.0, row.center().y);
+        assert_eq!(hit(&state, &layout, body), Some(Hit::PatchRow(index)));
+    }
+
+    #[test]
+    fn pinned_timeline_span_keeps_the_scale_stable() {
+        let mut state = State::new();
+        let span = state.timeline_span();
+        let base = Layout::new(&state, state.viewport).timeline_scale;
+        state.timeline_pin = Some(span);
+        let layer = state.layer_mut().unwrap();
+        layer.ensure_clips();
+        layer.clips[0].duration += 1.5;
+        let pinned = Layout::new(&state, state.viewport).timeline_scale;
+        assert!(
+            (pinned - base).abs() < 0.001,
+            "pinned scale moved from {base} to {pinned}"
+        );
+        state.timeline_pin = None;
+        let refit = Layout::new(&state, state.viewport).timeline_scale;
+        assert!(refit < pinned, "release should refit the wider timeline");
+    }
+
+    #[test]
+    fn timeline_grows_with_layers_and_gives_space_to_the_waveform() {
+        let mut state = State::new();
+        state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
+        let few = Layout::new(&state, state.viewport);
+        assert!(
+            few.timeline.size.height <= 200.0,
+            "3 layers should not claim the whole column"
+        );
+        assert!(few.waveform.size.height > 128.0);
+        let layer = state.project.patches[0].layers[0].clone();
+        for _ in 0..30 {
+            state.project.patches[0].layers.push(layer.clone());
+        }
+        let many = Layout::new(&state, state.viewport);
+        assert!(many.timeline.size.height > few.timeline.size.height);
+        assert!(many.waveform.size.height < few.waveform.size.height);
+        assert!(many.layer_rows.len() <= layer_capacity(state.viewport, 31));
+        state.tab = Tab::Music;
+        let music = Layout::new(&state, state.viewport);
+        assert!(music.timeline.size.height < many.timeline.size.height);
+        assert!(music.pattern_grid.size.height <= music.timeline.size.height);
     }
 
     #[test]
