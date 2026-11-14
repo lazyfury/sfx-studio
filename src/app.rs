@@ -20,6 +20,7 @@ use crate::{export, model, theme, ui};
 mod audio_bridge;
 mod commands;
 mod input;
+mod render;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
@@ -472,7 +473,6 @@ impl State {
     }
 
     pub fn ensure_cache(&mut self, rate: u32) {
-        const ENVELOPE_BINS: usize = 2048;
         let want_patch = self.tab == Tab::Patches;
         let want_music = self.tab == Tab::Music;
         let patch_dirty =
@@ -488,22 +488,22 @@ impl State {
                 .map(|patch| synth::render_patch(patch, rate))
                 .unwrap_or_default();
             self.cache_peak = synth::peak(&self.cache);
-            self.cache_envelope = synth::envelope(&self.cache, ENVELOPE_BINS);
+            self.cache_envelope = synth::envelope(&self.cache, synth::ENVELOPE_BINS);
             self.cache_version = self.version;
             self.cache_rate = rate;
         }
         if music_dirty {
             self.music_cache = synth::render_music(&self.project.music, rate);
             self.music_cache_peak = synth::peak(&self.music_cache);
-            self.music_envelope = synth::envelope(&self.music_cache, ENVELOPE_BINS);
+            self.music_envelope = synth::envelope(&self.music_cache, synth::ENVELOPE_BINS);
             self.music_cache_version = self.music_version;
             self.music_cache_rate = rate;
         }
         self.last_render = Instant::now();
     }
 
-    /// Render at most ~12×/s while a slider is being dragged. `play()` always
-    /// calls [`Self::ensure_cache`] directly, so pressing play never waits.
+    /// Synchronous fallback used when the render worker is unavailable or
+    /// stalled. Throttled to ~12×/s so dragging stays responsive.
     pub fn ensure_cache_soon(&mut self, rate: u32) {
         let already_rendered = self.cache_version != 0 || self.music_cache_version != 0;
         if already_rendered && self.last_render.elapsed() < Duration::from_millis(80) {
@@ -535,6 +535,9 @@ pub struct SfxLogic {
     state: State,
     measurer: Option<Rc<dyn TextMeasurer>>,
     audio: Option<AudioEngine>,
+    /// Background preview renderer; `None` in tests/headless logic that do
+    /// not need audio previews.
+    render: Option<render::RenderWorker>,
 }
 
 /// Time under a drag; `snap = false` (Shift) keeps sub-grid precision.
@@ -698,6 +701,7 @@ mod tests {
             state: State::new(),
             measurer: None,
             audio: None,
+            render: None,
         };
         logic.state.hover_hit = Some(ui::Hit::Timeline {
             layer: 0,
@@ -748,6 +752,7 @@ mod tests {
             state: State::new(),
             measurer: None,
             audio: None,
+            render: None,
         };
         let layout = ui::Layout::new(&logic.state, logic.state.viewport);
         let hit = ui::Hit::LayerField(LayerField::Gain);
@@ -768,6 +773,7 @@ mod tests {
             state: State::new(),
             measurer: None,
             audio: None,
+            render: None,
         };
         logic.state.selected_patch = 0;
         let target = 2;
@@ -786,6 +792,7 @@ mod tests {
             state: State::new(),
             measurer: None,
             audio: None,
+            render: None,
         };
         logic.state.category_menu_open = true;
         logic.pick_category(Some(Category::Combat));
@@ -847,6 +854,7 @@ mod tests {
             state: State::new(),
             measurer: None,
             audio: None,
+            render: None,
         };
         logic.state.project.patches[0].layers[0] = Layer::new(Wave::Sine);
         let layout = ui::Layout::new(&logic.state, logic.state.viewport);

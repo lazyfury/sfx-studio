@@ -3,7 +3,7 @@
 use super::*;
 
 impl SfxLogic {
-    pub(crate) fn new(mut state: State) -> Self {
+    pub(crate) fn new(mut state: State, background_preview: bool) -> Self {
         let audio = AudioEngine::new();
         if let Some(engine) = &audio {
             state.audio_ok = true;
@@ -16,6 +16,9 @@ impl SfxLogic {
             state,
             measurer: Some(Rc::new(ApproxTextMeasurer)),
             audio,
+            render: background_preview
+                .then(render::RenderWorker::spawn)
+                .flatten(),
         }
     }
 

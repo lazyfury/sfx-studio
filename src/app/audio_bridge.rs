@@ -5,6 +5,7 @@ use super::*;
 impl SfxLogic {
     pub(super) fn play(&mut self) {
         let rate = self.state.preview_rate();
+        self.cancel_preview();
         self.state.ensure_cache(rate);
         self.state.defer_render = false;
         let Some(audio) = &self.audio else {

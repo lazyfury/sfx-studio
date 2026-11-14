@@ -5,6 +5,9 @@ use crate::model::{EnvShape, FilterMode, Layer, Music, MusicWave, Patch, ToneEnv
 
 const TAU: f32 = std::f32::consts::TAU;
 
+/// Bucket count for the cached waveform envelope.
+pub const ENVELOPE_BINS: usize = 2048;
+
 pub fn render_patch(patch: &Patch, rate: u32) -> Vec<f32> {
     let rate = rate.clamp(8_000, 192_000);
     let mut total = 0usize;

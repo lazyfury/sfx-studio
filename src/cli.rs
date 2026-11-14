@@ -157,7 +157,7 @@ fn build_app(state: State, headless: bool) -> App {
             .plugin(TextMeasurePlugin)
             .plugin(ClipboardPlugin)
     };
-    builder.logic(SfxLogic::new(state)).build()
+    builder.logic(SfxLogic::new(state, !headless)).build()
 }
 
 fn selfcheck() {

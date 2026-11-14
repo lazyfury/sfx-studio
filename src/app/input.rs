@@ -591,11 +591,12 @@ impl AppLogic for SfxLogic {
                 self.state.toast = None;
             }
         }
+        self.poll_render();
         let rate = self.state.preview_rate();
         if self.state.defer_render {
             self.state.defer_render = false;
         } else {
-            self.state.ensure_cache_soon(rate);
+            self.request_preview(rate);
         }
         if let Some(audio) = &self.audio {
             let playing = audio.is_playing();

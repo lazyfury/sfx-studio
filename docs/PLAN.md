@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分；后台渲染见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分与 0010 后台预览渲染；稳定 ID 与音频 RT 化见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -79,12 +79,12 @@
 
 ## 2. 本轮验收证据
 
-审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`、`0008-timeline-zoom-and-library.md`、`0009-module-split.md`（status: approved，source_hash 匹配）。
+审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`、`0008-timeline-zoom-and-library.md`、`0009-module-split.md`、`0010-background-preview-render.md`（status: approved，source_hash 匹配）。
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                 # 62 passed
+cargo test                 # 64 passed
 cargo run -- --selfcheck   # 2 frames / 2552 commands / 118 text runs
 ./scripts/preflight.sh
 ./scripts/review_gate.sh   # 需要 docs/reviews/*.md 中 approved + 匹配 source_hash
@@ -99,14 +99,13 @@ cargo run -- --selfcheck   # 2 frames / 2552 commands / 118 text runs
 
 ## 3. Backlog（下一迭代，按依赖排序）
 
-1. **State 拆分（继续）**：`State { doc, view, playback, ui }`。文件层 `app/{input,commands,audio_bridge}` 与 `ui/{layout,paint,hit}` 已在 0009 完成。
-2. **后台渲染**：`RenderRequest { revision, tab, rate }` → worker → `RenderResult { generation, samples, envelope, peak }`；UI 只接受最新 generation，拖动期间不阻塞。
-3. **稳定 ID + 迁移 v3**：`Patch/Layer/Clip.id`；选区/撤销/导出引用 ID；`Project.version` 升 3 并提供迁移。
-4. **音频 RT 化**：无锁 ring buffer、设备热插拔、48k 固定渲染 + `rubato` 重采样、欠载统计。
-5. **跨语言一致性**：PCG32 测试向量、相位回绕、f32/f64 策略、容差 golden（见 `docs/PARITY.md`）。
-6. **采样波形**：`Wave::Sample` + WAV 导入 + `sample_pitch/loop` 导入导出。
-7. **i18n 与可访问性**：文案表、焦点遍历、键盘可达全部操作。
-8. **CLI 产品化**：`clap` 子命令、`--golden` 渲染校验、批量导出接入游戏仓库 CI。
+1. **State 拆分（继续）**：`State { doc, view, playback, ui }`；文件层拆分已在 0009 完成，后台渲染已在 0010 完成。
+2. **稳定 ID + 迁移 v3**：`Patch/Layer/Clip.id`；选区/撤销/导出引用 ID；`Project.version` 升 3 并提供迁移。
+3. **音频 RT 化**：无锁 ring buffer、设备热插拔、48k 固定渲染 + `rubato` 重采样、欠载统计。
+4. **跨语言一致性**：PCG32 测试向量、相位回绕、f32/f64 策略、容差 golden（见 `docs/PARITY.md`）。
+5. **采样波形**：`Wave::Sample` + WAV 导入 + `sample_pitch/loop` 导入导出。
+6. **i18n 与可访问性**：文案表、焦点遍历、键盘可达全部操作。
+7. **CLI 产品化**：`clap` 子命令、`--golden` 渲染校验、批量导出接入游戏仓库 CI。
 
 ## 4. 已验证的端到端场景
 
@@ -180,7 +179,16 @@ cargo run -- --selfcheck   # 2 frames / 2552 commands / 118 text runs
 - 跨子模块调用的方法改为 `pub(super)`；子模块统一 `use super::*;` 复用父模块导入，无重复依赖声明。
 - 纯结构调整：62 tests、selfcheck `2552 commands / 118 text runs` 与拆分前完全一致，默认界面截图无变化。
 
-## 13. Definition of Done（每个 PR 必须满足）
+## 13. 本轮增量（0010）
+
+- **后台预览渲染**：新增 `app/render.rs` + 独立 `sfx-render` 线程；UI 只发送 `RenderJob`（Patch/Music clone + `RenderKey{tab, rate, version, music_version, patch}`），worker 通过共享 `AtomicU64` 跳过过期任务，并把 `samples/envelope/peak` 回传。
+- **结果校验**：只有 `pending key == 当前 key` 时才写入缓存；切 patch / 编辑 / undo / open 都会让旧结果自动失效。
+- **节流与取消**：请求间隔 80ms；同一 key 不会重复排队；`play()` 先 `cancel_preview()` 再同步 `ensure_cache`，避免旧预览覆盖刚渲染的播放数据。
+- **兜底**：worker 不可用或任务卡住 >5s 时自动取消并退回同步 `ensure_cache_soon`；headless selfcheck 关闭后台线程（`SfxLogic::new(state, background)`），保持确定性输出。
+- `synth::ENVELOPE_BINS` 抽为共享常量，同步/异步渲染使用同一包络规格。
+- 新增 2 条 worker 测试（同 key 去重、实际渲染回传）；`cargo test` 64 passed；实机截图确认异步结果到达后波形正常绘制。
+
+## 14. Definition of Done（每个 PR 必须满足）
 
 - [ ] `docs/PLAN.md` 对应条目状态更新。
 - [ ] `scripts/preflight.sh` 全绿（fmt / clippy -D warnings / test / selfcheck）。
