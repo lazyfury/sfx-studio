@@ -7,8 +7,8 @@ use igui_ui::TextMeasurer;
 use crate::app::{Drag, State, Tab, TimelineDrag};
 use crate::icons::{self, Icon};
 use crate::model::{
-    AutomationKind, Category, ClipField, EnvShape, FilterMode, LayerField, MusicField, MusicWave,
-    ToneEnv, Wave,
+    layer_sections, AutomationKind, Category, ClipField, EnvShape, FilterMode, LayerField,
+    LayerRowSpec, MusicField, MusicWave, ToneEnv, Wave,
 };
 use crate::synth;
 use crate::theme::{self, *};
@@ -2269,142 +2269,52 @@ fn inspector_items(state: &State) -> Vec<RawItem> {
             )));
         }
 
-        if layer.wave.is_tone() {
-            items.push(RawItem::Section("PITCH".into()));
-            items.push(layer_param(LayerField::FreqStart, layer));
-            items.push(layer_param(LayerField::FreqEnd, layer));
-            if layer.wave == Wave::Sine {
-                items.push(layer_param(LayerField::Harsh, layer));
-            }
-            if layer.wave == Wave::Pulse {
-                items.push(layer_param(LayerField::Duty, layer));
-            }
-            items.push(layer_param(LayerField::VibratoRate, layer));
-            items.push(layer_param(LayerField::VibratoDepth, layer));
-            items.push(RawItem::Section("AMP ENV".into()));
-            items.push(RawItem::Options {
-                label: "TONE ENV".into(),
-                columns: 2,
-                options: vec![
-                    (
-                        ToneEnv::Adsr.label().into(),
-                        Action::SetToneEnv(ToneEnv::Adsr),
-                        layer.tone_env == ToneEnv::Adsr,
-                    ),
-                    (
-                        ToneEnv::Exp.label().into(),
-                        Action::SetToneEnv(ToneEnv::Exp),
-                        layer.tone_env == ToneEnv::Exp,
-                    ),
-                ],
-            });
-            for field in [
-                LayerField::Attack,
-                LayerField::Decay,
-                LayerField::Sustain,
-                LayerField::Release,
-            ] {
-                items.push(layer_param(field, layer));
-            }
-            if layer.tone_env == ToneEnv::Exp {
-                items.push(layer_param(LayerField::ExpDecay, layer));
-            }
-            items.push(RawItem::Section("FILTER".into()));
-            items.push(filter_options(layer.filter));
-            for field in [
-                LayerField::CutoffStart,
-                LayerField::CutoffEnd,
-                LayerField::Resonance,
-            ] {
-                items.push(layer_param(field, layer));
-            }
-        } else if layer.wave == Wave::Noise {
-            items.push(RawItem::Section("NOISE".into()));
-            for field in [
-                LayerField::FreqStart,
-                LayerField::FreqEnd,
-                LayerField::LowpassFrom,
-                LayerField::LowpassTo,
-                LayerField::NoiseGain,
-                LayerField::SweepGain,
-                LayerField::Decay,
-            ] {
-                items.push(layer_param(field, layer));
-            }
-            items.push(RawItem::Options {
-                label: "ENV".into(),
-                columns: 2,
-                options: vec![
-                    (
-                        "EXP".into(),
-                        Action::SetEnv(EnvShape::Exp),
-                        layer.env_shape == EnvShape::Exp,
-                    ),
-                    (
-                        "SINE".into(),
-                        Action::SetEnv(EnvShape::Sine),
-                        layer.env_shape == EnvShape::Sine,
-                    ),
-                ],
-            });
-            items.push(layer_param(LayerField::Seed, layer));
-        } else if layer.wave == Wave::Arp {
-            items.push(RawItem::Section("ARP".into()));
-            for field in [
-                LayerField::Arp0,
-                LayerField::Arp1,
-                LayerField::Arp2,
-                LayerField::Arp3,
-                LayerField::Step,
-                LayerField::Harsh,
-                LayerField::Decay,
-                LayerField::Attack,
-            ] {
-                items.push(layer_param(field, layer));
-            }
-        } else if layer.wave == Wave::Fm {
-            items.push(RawItem::Section("FM".into()));
-            for field in [
-                LayerField::FreqStart,
-                LayerField::FreqEnd,
-                LayerField::FmRatio,
-                LayerField::FmIndex,
-                LayerField::FmDecay,
-                LayerField::Attack,
-                LayerField::Decay,
-                LayerField::Sustain,
-                LayerField::Release,
-            ] {
-                items.push(layer_param(field, layer));
-            }
-            items.push(filter_options(layer.filter));
-            for field in [
-                LayerField::CutoffStart,
-                LayerField::CutoffEnd,
-                LayerField::Resonance,
-            ] {
-                items.push(layer_param(field, layer));
-            }
-        } else if layer.wave == Wave::Pluck {
-            items.push(RawItem::Section("PLUCK".into()));
-            for field in [
-                LayerField::FreqStart,
-                LayerField::PluckDamping,
-                LayerField::PluckBrightness,
-                LayerField::Attack,
-                LayerField::Decay,
-                LayerField::Sustain,
-                LayerField::Release,
-            ] {
-                items.push(layer_param(field, layer));
-            }
-        } else if layer.wave.is_drum() {
-            items.push(RawItem::Section("DRUM".into()));
-            items.push(layer_param(LayerField::DrumTone, layer));
-            items.push(layer_param(LayerField::DrumSnap, layer));
-            // Kick is deterministic; only noise drums read the seed.
-            if layer.wave != Wave::Kick {
-                items.push(layer_param(LayerField::Seed, layer));
+        for section in layer_sections(layer.wave) {
+            items.push(RawItem::Section(section.title.into()));
+            for row in section.rows {
+                if !(row.visible)(layer) {
+                    continue;
+                }
+                match row.spec {
+                    LayerRowSpec::Field(field) => items.push(layer_param(field, layer)),
+                    LayerRowSpec::ToneEnvOptions => {
+                        items.push(RawItem::Options {
+                            label: "TONE ENV".into(),
+                            columns: 2,
+                            options: vec![
+                                (
+                                    ToneEnv::Adsr.label().into(),
+                                    Action::SetToneEnv(ToneEnv::Adsr),
+                                    layer.tone_env == ToneEnv::Adsr,
+                                ),
+                                (
+                                    ToneEnv::Exp.label().into(),
+                                    Action::SetToneEnv(ToneEnv::Exp),
+                                    layer.tone_env == ToneEnv::Exp,
+                                ),
+                            ],
+                        });
+                    }
+                    LayerRowSpec::EnvShapeOptions => {
+                        items.push(RawItem::Options {
+                            label: "ENV".into(),
+                            columns: 2,
+                            options: vec![
+                                (
+                                    "EXP".into(),
+                                    Action::SetEnv(EnvShape::Exp),
+                                    layer.env_shape == EnvShape::Exp,
+                                ),
+                                (
+                                    "SINE".into(),
+                                    Action::SetEnv(EnvShape::Sine),
+                                    layer.env_shape == EnvShape::Sine,
+                                ),
+                            ],
+                        });
+                    }
+                    LayerRowSpec::FilterOptions => items.push(filter_options(layer.filter)),
+                }
             }
         }
         items.push(RawItem::Note(format!(
@@ -3020,6 +2930,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn inspector_renders_the_layer_registry() {
+        let mut state = State::new();
+        state.layer_mut().unwrap().wave = Wave::Sine;
+        let items = inspector_items(&state);
+        let mut sections = Vec::new();
+        let mut params = Vec::new();
+        for item in &items {
+            match item {
+                RawItem::Section(text) => sections.push(text.trim().to_string()),
+                RawItem::Param { label, .. } => params.push(label.clone()),
+                _ => {}
+            }
+        }
+        assert!(sections.contains(&"PITCH".to_string()));
+        assert!(sections.contains(&"AMP ENV".to_string()));
+        assert!(sections.contains(&"FILTER".to_string()));
+        assert!(params.contains(&"HARSH".to_string()));
+        assert!(!params.contains(&"DUTY".to_string()));
+        let harsh = params.iter().position(|label| label == "HARSH").unwrap();
+        let vibrato = params.iter().position(|label| label == "VIB RATE").unwrap();
+        assert!(harsh < vibrato, "registry order must drive the rows");
     }
 
     #[test]

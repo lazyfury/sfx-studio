@@ -1746,9 +1746,236 @@ impl MusicField {
     }
 }
 
+/// One inspector row inside a layer section: a slider backed by a
+/// [`LayerField`], or a mutually exclusive option group.
+#[derive(Clone, Copy, Debug)]
+pub enum LayerRowSpec {
+    Field(LayerField),
+    ToneEnvOptions,
+    EnvShapeOptions,
+    FilterOptions,
+}
+
+/// A row plus the predicate that decides whether it applies to a layer.
+#[derive(Clone, Copy, Debug)]
+pub struct LayerRow {
+    pub spec: LayerRowSpec,
+    pub visible: fn(&Layer) -> bool,
+}
+
+/// A titled block of inspector rows for one wave family.
+#[derive(Clone, Copy, Debug)]
+pub struct LayerSectionSpec {
+    pub title: &'static str,
+    pub rows: &'static [LayerRow],
+}
+
+const fn row(spec: LayerRowSpec, visible: fn(&Layer) -> bool) -> LayerRow {
+    LayerRow { spec, visible }
+}
+
+fn always(_: &Layer) -> bool {
+    true
+}
+
+fn is_sine(layer: &Layer) -> bool {
+    layer.wave == Wave::Sine
+}
+
+fn is_pulse(layer: &Layer) -> bool {
+    layer.wave == Wave::Pulse
+}
+
+fn is_exp_env(layer: &Layer) -> bool {
+    layer.tone_env == ToneEnv::Exp
+}
+
+fn reads_seed(layer: &Layer) -> bool {
+    layer.wave != Wave::Kick
+}
+
+static TONE_PITCH: &[LayerRow] = &[
+    row(LayerRowSpec::Field(LayerField::FreqStart), always),
+    row(LayerRowSpec::Field(LayerField::FreqEnd), always),
+    row(LayerRowSpec::Field(LayerField::Harsh), is_sine),
+    row(LayerRowSpec::Field(LayerField::Duty), is_pulse),
+    row(LayerRowSpec::Field(LayerField::VibratoRate), always),
+    row(LayerRowSpec::Field(LayerField::VibratoDepth), always),
+];
+
+static TONE_AMP: &[LayerRow] = &[
+    row(LayerRowSpec::ToneEnvOptions, always),
+    row(LayerRowSpec::Field(LayerField::Attack), always),
+    row(LayerRowSpec::Field(LayerField::Decay), always),
+    row(LayerRowSpec::Field(LayerField::Sustain), always),
+    row(LayerRowSpec::Field(LayerField::Release), always),
+    row(LayerRowSpec::Field(LayerField::ExpDecay), is_exp_env),
+];
+
+static TONE_FILTER: &[LayerRow] = &[
+    row(LayerRowSpec::FilterOptions, always),
+    row(LayerRowSpec::Field(LayerField::CutoffStart), always),
+    row(LayerRowSpec::Field(LayerField::CutoffEnd), always),
+    row(LayerRowSpec::Field(LayerField::Resonance), always),
+];
+
+static TONE_SECTIONS: &[LayerSectionSpec] = &[
+    LayerSectionSpec {
+        title: "PITCH",
+        rows: TONE_PITCH,
+    },
+    LayerSectionSpec {
+        title: "AMP ENV",
+        rows: TONE_AMP,
+    },
+    LayerSectionSpec {
+        title: "FILTER",
+        rows: TONE_FILTER,
+    },
+];
+
+static NOISE_SECTIONS: &[LayerSectionSpec] = &[LayerSectionSpec {
+    title: "NOISE",
+    rows: &[
+        row(LayerRowSpec::Field(LayerField::FreqStart), always),
+        row(LayerRowSpec::Field(LayerField::FreqEnd), always),
+        row(LayerRowSpec::Field(LayerField::LowpassFrom), always),
+        row(LayerRowSpec::Field(LayerField::LowpassTo), always),
+        row(LayerRowSpec::Field(LayerField::NoiseGain), always),
+        row(LayerRowSpec::Field(LayerField::SweepGain), always),
+        row(LayerRowSpec::Field(LayerField::Decay), always),
+        row(LayerRowSpec::EnvShapeOptions, always),
+        row(LayerRowSpec::Field(LayerField::Seed), always),
+    ],
+}];
+
+static ARP_SECTIONS: &[LayerSectionSpec] = &[LayerSectionSpec {
+    title: "ARP",
+    rows: &[
+        row(LayerRowSpec::Field(LayerField::Arp0), always),
+        row(LayerRowSpec::Field(LayerField::Arp1), always),
+        row(LayerRowSpec::Field(LayerField::Arp2), always),
+        row(LayerRowSpec::Field(LayerField::Arp3), always),
+        row(LayerRowSpec::Field(LayerField::Step), always),
+        row(LayerRowSpec::Field(LayerField::Harsh), always),
+        row(LayerRowSpec::Field(LayerField::Decay), always),
+        row(LayerRowSpec::Field(LayerField::Attack), always),
+    ],
+}];
+
+static FM_SECTIONS: &[LayerSectionSpec] = &[LayerSectionSpec {
+    title: "FM",
+    rows: &[
+        row(LayerRowSpec::Field(LayerField::FreqStart), always),
+        row(LayerRowSpec::Field(LayerField::FreqEnd), always),
+        row(LayerRowSpec::Field(LayerField::FmRatio), always),
+        row(LayerRowSpec::Field(LayerField::FmIndex), always),
+        row(LayerRowSpec::Field(LayerField::FmDecay), always),
+        row(LayerRowSpec::Field(LayerField::Attack), always),
+        row(LayerRowSpec::Field(LayerField::Decay), always),
+        row(LayerRowSpec::Field(LayerField::Sustain), always),
+        row(LayerRowSpec::Field(LayerField::Release), always),
+        row(LayerRowSpec::FilterOptions, always),
+        row(LayerRowSpec::Field(LayerField::CutoffStart), always),
+        row(LayerRowSpec::Field(LayerField::CutoffEnd), always),
+        row(LayerRowSpec::Field(LayerField::Resonance), always),
+    ],
+}];
+
+static PLUCK_SECTIONS: &[LayerSectionSpec] = &[LayerSectionSpec {
+    title: "PLUCK",
+    rows: &[
+        row(LayerRowSpec::Field(LayerField::FreqStart), always),
+        row(LayerRowSpec::Field(LayerField::PluckDamping), always),
+        row(LayerRowSpec::Field(LayerField::PluckBrightness), always),
+        row(LayerRowSpec::Field(LayerField::Attack), always),
+        row(LayerRowSpec::Field(LayerField::Decay), always),
+        row(LayerRowSpec::Field(LayerField::Sustain), always),
+        row(LayerRowSpec::Field(LayerField::Release), always),
+    ],
+}];
+
+static DRUM_SECTIONS: &[LayerSectionSpec] = &[LayerSectionSpec {
+    title: "DRUM",
+    rows: &[
+        row(LayerRowSpec::Field(LayerField::DrumTone), always),
+        row(LayerRowSpec::Field(LayerField::DrumSnap), always),
+        row(LayerRowSpec::Field(LayerField::Seed), reads_seed),
+    ],
+}];
+
+/// Inspector layout for a wave family. This is the single source of truth for
+/// which fields a layer exposes; `ui::inspector_items` only renders it.
+pub fn layer_sections(wave: Wave) -> &'static [LayerSectionSpec] {
+    if wave.is_tone() {
+        TONE_SECTIONS
+    } else {
+        match wave {
+            Wave::Noise => NOISE_SECTIONS,
+            Wave::Arp => ARP_SECTIONS,
+            Wave::Fm => FM_SECTIONS,
+            Wave::Pluck => PLUCK_SECTIONS,
+            _ if wave.is_drum() => DRUM_SECTIONS,
+            _ => TONE_SECTIONS,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layer_sections_expose_wave_specific_fields() {
+        fn visible(layer: &Layer) -> Vec<LayerField> {
+            let mut fields = Vec::new();
+            for section in layer_sections(layer.wave) {
+                for row in section.rows {
+                    if (row.visible)(layer) {
+                        if let LayerRowSpec::Field(field) = row.spec {
+                            fields.push(field);
+                        }
+                    }
+                }
+            }
+            fields
+        }
+
+        let sine = Layer::new(Wave::Sine);
+        assert!(visible(&sine).contains(&LayerField::Harsh));
+        assert!(!visible(&sine).contains(&LayerField::Duty));
+        assert_eq!(
+            layer_sections(Wave::Sine)
+                .iter()
+                .map(|section| section.title)
+                .collect::<Vec<_>>(),
+            vec!["PITCH", "AMP ENV", "FILTER"]
+        );
+
+        let pulse = Layer::new(Wave::Pulse);
+        assert!(visible(&pulse).contains(&LayerField::Duty));
+        assert!(!visible(&pulse).contains(&LayerField::Harsh));
+
+        let mut exp = Layer::new(Wave::Sine);
+        exp.tone_env = ToneEnv::Exp;
+        assert!(visible(&exp).contains(&LayerField::ExpDecay));
+        assert!(!visible(&sine).contains(&LayerField::ExpDecay));
+
+        let noise = Layer::new(Wave::Noise);
+        let noise_fields = visible(&noise);
+        assert!(noise_fields.contains(&LayerField::SweepGain));
+        assert!(noise_fields.contains(&LayerField::Seed));
+
+        let kick = Layer::new(Wave::Kick);
+        assert!(!visible(&kick).contains(&LayerField::Seed));
+        let snare = Layer::new(Wave::Snare);
+        assert!(visible(&snare).contains(&LayerField::Seed));
+
+        assert!(visible(&Layer::new(Wave::Arp)).contains(&LayerField::Arp3));
+        let fm = visible(&Layer::new(Wave::Fm));
+        assert!(fm.contains(&LayerField::FmIndex) && fm.contains(&LayerField::Resonance));
+        assert!(visible(&Layer::new(Wave::Pluck)).contains(&LayerField::PluckDamping));
+    }
 
     #[test]
     fn project_json_roundtrip() {

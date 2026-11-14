@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨与 0006 时间线/音频交互修复；app/ui 主体拆分与后台渲染见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复与 0007 图层检查器注册表；app/ui 主体拆分与后台渲染见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -65,7 +65,7 @@
 | P2-1 | 共享布局 metrics | ✅ 已完成 |
 | P2-2 | 预览渲染节流 | ✅ 已完成（50 ms） |
 | P2-3 | 波形包络 | ✅ 已完成 |
-| P2-4 | 参数元数据单表（`FieldSpec`：label/unit/range/scale/format） | ✅ 已完成（inspector 分组仍手写，Phase 2 继续） |
+| P2-4 | 参数元数据单表（`FieldSpec`：label/unit/range/scale/format）+ 图层 section 表 | ✅ 已完成（0007 起 `layer_sections()` 驱动 inspector 分组/可见性） |
 | P2-5 | 模块拆分（app/ui → state/commands/input/ui/*） | 🟡 部分完成：`cli.rs`、`project_io.rs` 已拆；`app.rs`/`ui.rs` 主体待拆 |
 | P2-13 | UI 精简：顶部按钮收进 `MENU`、移除 Trigger Pad | ✅ 已完成 |
 | P2-14 | 启动/切换 tab 首帧延迟渲染（先画壳，下一帧渲染音频） | ✅ 已完成（后台渲染仍为 Backlog） |
@@ -79,12 +79,12 @@
 
 ## 2. 本轮验收证据
 
-审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`（status: approved，source_hash 匹配）。
+审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`（status: approved，source_hash 匹配）。
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                 # 53 passed
+cargo test                 # 55 passed
 cargo run -- --selfcheck   # 2 frames / 2550 commands / 118 text runs
 ./scripts/preflight.sh
 ./scripts/review_gate.sh   # 需要 docs/reviews/*.md 中 approved + 匹配 source_hash
@@ -99,17 +99,16 @@ cargo run -- --selfcheck   # 2 frames / 2550 commands / 118 text runs
 
 ## 3. Backlog（下一迭代，按依赖排序）
 
-1. **参数注册表**：`FieldDescriptor { key, label, unit, range, scale, get, set, visible_when }`，同时驱动 inspector 与 `LayerField/MusicField/ClipField`，消除四处重复。
-2. **参数注册表（剩余）**：inspector 的字段分组/可见性改由 `visible_when` 表驱动，删除 `inspector_items` 中按波形手写的分组。
-3. **状态拆分（继续）**：`State { doc, view, playback, ui }`；`app.rs` 拆 `commands/input/audio_bridge`；`ui.rs` 拆 `layout/hit/paint/*`。（`cli.rs` / `project_io.rs` 已完成）
-4. **后台渲染**：`RenderRequest { revision, tab, rate }` → worker → `RenderResult { generation, samples, envelope, peak }`；UI 只接受最新 generation，拖动期间不阻塞。
-5. **稳定 ID + 迁移 v3**：`Patch/Layer/Clip.id`；选区/撤销/导出引用 ID；`Project.version` 升 3 并提供迁移。
-6. **音频 RT 化**：无锁 ring buffer、设备热插拔、48k 固定渲染 + `rubato` 重采样、欠载统计。
-7. **跨语言一致性**：PCG32 测试向量、相位回绕、f32/f64 策略、容差 golden（见 `docs/PARITY.md`）。
-8. **采样波形**：`Wave::Sample` + WAV 导入 + `sample_pitch/loop` 导入导出。
-9. **i18n 与可访问性**：文案表、焦点遍历、键盘可达全部操作。
-10. **CLI 产品化**：`clap` 子命令、`--golden` 渲染校验、批量导出接入游戏仓库 CI。
-11. **UI 体验跟进（0006 之后）**：时间线缩放/横向滚动、库列表滚动条、分类下拉、拖拽吸附步长可切换（Shift 关闭）、Clip Move 上界校验。
+1. **检查器注册表（剩余）**：把 Clip / Music inspector 也迁到 `layer_sections()` 风格的声明式 section 表；Layer 已在 0007 完成。
+2. **状态拆分（继续）**：`State { doc, view, playback, ui }`；`app.rs` 拆 `commands/input/audio_bridge`；`ui.rs` 拆 `layout/hit/paint/*`。（`cli.rs` / `project_io.rs` 已完成）
+3. **后台渲染**：`RenderRequest { revision, tab, rate }` → worker → `RenderResult { generation, samples, envelope, peak }`；UI 只接受最新 generation，拖动期间不阻塞。
+4. **稳定 ID + 迁移 v3**：`Patch/Layer/Clip.id`；选区/撤销/导出引用 ID；`Project.version` 升 3 并提供迁移。
+5. **音频 RT 化**：无锁 ring buffer、设备热插拔、48k 固定渲染 + `rubato` 重采样、欠载统计。
+6. **跨语言一致性**：PCG32 测试向量、相位回绕、f32/f64 策略、容差 golden（见 `docs/PARITY.md`）。
+7. **采样波形**：`Wave::Sample` + WAV 导入 + `sample_pitch/loop` 导入导出。
+8. **i18n 与可访问性**：文案表、焦点遍历、键盘可达全部操作。
+9. **CLI 产品化**：`clap` 子命令、`--golden` 渲染校验、批量导出接入游戏仓库 CI。
+10. **UI 体验跟进（0006 之后）**：时间线缩放/横向滚动、库列表滚动条、分类下拉、拖拽吸附步长可切换（Shift 关闭）、Clip Move 上界校验。
 
 ## 4. 已验证的端到端场景
 
@@ -159,7 +158,14 @@ cargo run -- --selfcheck   # 2 frames / 2550 commands / 118 text runs
 - `Icon` 表新增一致性测试，`document()` 改为安全 `get()`，避免新增图标时静默越界。
 - 新增 4 条测试：星标命中、pin 比例稳定、自适应高度、星标点击撤销；`cargo test` 53 passed。
 
-## 10. Definition of Done（每个 PR 必须满足）
+## 10. 本轮增量（0007）
+
+- 新增声明式图层检查器表：`LayerRowSpec` / `LayerRow` / `LayerSectionSpec` 与 `model::layer_sections(wave)`；按波形返回 PITCH / AMP ENV / FILTER / NOISE / ARP / FM / PLUCK / DRUM 分组。
+- 行级可见性由谓词驱动：Sine 显示 HARSH、Pulse 显示 DUTY、Exp 包络显示 EXP DECAY、Kick 隐藏 SEED，删除 `inspector_items` 中按波形手写的六段分支。
+- `ui::inspector_items` 只负责把 section 表渲染成 `RawItem`（含 TONE ENV / ENV / FILTER 选项行），约减 120 行重复代码，UI 输出保持不变。
+- 新增 `layer_sections_expose_wave_specific_fields`（模型）与 `inspector_renders_the_layer_registry`（UI 顺序）测试；`cargo test` 55 passed。
+
+## 11. Definition of Done（每个 PR 必须满足）
 
 - [ ] `docs/PLAN.md` 对应条目状态更新。
 - [ ] `scripts/preflight.sh` 全绿（fmt / clippy -D warnings / test / selfcheck）。
