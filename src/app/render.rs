@@ -187,7 +187,7 @@ impl SfxLogic {
         let key = self.preview_key(rate);
         let payload = match key.tab {
             Tab::Patches => RenderPayload::Patch(self.state.patch().cloned().unwrap_or_default()),
-            Tab::Music => RenderPayload::Music(self.state.project.music.clone()),
+            Tab::Music => RenderPayload::Music(self.state.doc.project.music.clone()),
         };
         let Some(worker) = self.render.as_mut() else {
             self.state.ensure_cache_soon(rate);
@@ -214,32 +214,32 @@ impl SfxLogic {
 
     fn preview_key(&self, rate: u32) -> RenderKey {
         RenderKey {
-            tab: self.state.tab,
+            tab: self.state.view.tab,
             rate,
-            version: self.state.version,
-            music_version: self.state.music_version,
-            patch: self.state.selected_patch,
+            version: self.state.doc.version,
+            music_version: self.state.doc.music_version,
+            patch: self.state.view.selected_patch,
         }
     }
 
     fn apply_render(&mut self, outcome: RenderOutcome) {
         match outcome.key.tab {
             Tab::Patches => {
-                self.state.cache = outcome.samples;
-                self.state.cache_peak = outcome.peak;
-                self.state.cache_envelope = outcome.envelope;
-                self.state.cache_version = outcome.key.version;
-                self.state.cache_rate = outcome.key.rate;
+                self.state.playback.cache = outcome.samples;
+                self.state.playback.cache_peak = outcome.peak;
+                self.state.playback.cache_envelope = outcome.envelope;
+                self.state.playback.cache_version = outcome.key.version;
+                self.state.playback.cache_rate = outcome.key.rate;
             }
             Tab::Music => {
-                self.state.music_cache = outcome.samples;
-                self.state.music_cache_peak = outcome.peak;
-                self.state.music_envelope = outcome.envelope;
-                self.state.music_cache_version = outcome.key.music_version;
-                self.state.music_cache_rate = outcome.key.rate;
+                self.state.playback.music_cache = outcome.samples;
+                self.state.playback.music_cache_peak = outcome.peak;
+                self.state.playback.music_envelope = outcome.envelope;
+                self.state.playback.music_cache_version = outcome.key.music_version;
+                self.state.playback.music_cache_rate = outcome.key.rate;
             }
         }
-        self.state.last_render = Instant::now();
+        self.state.playback.last_render = Instant::now();
         self.state.bump_view();
     }
 }

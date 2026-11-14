@@ -6,11 +6,11 @@ impl SfxLogic {
     pub(crate) fn new(mut state: State, background_preview: bool) -> Self {
         let audio = AudioEngine::new();
         if let Some(engine) = &audio {
-            state.audio_ok = true;
-            state.audio_rate = engine.sample_rate();
-            state.status = format!("audio {} Hz · OPEN a project folder", engine.sample_rate());
+            state.playback.audio_ok = true;
+            state.playback.audio_rate = engine.sample_rate();
+            state.ui.status = format!("audio {} Hz · OPEN a project folder", engine.sample_rate());
         } else {
-            state.status = "no audio device · UI only".into();
+            state.ui.status = "no audio device · UI only".into();
         }
         Self {
             state,
@@ -24,7 +24,7 @@ impl SfxLogic {
 
     pub(super) fn activate(&mut self, action: ui::Action) {
         use ui::Action as A;
-        self.state.menu_open = false;
+        self.state.view.menu_open = false;
         self.state.commit_edit();
         let snapshot = matches!(
             action,
@@ -63,35 +63,40 @@ impl SfxLogic {
             A::CategoryCycle => self.cycle_category(),
             A::FavoriteFilter => self.toggle_favorite_filter(),
             A::TabPatches => {
-                self.state.tab = Tab::Patches;
-                self.state.inspector_scroll = 0.0;
-                self.state.defer_render = true;
+                self.state.view.tab = Tab::Patches;
+                self.state.view.inspector_scroll = 0.0;
+                self.state.playback.defer_render = true;
                 self.state.bump_view();
-                self.state.playhead = 0.0;
+                self.state.playback.playhead = 0.0;
             }
             A::TabMusic => {
-                self.state.tab = Tab::Music;
-                self.state.inspector_scroll = 0.0;
-                self.state.defer_render = true;
+                self.state.view.tab = Tab::Music;
+                self.state.view.inspector_scroll = 0.0;
+                self.state.playback.defer_render = true;
                 self.state.bump_view();
-                self.state.playhead = 0.0;
+                self.state.playback.playhead = 0.0;
             }
             A::NewPatch => {
-                let name = self.state.project.next_patch_name();
-                self.state.modal = Some(Modal {
+                let name = self.state.doc.project.next_patch_name();
+                self.state.view.modal = Some(Modal {
                     title: "NEW SOUND".into(),
                     text: name,
                     action: ModalAction::NewPatch,
                 });
             }
             A::DeletePatch => {
-                if self.state.project.patches.len() > 1 {
-                    self.state.project.patches.remove(self.state.selected_patch);
-                    self.state.selected_patch = self
+                if self.state.doc.project.patches.len() > 1 {
+                    self.state
+                        .doc
+                        .project
+                        .patches
+                        .remove(self.state.view.selected_patch);
+                    self.state.view.selected_patch = self
                         .state
+                        .view
                         .selected_patch
-                        .min(self.state.project.patches.len() - 1);
-                    self.state.selected_layer = 0;
+                        .min(self.state.doc.project.patches.len() - 1);
+                    self.state.view.selected_layer = 0;
                     self.state.mark_dirty();
                     self.state.bump_view();
                 }
@@ -101,18 +106,19 @@ impl SfxLogic {
                     let mut copy = patch;
                     copy.name = format!("{}_copy", copy.name);
                     self.state
+                        .doc
                         .project
                         .patches
-                        .insert(self.state.selected_patch + 1, copy);
-                    self.state.selected_patch += 1;
-                    self.state.selected_layer = 0;
+                        .insert(self.state.view.selected_patch + 1, copy);
+                    self.state.view.selected_patch += 1;
+                    self.state.view.selected_layer = 0;
                     self.state.mark_dirty();
                     self.state.bump_view();
                 }
             }
             A::RenamePatch => {
                 if let Some(patch) = self.state.patch() {
-                    self.state.modal = Some(Modal {
+                    self.state.view.modal = Some(Modal {
                         title: "RENAME SOUND".into(),
                         text: patch.name.clone(),
                         action: ModalAction::RenamePatch,
@@ -121,30 +127,30 @@ impl SfxLogic {
             }
             A::Play => self.play(),
             A::Stop => self.stop(),
-            A::Loop => self.state.loop_play = !self.state.loop_play,
+            A::Loop => self.state.playback.loop_play = !self.state.playback.loop_play,
             A::AddLayer => {
                 if let Some(patch) = self.state.patch_mut() {
                     patch.layers.push(Layer::default());
-                    self.state.selected_layer = patch.layers.len() - 1;
+                    self.state.view.selected_layer = patch.layers.len() - 1;
                     self.state.mark_dirty();
                 }
             }
             A::DuplicateLayer => {
-                let selected = self.state.selected_layer;
+                let selected = self.state.view.selected_layer;
                 if let Some(patch) = self.state.patch_mut() {
                     if let Some(layer) = patch.layers.get(selected).cloned() {
                         patch.layers.insert(selected + 1, layer);
-                        self.state.selected_layer = selected + 1;
+                        self.state.view.selected_layer = selected + 1;
                         self.state.mark_dirty();
                     }
                 }
             }
             A::DeleteLayer => {
-                let selected = self.state.selected_layer;
+                let selected = self.state.view.selected_layer;
                 if let Some(patch) = self.state.patch_mut() {
                     if patch.layers.len() > 1 {
                         patch.layers.remove(selected);
-                        self.state.selected_layer =
+                        self.state.view.selected_layer =
                             selected.min(patch.layers.len().saturating_sub(1));
                         self.state.mark_dirty();
                     }
@@ -176,31 +182,32 @@ impl SfxLogic {
                 }
             }
             A::BassWave(wave) => {
-                self.state.project.music.bass_wave = wave;
+                self.state.doc.project.music.bass_wave = wave;
                 self.state.mark_music_dirty();
             }
             A::ArpWave(wave) => {
-                self.state.project.music.arp_wave = wave;
+                self.state.doc.project.music.arp_wave = wave;
                 self.state.mark_music_dirty();
             }
             A::TogglePatterns => {
-                self.state.project.music.use_patterns = !self.state.project.music.use_patterns;
+                self.state.doc.project.music.use_patterns =
+                    !self.state.doc.project.music.use_patterns;
                 self.state.mark_music_dirty();
             }
             A::ChordPreset(index) => {
-                apply_chord_preset(&mut self.state.project.music, index);
+                apply_chord_preset(&mut self.state.doc.project.music, index);
                 self.state.mark_music_dirty();
             }
             A::Transpose(delta) => {
-                self.state.project.music.transpose(delta);
+                self.state.doc.project.music.transpose(delta);
                 self.state.mark_music_dirty();
             }
             A::ResetPatterns => {
-                self.state.project.music.reset_patterns();
+                self.state.doc.project.music.reset_patterns();
                 self.state.mark_music_dirty();
             }
             A::AddClip => {
-                let playhead = self.state.playhead;
+                let playhead = self.state.playback.playhead;
                 if let Some(layer) = self.state.layer_mut() {
                     layer.ensure_clips();
                     let duration = layer.duration.clamp(0.02, 0.5);
@@ -212,26 +219,26 @@ impl SfxLogic {
                         gain_points: Vec::new(),
                         cutoff_points: Vec::new(),
                     });
-                    self.state.selected_clip = Some(layer.clips.len() - 1);
-                    self.state.selected_env_point = None;
+                    self.state.view.selected_clip = Some(layer.clips.len() - 1);
+                    self.state.view.selected_env_point = None;
                     self.state.mark_dirty();
                 }
             }
             A::DeleteClip => {
-                if let Some(index) = self.state.selected_clip {
+                if let Some(index) = self.state.view.selected_clip {
                     if let Some(layer) = self.state.layer_mut() {
                         if index < layer.clips.len() {
                             layer.clips.remove(index);
-                            self.state.selected_clip = None;
-                            self.state.selected_env_point = None;
+                            self.state.view.selected_clip = None;
+                            self.state.view.selected_env_point = None;
                             self.state.mark_dirty();
                         }
                     }
                 }
             }
             A::AutomationLane(kind) => {
-                self.state.automation_lane = kind;
-                self.state.selected_env_point = None;
+                self.state.view.automation_lane = kind;
+                self.state.view.selected_env_point = None;
                 self.state.bump_view();
             }
             A::Undo => {
@@ -259,8 +266,8 @@ impl SfxLogic {
         else {
             return;
         };
-        if self.state.dirty {
-            self.state.modal = Some(Modal {
+        if self.state.doc.dirty {
+            self.state.view.modal = Some(Modal {
                 title: "DISCARD CHANGES?".into(),
                 text: folder.display().to_string(),
                 action: ModalAction::ConfirmOpen(folder),
@@ -272,8 +279,8 @@ impl SfxLogic {
     }
 
     fn open_folder_now(&mut self, folder: PathBuf) {
-        self.state.timeline_zoom = 1.0;
-        self.state.timeline_offset = 0.0;
+        self.state.view.timeline_zoom = 1.0;
+        self.state.view.timeline_offset = 0.0;
         match open_folder(&mut self.state, folder) {
             Ok(warnings) => {
                 let message = if warnings.is_empty() {
@@ -291,15 +298,15 @@ impl SfxLogic {
         let Some(root) = self.ensure_root() else {
             return;
         };
-        self.state.project.migrate();
-        let warnings = self.state.project.validate();
+        self.state.doc.project.migrate();
+        let warnings = self.state.doc.project.validate();
         // Validation may clamp values; make the rendered preview match what
         // was just persisted.
-        self.state.cache_version = 0;
-        self.state.music_cache_version = 0;
-        match model::save_project(&root, &self.state.project) {
+        self.state.playback.cache_version = 0;
+        self.state.playback.music_cache_version = 0;
+        match model::save_project(&root, &self.state.doc.project) {
             Ok(()) => {
-                self.state.dirty = false;
+                self.state.doc.dirty = false;
                 let message = if warnings.is_empty() {
                     format!("saved {}", root.join(model::PROJECT_FILE).display())
                 } else {
@@ -319,7 +326,7 @@ impl SfxLogic {
         let Some(root) = self.ensure_root() else {
             return;
         };
-        match export::bake(&self.state.project, &root) {
+        match export::bake(&self.state.doc.project, &root) {
             Ok(message) => self.state.toast(message),
             Err(error) => self.state.toast(format!("bake failed: {error}")),
         }
@@ -329,7 +336,7 @@ impl SfxLogic {
         let Some(root) = self.ensure_root() else {
             return;
         };
-        match export::export_tres(&self.state.project, &root) {
+        match export::export_tres(&self.state.doc.project, &root) {
             Ok(message) => self.state.toast(message),
             Err(error) => self.state.toast(format!("export failed: {error}")),
         }
@@ -363,7 +370,7 @@ impl SfxLogic {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos() as u64)
             .unwrap_or(0x5EED)
-            ^ self.state.version.wrapping_mul(0x9E3779B97F4A7C15);
+            ^ self.state.doc.version.wrapping_mul(0x9E3779B97F4A7C15);
         let mut rng = synth::Rng::new(seed);
         if let Some(patch) = self.state.patch_mut() {
             for layer in &mut patch.layers {
@@ -379,7 +386,7 @@ impl SfxLogic {
         let Some(base) = self.state.patch().cloned() else {
             return;
         };
-        let start = self.state.selected_patch;
+        let start = self.state.view.selected_patch;
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos() as u64)
@@ -392,11 +399,15 @@ impl SfxLogic {
             for layer in &mut copy.layers {
                 randomize_layer(layer, &mut rng, 0.30);
             }
-            self.state.project.patches.insert(start + 1 + index, copy);
+            self.state
+                .doc
+                .project
+                .patches
+                .insert(start + 1 + index, copy);
         }
-        self.state.selected_patch = start + 1;
-        self.state.selected_layer = 0;
-        self.state.selected_clip = None;
+        self.state.view.selected_patch = start + 1;
+        self.state.view.selected_layer = 0;
+        self.state.view.selected_clip = None;
         self.state.mark_dirty();
         self.state.bump_view();
         self.state.toast("created 3 variations (A/B/C)");
@@ -407,7 +418,7 @@ impl SfxLogic {
             patch.favorite = !patch.favorite;
             let favorite = patch.favorite;
             self.state.mark_dirty();
-            if self.state.favorites_only {
+            if self.state.view.favorites_only {
                 self.refresh_filter();
             } else {
                 self.state.bump_view();
@@ -421,14 +432,14 @@ impl SfxLogic {
     }
 
     pub(super) fn toggle_patch_favorite(&mut self, index: usize) {
-        let Some(patch) = self.state.project.patches.get(index) else {
+        let Some(patch) = self.state.doc.project.patches.get(index) else {
             return;
         };
         let favorite = !patch.favorite;
         self.state.begin_edit();
-        self.state.project.patches[index].favorite = favorite;
+        self.state.doc.project.patches[index].favorite = favorite;
         self.state.mark_dirty();
-        if self.state.favorites_only {
+        if self.state.view.favorites_only {
             self.refresh_filter();
         } else {
             self.state.bump_view();
@@ -442,7 +453,7 @@ impl SfxLogic {
     }
 
     fn cycle_category(&mut self) {
-        let next = match self.state.category_filter {
+        let next = match self.state.view.category_filter {
             None => Some(Category::ALL[0]),
             Some(category) => {
                 let next = category.next();
@@ -453,7 +464,7 @@ impl SfxLogic {
                 }
             }
         };
-        self.state.category_filter = next;
+        self.state.view.category_filter = next;
         self.refresh_filter();
         self.state.toast(match next {
             Some(category) => format!("filter: {}", category.label()),
@@ -462,15 +473,15 @@ impl SfxLogic {
     }
 
     pub(super) fn pick_category(&mut self, category: Option<Category>) {
-        self.state.category_filter = category;
-        self.state.category_menu_open = false;
+        self.state.view.category_filter = category;
+        self.state.view.category_menu_open = false;
         self.refresh_filter();
     }
 
     fn toggle_favorite_filter(&mut self) {
-        self.state.favorites_only = !self.state.favorites_only;
+        self.state.view.favorites_only = !self.state.view.favorites_only;
         self.refresh_filter();
-        self.state.toast(if self.state.favorites_only {
+        self.state.toast(if self.state.view.favorites_only {
             "showing favorites"
         } else {
             "showing all sounds"
@@ -478,13 +489,13 @@ impl SfxLogic {
     }
 
     pub(super) fn refresh_filter(&mut self) {
-        self.state.patch_scroll = 0;
+        self.state.view.patch_scroll = 0;
         self.keep_selection_visible();
         self.state.bump_view();
     }
 
     fn keep_selection_visible(&mut self) {
-        if self.state.patch_visible(self.state.selected_patch) {
+        if self.state.patch_visible(self.state.view.selected_patch) {
             return;
         }
         if let Some(index) = self.state.visible_patches().first().copied() {
@@ -493,37 +504,37 @@ impl SfxLogic {
     }
 
     pub(super) fn trigger_pad(&mut self, index: usize) {
-        if index >= self.state.project.patches.len() {
+        if index >= self.state.doc.project.patches.len() {
             return;
         }
         if !self.state.patch_visible(index) {
-            self.state.category_filter = None;
-            self.state.favorites_only = false;
-            self.state.patch_scroll = 0;
+            self.state.view.category_filter = None;
+            self.state.view.favorites_only = false;
+            self.state.view.patch_scroll = 0;
         }
-        self.state.tab = Tab::Patches;
+        self.state.view.tab = Tab::Patches;
         self.state.select_patch(index);
         self.play();
     }
 
     fn ensure_root(&mut self) -> Option<PathBuf> {
-        if let Some(root) = &self.state.root {
+        if let Some(root) = &self.state.doc.root {
             return Some(root.clone());
         }
         let folder = rfd::FileDialog::new()
             .set_title("Choose the Godot project folder for export")
             .pick_folder()?;
         if let Some(name) = folder.file_name().and_then(|name| name.to_str()) {
-            if self.state.project.name == "untitled" {
-                self.state.project.name = name.to_string();
+            if self.state.doc.project.name == "untitled" {
+                self.state.doc.project.name = name.to_string();
             }
         }
-        self.state.root = Some(folder.clone());
+        self.state.doc.root = Some(folder.clone());
         Some(folder)
     }
 
     fn confirm_modal(&mut self) {
-        let Some(modal) = self.state.modal.take() else {
+        let Some(modal) = self.state.view.modal.take() else {
             return;
         };
         let name = display_name(&modal.text);
@@ -532,11 +543,12 @@ impl SfxLogic {
             ModalAction::NewPatch => {
                 self.push_undo();
                 self.state
+                    .doc
                     .project
                     .patches
                     .push(Patch::new_layer(name.clone(), Wave::Sine));
-                self.state.selected_patch = self.state.project.patches.len() - 1;
-                self.state.selected_layer = 0;
+                self.state.view.selected_patch = self.state.doc.project.patches.len() - 1;
+                self.state.view.selected_layer = 0;
                 self.state.mark_dirty();
                 self.state.bump_view();
             }
@@ -551,13 +563,13 @@ impl SfxLogic {
     }
 
     pub(super) fn handle_modal(&mut self, event: &InputEvent) -> bool {
-        let Some(input) = self.state.modal.as_ref().map(Modal::is_input) else {
+        let Some(input) = self.state.view.modal.as_ref().map(Modal::is_input) else {
             return false;
         };
         match event {
             InputEvent::TextInput { text } => {
                 if input {
-                    if let Some(modal) = self.state.modal.as_mut() {
+                    if let Some(modal) = self.state.view.modal.as_mut() {
                         for ch in text.chars() {
                             if !ch.is_control() && modal.text.len() < 48 {
                                 modal.text.push(ch);
@@ -569,7 +581,7 @@ impl SfxLogic {
             }
             InputEvent::KeyDown { key } => match key {
                 Key::Backspace if input => {
-                    if let Some(modal) = self.state.modal.as_mut() {
+                    if let Some(modal) = self.state.view.modal.as_mut() {
                         modal.text.pop();
                     }
                     true
@@ -579,7 +591,7 @@ impl SfxLogic {
                     true
                 }
                 Key::Escape => {
-                    self.state.modal = None;
+                    self.state.view.modal = None;
                     true
                 }
                 _ => true,

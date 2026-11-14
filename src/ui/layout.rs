@@ -138,7 +138,7 @@ impl Layout {
                 rect: Rect::from_min_size(Vec2::new(x, header.top() + 6.0), Size::new(width, 22.0)),
                 label: if compact { String::new() } else { label.into() },
                 action,
-                active: action == Action::Loop && state.loop_play,
+                active: action == Action::Loop && state.playback.loop_play,
                 icon: action_icon(action),
             });
             x -= gap;
@@ -157,7 +157,7 @@ impl Layout {
                 rect: Rect::from_min_size(Vec2::new(tab_x, 4.0), Size::new(72.0, 22.0)),
                 label: label.into(),
                 action,
-                active: state.tab == tab,
+                active: state.view.tab == tab,
                 icon: Some(icon),
             });
             tab_x += 76.0;
@@ -166,7 +166,7 @@ impl Layout {
         let mut menu_rect = None;
         let mut menu_items = Vec::new();
         let mut menu_sections = Vec::new();
-        if state.menu_open {
+        if state.view.menu_open {
             let width = 224.0;
             let mut height = 10.0;
             for entry in MENU_ENTRIES {
@@ -224,7 +224,7 @@ impl Layout {
         );
         let mut category_menu = None;
         let mut category_items = Vec::new();
-        if state.category_menu_open {
+        if state.view.category_menu_open {
             let row_h = 22.0;
             let choices = Category::ALL.len() + 1;
             let rect = Rect::from_min_size(
@@ -252,6 +252,7 @@ impl Layout {
         let capacity = library_capacity(viewport);
         let visible_patches = state.visible_patches();
         let patch_start = state
+            .view
             .patch_scroll
             .min(visible_patches.len().saturating_sub(1));
         let mut patch_rows = Vec::new();
@@ -292,7 +293,7 @@ impl Layout {
             );
         }
 
-        let timeline_h = if state.tab == Tab::Music {
+        let timeline_h = if state.view.tab == Tab::Music {
             // The pattern grid needs its own height; layer count is irrelevant.
             let rows = pattern_rows(state).len() as f32;
             (22.0 + rows * 19.0 + 8.0)
@@ -321,15 +322,19 @@ impl Layout {
         let plot_w = (timeline.size.width - TIMELINE_LABEL - 8.0).max(1.0);
         // Fit is zoom 1.0; ⌘/Ctrl + wheel scales beyond it.
         let timeline_scale =
-            ((plot_w / view_total) * state.timeline_zoom.clamp(1.0, 32.0)).max(8.0);
+            ((plot_w / view_total) * state.view.timeline_zoom.clamp(1.0, 32.0)).max(8.0);
         let timeline_visible = plot_w / timeline_scale;
         let timeline_offset = state
+            .view
             .timeline_offset
             .clamp(0.0, (view_total - timeline_visible).max(0.0));
         let mut layer_rows = Vec::new();
         if let Some(patch) = state.patch() {
             let visible = layer_capacity(viewport, layer_count);
-            let start = state.layer_scroll.min(patch.layers.len().saturating_sub(1));
+            let start = state
+                .view
+                .layer_scroll
+                .min(patch.layers.len().saturating_sub(1));
             for offset in 0..visible {
                 let index = start + offset;
                 if index >= patch.layers.len() {
@@ -354,7 +359,7 @@ impl Layout {
         );
         let raw = inspector_items(state);
         let mut items = Vec::new();
-        let mut y = inspector.top() + 4.0 - state.inspector_scroll;
+        let mut y = inspector.top() + 4.0 - state.view.inspector_scroll;
         let content_start = y;
         let inner_left = inspector.left() + INSPECTOR_PAD;
         let inner_width = (inspector.size.width - INSPECTOR_PAD * 2.0).max(1.0);
@@ -454,7 +459,7 @@ impl Layout {
             let max_scroll = (inspector_content_h - inspector.size.height).max(0.001);
             let thumb_h = ((inspector.size.height / inspector_content_h) * track.size.height)
                 .clamp(18.0, track.size.height);
-            let t = (state.inspector_scroll / max_scroll).clamp(0.0, 1.0);
+            let t = (state.view.inspector_scroll / max_scroll).clamp(0.0, 1.0);
             inspector_scrollbar = track;
             inspector_thumb = Rect::from_min_size(
                 Vec2::new(
@@ -468,7 +473,7 @@ impl Layout {
         // Music pattern grid occupies the timeline slot.
         let mut pattern_grid = Rect::from_min_size(Vec2::ZERO, Size::ZERO);
         let mut pattern_cells = Vec::new();
-        if state.tab == Tab::Music {
+        if state.view.tab == Tab::Music {
             let rows = pattern_rows(state);
             let height = (rows.len() as f32 * 19.0 + 22.0).min(timeline.size.height);
             pattern_grid = Rect::from_min_size(
@@ -599,7 +604,7 @@ pub(super) fn automation_tabs(layout: &Layout) -> [(AutomationKind, Rect); 2] {
 }
 
 pub(super) fn pattern_rows(state: &State) -> Vec<PatternRow> {
-    let music = &state.project.music;
+    let music = &state.doc.project.music;
     let tones = music
         .chords
         .first()

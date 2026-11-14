@@ -7,16 +7,16 @@ impl SfxLogic {
         let rate = self.state.preview_rate();
         self.cancel_preview();
         self.state.ensure_cache(rate);
-        self.state.defer_render = false;
+        self.state.playback.defer_render = false;
         let Some(audio) = &self.audio else {
             self.state.toast("no audio device");
             return;
         };
-        match self.state.tab {
+        match self.state.view.tab {
             Tab::Patches => {
-                let samples = self.state.cache.clone();
-                let offset = if self.state.seeked {
-                    (self.state.playhead * rate as f32) as usize
+                let samples = self.state.playback.cache.clone();
+                let offset = if self.state.playback.seeked {
+                    (self.state.playback.playhead * rate as f32) as usize
                 } else {
                     0
                 };
@@ -24,23 +24,23 @@ impl SfxLogic {
                     self.state.toast("nothing to play");
                     return;
                 }
-                audio.play(samples, offset, self.state.loop_play);
-                if !self.state.seeked {
-                    self.state.playhead = 0.0;
+                audio.play(samples, offset, self.state.playback.loop_play);
+                if !self.state.playback.seeked {
+                    self.state.playback.playhead = 0.0;
                 }
             }
             Tab::Music => {
-                let mut samples = self.state.music_cache.clone();
-                let gain = 10f32.powf(self.state.project.music.volume_db / 20.0);
+                let mut samples = self.state.playback.music_cache.clone();
+                let gain = 10f32.powf(self.state.doc.project.music.volume_db / 20.0);
                 for sample in &mut samples {
                     *sample *= gain;
                 }
                 audio.play(samples, 0, true);
-                self.state.playhead = 0.0;
+                self.state.playback.playhead = 0.0;
             }
         }
-        self.state.seeked = false;
-        self.state.was_playing = true;
+        self.state.playback.seeked = false;
+        self.state.playback.was_playing = true;
     }
 
     /// Seek while paused. Stopping the stream avoids the UI and the audio
@@ -51,9 +51,9 @@ impl SfxLogic {
                 audio.stop();
             }
         }
-        self.state.was_playing = false;
-        self.state.playhead = time.max(0.0);
-        self.state.seeked = true;
+        self.state.playback.was_playing = false;
+        self.state.playback.playhead = time.max(0.0);
+        self.state.playback.seeked = true;
         self.state.bump_view();
     }
 
@@ -61,8 +61,8 @@ impl SfxLogic {
         if let Some(audio) = &self.audio {
             audio.stop();
         }
-        self.state.playhead = 0.0;
-        self.state.seeked = false;
-        self.state.was_playing = false;
+        self.state.playback.playhead = 0.0;
+        self.state.playback.seeked = false;
+        self.state.playback.was_playing = false;
     }
 }

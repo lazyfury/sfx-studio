@@ -4,7 +4,7 @@ use super::layout::{automation_tabs, pattern_on, pattern_rows};
 use super::*;
 
 pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext) {
-    let layout = Layout::new(state, state.viewport);
+    let layout = Layout::new(state, state.view.viewport);
     fill(ctx, Rect::from_min_size(Vec2::ZERO, layout.viewport), BG);
 
     // Top bar
@@ -18,6 +18,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
     );
     text(ctx, "SFX LAB", Vec2::new(31.0, 20.0), TITLE, TEXT);
     let project = state
+        .doc
         .root
         .as_ref()
         .map(|p| p.display().to_string())
@@ -36,7 +37,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         SMALL,
         DIM,
     );
-    if state.dirty {
+    if state.doc.dirty {
         text(
             ctx,
             "*",
@@ -51,8 +52,8 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         layout.menu_button,
         "MENU",
         icons::document(Icon::Menu),
-        state.hover_hit == Some(Hit::MenuToggle),
-        state.menu_open,
+        state.view.hover_hit == Some(Hit::MenuToggle),
+        state.view.menu_open,
     );
     for button in &layout.tab_buttons {
         paint_button(state, measurer, ctx, button);
@@ -108,15 +109,19 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         SMALL,
         FAINT,
     );
-    let category_label = state.category_filter.map(Category::short).unwrap_or("ALL");
+    let category_label = state
+        .view
+        .category_filter
+        .map(Category::short)
+        .unwrap_or("ALL");
     theme::button_icon(
         ctx,
         measurer,
         layout.category_rect,
         category_label,
         icons::document(Icon::Tag),
-        state.hover_hit == Some(Hit::CategoryFilter),
-        state.category_filter.is_some(),
+        state.view.hover_hit == Some(Hit::CategoryFilter),
+        state.view.category_filter.is_some(),
     );
     theme::button_icon(
         ctx,
@@ -124,15 +129,19 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         layout.favorite_rect,
         "",
         icons::document(Icon::Star),
-        state.hover_hit == Some(Hit::FavoriteFilter),
-        state.favorites_only,
+        state.view.hover_hit == Some(Hit::FavoriteFilter),
+        state.view.favorites_only,
     );
     ctx.fill_rounded_rect(layout.search_rect, 5.0, PANEL);
     ctx.stroke_rounded_rect(
         layout.search_rect,
         5.0,
         1.0,
-        if state.search_focus { ACCENT } else { BORDER },
+        if state.view.search_focus {
+            ACCENT
+        } else {
+            BORDER
+        },
     );
     icons::paint(
         ctx,
@@ -146,12 +155,16 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         ),
         FAINT,
     );
-    let search_text = if state.search.is_empty() {
+    let search_text = if state.view.search.is_empty() {
         "Search sounds…"
     } else {
-        state.search.as_str()
+        state.view.search.as_str()
     };
-    let search_color = if state.search.is_empty() { FAINT } else { TEXT };
+    let search_color = if state.view.search.is_empty() {
+        FAINT
+    } else {
+        TEXT
+    };
     text_top(
         ctx,
         measurer,
@@ -161,10 +174,10 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         SMALL,
         search_color,
     );
-    if state.search_focus {
+    if state.view.search_focus {
         let caret_x = layout.search_rect.left()
             + 23.0
-            + measurer.measure_run(state.search.as_str(), SMALL)
+            + measurer.measure_run(state.view.search.as_str(), SMALL)
             + 1.0;
         vline(
             ctx,
@@ -175,8 +188,8 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         );
     }
     for (index, rect) in &layout.patch_rows {
-        let patch = &state.project.patches[*index];
-        let selected = *index == state.selected_patch && state.tab == Tab::Patches;
+        let patch = &state.doc.project.patches[*index];
+        let selected = *index == state.view.selected_patch && state.view.tab == Tab::Patches;
         if selected {
             fill(ctx, *rect, ACTIVE);
             fill(
@@ -184,7 +197,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
                 Rect::from_min_size(rect.origin, Size::new(2.0, rect.size.height)),
                 ACCENT,
             );
-        } else if rect.contains(state.cursor) {
+        } else if rect.contains(state.view.cursor) {
             fill(ctx, *rect, HOVER);
         }
         let wave = patch.layers.first().map(|l| l.wave).unwrap_or(Wave::Sine);
@@ -194,7 +207,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         let label_right = rect.right() - 26.0;
         if patch.favorite {
             let star = patch_star_rect(*rect);
-            let hovered = state.hover_hit == Some(Hit::PatchFavorite(*index));
+            let hovered = state.view.hover_hit == Some(Hit::PatchFavorite(*index));
             icons::paint(
                 ctx,
                 Icon::Star,
@@ -238,7 +251,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         ctx.fill_rounded_rect(
             layout.library_thumb,
             2.0,
-            if state.hover_hit == Some(Hit::LibraryScrollbar) {
+            if state.view.hover_hit == Some(Hit::LibraryScrollbar) {
                 ACCENT
             } else {
                 DIM
@@ -256,7 +269,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             FAINT,
         );
     }
-    let music_selected = state.tab == Tab::Music;
+    let music_selected = state.view.tab == Tab::Music;
     if music_selected {
         fill(ctx, layout.music_row, ACTIVE);
         fill(
@@ -290,7 +303,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
     // Center header
     paint_header(state, measurer, ctx, &layout);
 
-    if state.tab == Tab::Patches {
+    if state.view.tab == Tab::Patches {
         paint_timeline(state, measurer, ctx, &layout);
         paint_automation(state, measurer, ctx, &layout);
         paint_waveform(
@@ -299,10 +312,10 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             ctx,
             layout.waveform,
             WaveformData {
-                samples: &state.cache,
-                envelope: &state.cache_envelope,
-                peak: state.cache_peak,
-                rate: state.cache_rate,
+                samples: &state.playback.cache,
+                envelope: &state.playback.cache_envelope,
+                peak: state.playback.cache_peak,
+                rate: state.playback.cache_rate,
             },
         );
     } else {
@@ -313,10 +326,10 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             ctx,
             layout.waveform,
             WaveformData {
-                samples: &state.music_cache,
-                envelope: &state.music_envelope,
-                peak: state.music_cache_peak,
-                rate: state.cache_rate,
+                samples: &state.playback.music_cache,
+                envelope: &state.playback.music_envelope,
+                peak: state.playback.music_cache_peak,
+                rate: state.playback.cache_rate,
             },
         );
     }
@@ -373,7 +386,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         ctx.fill_rounded_rect(
             layout.inspector_thumb,
             2.5,
-            if state.hover_hit == Some(Hit::InspectorScrollbar) {
+            if state.view.hover_hit == Some(Hit::InspectorScrollbar) {
                 ACCENT
             } else {
                 DIM
@@ -390,11 +403,13 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             Size::splat(6.0),
         ),
         3.0,
-        if state.dirty { WARN } else { ACCENT },
+        if state.doc.dirty { WARN } else { ACCENT },
     );
-    let toast = state.toast.as_ref().map(|(text, _)| text.as_str());
+    let toast = state.ui.toast.as_ref().map(|(text, _)| text.as_str());
     let live = drag_info(state).or_else(|| hover_info(state));
-    let status = toast.or(live.as_deref()).unwrap_or(state.status.as_str());
+    let status = toast
+        .or(live.as_deref())
+        .unwrap_or(state.ui.status.as_str());
     text_top(
         ctx,
         measurer,
@@ -402,22 +417,22 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         22.0,
         layout.status.top() + 5.0,
         SMALL,
-        if state.toast.is_some() {
+        if state.ui.toast.is_some() {
             ACCENT_DARK
         } else {
             DIM
         },
     );
-    let info = if state.tab == Tab::Patches {
+    let info = if state.view.tab == Tab::Patches {
         let patch = state.patch();
         format!(
             "{} Hz  ·  {:.3}s  ·  {} LAYERS  ·  peak {:.1} dB{}",
-            state.cache_rate,
+            state.playback.cache_rate,
             patch.map(|p| p.end()).unwrap_or(0.0),
             patch.map(|p| p.layers.len()).unwrap_or(0),
-            synth::db(state.cache_peak),
-            if state.timeline_zoom > 1.01 {
-                format!("  ·  {:.1}×", state.timeline_zoom)
+            synth::db(state.playback.cache_peak),
+            if state.view.timeline_zoom > 1.01 {
+                format!("  ·  {:.1}×", state.view.timeline_zoom)
             } else {
                 String::new()
             }
@@ -425,10 +440,10 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
     } else {
         format!(
             "{} BPM  ·  {} BARS  ·  {:.1}s  ·  peak {:.1} dB",
-            state.project.music.bpm,
-            state.project.music.bars,
-            state.project.music.length_seconds(),
-            synth::db(state.music_cache_peak)
+            state.doc.project.music.bpm,
+            state.doc.project.music.bars,
+            state.doc.project.music.length_seconds(),
+            synth::db(state.playback.music_cache_peak)
         )
     };
     text_right(
@@ -444,9 +459,9 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
     paint_menu(state, measurer, ctx, &layout);
     paint_category_menu(state, measurer, ctx, &layout);
 
-    if state.modal.is_some() {
+    if state.view.modal.is_some() {
         paint_modal(state, measurer, ctx, &layout);
-    } else if matches!(state.drag, Drag::None) && !state.menu_open {
+    } else if matches!(state.view.drag, Drag::None) && !state.view.menu_open {
         paint_hover_tip(state, measurer, ctx);
     }
 }
@@ -463,8 +478,8 @@ fn paint_category_menu(
     fill(ctx, rect, RAISED);
     stroke(ctx, rect, BORDER_HI);
     for (category, item) in &layout.category_items {
-        let active = state.category_filter == *category;
-        if item.contains(state.cursor) {
+        let active = state.view.category_filter == *category;
+        if item.contains(state.view.cursor) {
             fill(ctx, *item, ACTIVE);
         }
         text_top(
@@ -502,7 +517,8 @@ fn paint_button(
         button.rect,
         &button.label,
         button.icon.and_then(icons::document),
-        state.hover == Some(button.action) || state.hover_hit == Some(Hit::Action(button.action)),
+        state.view.hover == Some(button.action)
+            || state.view.hover_hit == Some(Hit::Action(button.action)),
         button.active,
     );
 }
@@ -525,7 +541,7 @@ fn paint_menu(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext
         );
     }
     for (action, label, item) in &layout.menu_items {
-        if item.contains(state.cursor) {
+        if item.contains(state.view.cursor) {
             fill(ctx, *item, ACTIVE);
         }
         let active =
@@ -567,7 +583,7 @@ fn paint_menu(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext
 }
 
 fn paint_hover_tip(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext) {
-    let tip = match state.hover_hit {
+    let tip = match state.view.hover_hit {
         Some(Hit::Action(action)) => action_tip(action),
         Some(Hit::Search) => "搜索音效 · Search（/）",
         Some(Hit::CategoryFilter) => "切换分类过滤 · Category（C）",
@@ -580,9 +596,15 @@ fn paint_hover_tip(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintCo
     }
     let width = measurer.measure_run(tip, FONT) + 16.0;
     let height = 24.0;
-    let mut origin = state.cursor + Vec2::new(14.0, 18.0);
-    origin.x = origin.x.min(state.viewport.width - width - 6.0).max(6.0);
-    origin.y = origin.y.min(state.viewport.height - height - 6.0).max(6.0);
+    let mut origin = state.view.cursor + Vec2::new(14.0, 18.0);
+    origin.x = origin
+        .x
+        .min(state.view.viewport.width - width - 6.0)
+        .max(6.0);
+    origin.y = origin
+        .y
+        .min(state.view.viewport.height - height - 6.0)
+        .max(6.0);
     let rect = Rect::from_min_size(origin, Size::new(width, height));
     ctx.fill_rounded_rect(rect, 5.0, PANEL);
     ctx.stroke_rounded_rect(rect, 5.0, 1.0, ACCENT_DARK);
@@ -616,7 +638,7 @@ fn paint_header(
         .map(|button| button.rect.left() - 8.0)
         .unwrap_or(header.right() - 10.0);
     let title_width = (title_right - (header.left() + 10.0)).max(24.0);
-    if state.tab == Tab::Patches {
+    if state.view.tab == Tab::Patches {
         if let Some(patch) = state.patch() {
             text_top(
                 ctx,
@@ -627,7 +649,7 @@ fn paint_header(
                 TITLE,
                 ACCENT,
             );
-            let layer = patch.layers.get(state.selected_layer);
+            let layer = patch.layers.get(state.view.selected_layer);
             let meta = format!(
                 "{}  /  {}  ·  {:.3}s  ·  gain {:.2}",
                 patch.layers.len(),
@@ -662,10 +684,10 @@ fn paint_header(
                 measurer,
                 &format!(
                     "{} BPM  ·  {} BARS  ·  {} CHORD BARS  ·  {}",
-                    state.project.music.bpm,
-                    state.project.music.bars,
-                    state.project.music.chords.len(),
-                    if state.project.music.use_patterns {
+                    state.doc.project.music.bpm,
+                    state.doc.project.music.bars,
+                    state.doc.project.music.chords.len(),
+                    if state.doc.project.music.use_patterns {
                         "PATTERN"
                     } else {
                         "DEFAULT"
@@ -731,9 +753,9 @@ fn paint_timeline(
     if let Some(patch) = state.patch() {
         for (index, row_rect) in &layout.layer_rows {
             if let Some(layer) = patch.layers.get(*index) {
-                let selected = *index == state.selected_layer;
+                let selected = *index == state.view.selected_layer;
                 let hovered_row = matches!(
-                    state.hover_hit,
+                    state.view.hover_hit,
                     Some(Hit::Timeline { layer, .. }) if layer == *index
                 );
                 if selected {
@@ -781,7 +803,7 @@ fn paint_timeline(
                             layer.gain * clip.gain,
                             layer,
                             selected,
-                            state.selected_clip == Some(clip_index),
+                            state.view.selected_clip == Some(clip_index),
                             *index,
                             Some(clip_index),
                         );
@@ -790,11 +812,11 @@ fn paint_timeline(
             }
         }
     }
-    if let Some(Hit::Ruler(time)) = state.hover_hit {
+    if let Some(Hit::Ruler(time)) = state.view.hover_hit {
         let hx = layout.time_x(time);
         vline(ctx, hx, ruler.bottom(), rect.bottom(), BORDER_HI);
     }
-    let px = layout.time_x(state.playhead.min(layout.timeline_total + 0.05));
+    let px = layout.time_x(state.playback.playhead.min(layout.timeline_total + 0.05));
     if px >= rect.left() && px <= rect.right() {
         vline(ctx, px, rect.top(), rect.bottom(), WARN);
         ctx.draw_line(
@@ -809,7 +831,7 @@ fn paint_timeline(
             1.0,
             WARN,
         );
-        let label = format!("{:.3}", state.playhead);
+        let label = format!("{:.3}", state.playback.playhead);
         let label_w = measurer.measure_run(&label, SMALL);
         let label_x = (px + 6.0)
             .min(rect.right() - label_w - 8.0)
@@ -850,11 +872,11 @@ fn paint_automation(
             measurer,
             tab,
             kind.label(),
-            state.hover == Some(Action::AutomationLane(kind)),
-            state.automation_lane == kind,
+            state.view.hover == Some(Action::AutomationLane(kind)),
+            state.view.automation_lane == kind,
         );
     }
-    let Some(clip_index) = state.selected_clip else {
+    let Some(clip_index) = state.view.selected_clip else {
         text_top(
             ctx,
             measurer,
@@ -868,12 +890,12 @@ fn paint_automation(
     };
     let Some(clip) = state
         .patch()
-        .and_then(|p| p.layers.get(state.selected_layer))
+        .and_then(|p| p.layers.get(state.view.selected_layer))
         .and_then(|l| l.clips.get(clip_index))
     else {
         return;
     };
-    let kind = state.automation_lane;
+    let kind = state.view.automation_lane;
     text_top(
         ctx,
         measurer,
@@ -940,8 +962,8 @@ fn paint_automation(
     }
     ctx.draw_line(points.last().copied().unwrap_or(last), last, 1.5, ACCENT);
     for (index, point) in points.iter().enumerate() {
-        let selected = state.selected_env_point == Some(index);
-        let hovered = matches!(state.hover_hit, Some(Hit::AutomationPoint(i)) if i == index);
+        let selected = state.view.selected_env_point == Some(index);
+        let hovered = matches!(state.view.hover_hit, Some(Hit::AutomationPoint(i)) if i == index);
         let radius = if selected || hovered { 4.0 } else { 3.0 };
         ctx.fill_circle(*point, radius, if selected { ACCENT2 } else { ACCENT });
         ctx.stroke_circle(*point, radius, 1.0, BG);
@@ -1028,7 +1050,8 @@ fn paint_waveform(
         }
     }
     let duration = samples.len() as f32 / rate.max(1) as f32;
-    let px = rect.left() + (state.playhead / duration.max(0.001)).clamp(0.0, 1.0) * rect.size.width;
+    let px = rect.left()
+        + (state.playback.playhead / duration.max(0.001)).clamp(0.0, 1.0) * rect.size.width;
     vline(ctx, px, rect.top(), rect.bottom(), WARN);
     let info = format!(
         "{:.2}s  ·  {} Hz  ·  peak {:.1} dB",
@@ -1084,8 +1107,8 @@ fn paint_patterns(
         vline(ctx, x, grid.top() + 20.0, grid.bottom(), BORDER);
     }
     for (row, step, rect) in &layout.pattern_cells {
-        let on = pattern_on(&state.project.music, *row, *step);
-        let hovered = rect.contains(state.cursor);
+        let on = pattern_on(&state.doc.project.music, *row, *step);
+        let hovered = rect.contains(state.view.cursor);
         let color = if on {
             CELL_ON
         } else if hovered {
@@ -1143,7 +1166,7 @@ fn paint_inspector(
                 norm,
                 rect,
             } => {
-                let hovered = rect.contains(state.cursor);
+                let hovered = rect.contains(state.view.cursor);
                 if hovered {
                     fill(ctx, *rect, HOVER);
                 }
@@ -1212,7 +1235,7 @@ fn paint_inspector(
                 action,
                 rect,
             } => {
-                if state.hover == Some(*action) {
+                if state.view.hover == Some(*action) {
                     fill(ctx, *rect, HOVER);
                 }
                 let box_rect = Rect::from_min_size(
@@ -1253,7 +1276,7 @@ fn paint_modal(
     ctx: &mut PaintContext,
     layout: &Layout,
 ) {
-    let Some(modal) = &state.modal else {
+    let Some(modal) = &state.view.modal else {
         return;
     };
     fill(
@@ -1326,14 +1349,14 @@ fn paint_modal(
 
 pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
     let mut items = Vec::new();
-    if state.tab == Tab::Patches {
+    if state.view.tab == Tab::Patches {
         let Some(layer) = state.layer() else {
             items.push(RawItem::Note("NO LAYER".into()));
             return items;
         };
         items.push(RawItem::Section(format!(
             "LAYER {:02}  /  {}",
-            state.selected_layer + 1,
+            state.view.selected_layer + 1,
             layer.wave.label()
         )));
         items.push(RawItem::Options {
@@ -1363,7 +1386,7 @@ pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
         for field in [LayerField::Delay, LayerField::Duration, LayerField::Gain] {
             items.push(layer_param(field, layer));
         }
-        if let Some(index) = state.selected_clip {
+        if let Some(index) = state.view.selected_clip {
             if let Some(clip) = layer.clips.get(index) {
                 items.push(RawItem::Section(format!("CLIP {:02}", index + 1)));
                 for field in CLIP_FIELDS {
@@ -1443,7 +1466,7 @@ pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
             state.patch().map(|patch| patch.rate).unwrap_or(22050)
         )));
     } else {
-        let music = &state.project.music;
+        let music = &state.doc.project.music;
         for section in music_sections() {
             items.push(RawItem::Section(section.title.into()));
             for row in section.rows {
@@ -1509,7 +1532,7 @@ pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
                     }),
                     MusicRowSpec::PreviewNote => items.push(RawItem::Note(format!(
                         "PREVIEW {} Hz · BAKE {} Hz",
-                        state.cache_rate, music.rate
+                        state.playback.cache_rate, music.rate
                     ))),
                     MusicRowSpec::ChordNote => items.push(RawItem::Note(format!(
                         "{} chord bars  ·  {} notes",
@@ -1632,14 +1655,14 @@ fn paint_clip_block(
         Size::new((x1 - x0).max(3.0), TRACK_H - 6.0),
     );
     let hovered = matches!(
-        state.hover_hit,
+        state.view.hover_hit,
         Some(Hit::Timeline {
             layer,
             clip,
             ..
         }) if layer == layer_index && clip == clip_index
     );
-    let dragging = match &state.drag {
+    let dragging = match &state.view.drag {
         Drag::Clip { layer, clip, .. } => *layer == layer_index && Some(*clip) == clip_index,
         _ => false,
     };
@@ -1742,10 +1765,10 @@ fn paint_clip_block(
 }
 
 fn drag_info(state: &State) -> Option<String> {
-    match &state.drag {
+    match &state.view.drag {
         Drag::Seek { .. } => Some(format!(
             "PLAYHEAD  {:.3}s  ·  drag to scrub",
-            state.playhead
+            state.playback.playhead
         )),
         Drag::InspectorScroll { .. } => Some("PARAMETERS  scrolling".into()),
         Drag::LibraryScroll { .. } => Some("LIBRARY  scrolling".into()),
@@ -1754,11 +1777,11 @@ fn drag_info(state: &State) -> Option<String> {
                 .patch()
                 .and_then(|p| p.layers.get(*layer))
                 .and_then(|l| l.clips.get(*clip))
-                .and_then(|c| state.automation_lane.points(c).get(*index))?;
+                .and_then(|c| state.view.automation_lane.points(c).get(*index))?;
             Some(format!(
                 "AUTOMATION {:02}  {}  T {:.3}s  {:.2}",
                 index + 1,
-                state.automation_lane.label(),
+                state.view.automation_lane.label(),
                 data.time,
                 data.value
             ))
@@ -1775,7 +1798,7 @@ fn drag_info(state: &State) -> Option<String> {
                 TimelineDrag::Resize => "RESIZE",
                 TimelineDrag::ResizeLeft => "TRIM",
             };
-            let grid = if state.modifiers.shift {
+            let grid = if state.view.modifiers.shift {
                 "FREE"
             } else {
                 "SNAP 5ms"
@@ -1813,14 +1836,14 @@ fn drag_info(state: &State) -> Option<String> {
         Drag::Music { field, .. } => Some(format!(
             "MUSIC  {}  {}",
             field.label(),
-            field.format(field.get(&state.project.music))
+            field.format(field.get(&state.doc.project.music))
         )),
         Drag::None => None,
     }
 }
 
 fn hover_info(state: &State) -> Option<String> {
-    match state.hover_hit {
+    match state.view.hover_hit {
         Some(Hit::Action(action)) => {
             let tip = action_tip(action);
             if tip.is_empty() {
@@ -1862,22 +1885,23 @@ fn hover_info(state: &State) -> Option<String> {
         }
         Some(Hit::Ruler(time)) => Some(format!("PLAYHEAD  {time:.3}s  ·  click to seek")),
         Some(Hit::AutomationPoint(index)) => {
-            let clip = state.selected_clip?;
-            let layer = state.patch()?.layers.get(state.selected_layer)?;
+            let clip = state.view.selected_clip?;
+            let layer = state.patch()?.layers.get(state.view.selected_layer)?;
             let point = state
+                .view
                 .automation_lane
                 .points(layer.clips.get(clip)?)
                 .get(index)?;
             Some(format!(
                 "AUTOMATION {:02}  {}  T {:.3}s  {:.2}  ·  drag / Delete",
                 index + 1,
-                state.automation_lane.label(),
+                state.view.automation_lane.label(),
                 point.time,
                 point.value
             ))
         }
         Some(Hit::AutomationLane { time, value }) => {
-            let kind = state.automation_lane;
+            let kind = state.view.automation_lane;
             let value = if kind == AutomationKind::Gain {
                 format!("{value:.2}")
             } else {

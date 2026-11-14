@@ -11,19 +11,19 @@ impl AppLogic for SfxLogic {
 
     fn event(&mut self, _ctx: &EventContext<'_>, event: &InputEvent) -> EventResult {
         if let InputEvent::ModifiersChanged(modifiers) = event {
-            self.state.modifiers = *modifiers;
+            self.state.view.modifiers = *modifiers;
             return EventResult::Ignored;
         }
         if self.handle_modal(event) {
             return EventResult::Handled;
         }
 
-        if self.state.search_focus {
+        if self.state.view.search_focus {
             match event {
                 InputEvent::TextInput { text } => {
                     for ch in text.chars() {
-                        if !ch.is_control() && self.state.search.len() < 32 {
-                            self.state.search.push(ch);
+                        if !ch.is_control() && self.state.view.search.len() < 32 {
+                            self.state.view.search.push(ch);
                         }
                     }
                     self.refresh_filter();
@@ -31,21 +31,21 @@ impl AppLogic for SfxLogic {
                 }
                 InputEvent::KeyDown { key } => match key {
                     Key::Backspace => {
-                        self.state.search.pop();
+                        self.state.view.search.pop();
                         self.refresh_filter();
                         return EventResult::Handled;
                     }
                     Key::Enter => {
-                        self.state.search_focus = false;
+                        self.state.view.search_focus = false;
                         return EventResult::Handled;
                     }
                     Key::Escape => {
-                        self.state.search_focus = false;
-                        self.state.search.clear();
+                        self.state.view.search_focus = false;
+                        self.state.view.search.clear();
                         self.refresh_filter();
                         return EventResult::Handled;
                     }
-                    _ if !(self.state.modifiers.meta || self.state.modifiers.ctrl) => {
+                    _ if !(self.state.view.modifiers.meta || self.state.view.modifiers.ctrl) => {
                         return EventResult::Handled;
                     }
                     _ => {}
@@ -54,13 +54,13 @@ impl AppLogic for SfxLogic {
             }
         }
 
-        let layout = ui::Layout::new(&self.state, self.state.viewport);
+        let layout = ui::Layout::new(&self.state, self.state.view.viewport);
         match event {
             InputEvent::KeyDown { key } => {
-                let cmd = self.state.modifiers.meta || self.state.modifiers.ctrl;
+                let cmd = self.state.view.modifiers.meta || self.state.view.modifiers.ctrl;
                 match key {
                     Key::Space => {
-                        if self.state.was_playing
+                        if self.state.playback.was_playing
                             || self.audio.as_ref().is_some_and(|a| a.is_playing())
                         {
                             self.stop();
@@ -70,7 +70,7 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::Tab => {
-                        self.state.tab = match self.state.tab {
+                        self.state.view.tab = match self.state.view.tab {
                             Tab::Patches => Tab::Music,
                             Tab::Music => Tab::Patches,
                         };
@@ -78,11 +78,11 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::Escape => {
-                        if self.state.category_menu_open {
-                            self.state.category_menu_open = false;
+                        if self.state.view.category_menu_open {
+                            self.state.view.category_menu_open = false;
                             self.state.bump_view();
-                        } else if self.state.menu_open {
-                            self.state.menu_open = false;
+                        } else if self.state.view.menu_open {
+                            self.state.view.menu_open = false;
                             self.state.bump_view();
                         } else {
                             self.stop();
@@ -90,13 +90,14 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::Delete => {
-                        if self.state.tab == Tab::Patches {
-                            if let (Some(index), Some(clip_index)) =
-                                (self.state.selected_env_point, self.state.selected_clip)
-                            {
+                        if self.state.view.tab == Tab::Patches {
+                            if let (Some(index), Some(clip_index)) = (
+                                self.state.view.selected_env_point,
+                                self.state.view.selected_clip,
+                            ) {
                                 self.push_undo();
-                                let layer_index = self.state.selected_layer;
-                                let kind = self.state.automation_lane;
+                                let layer_index = self.state.view.selected_layer;
+                                let kind = self.state.view.automation_lane;
                                 if let Some(clip) = self
                                     .state
                                     .patch_mut()
@@ -106,7 +107,7 @@ impl AppLogic for SfxLogic {
                                     let points = kind.points_mut(clip);
                                     if index < points.len() {
                                         points.remove(index);
-                                        self.state.selected_env_point = None;
+                                        self.state.view.selected_env_point = None;
                                         self.state.mark_dirty();
                                     }
                                 }
@@ -120,7 +121,7 @@ impl AppLogic for SfxLogic {
                         let visible = self.state.visible_patches();
                         let position = visible
                             .iter()
-                            .position(|index| *index == self.state.selected_patch)
+                            .position(|index| *index == self.state.view.selected_patch)
                             .unwrap_or(0);
                         if let Some(index) = visible.get(position.saturating_sub(1)) {
                             self.state.select_patch(*index);
@@ -131,7 +132,7 @@ impl AppLogic for SfxLogic {
                         let visible = self.state.visible_patches();
                         let position = visible
                             .iter()
-                            .position(|index| *index == self.state.selected_patch)
+                            .position(|index| *index == self.state.view.selected_patch)
                             .unwrap_or(0);
                         if let Some(index) = visible.get(position + 1) {
                             self.state.select_patch(*index);
@@ -139,12 +140,12 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::ArrowLeft => {
-                        let index = self.state.selected_layer.saturating_sub(1);
+                        let index = self.state.view.selected_layer.saturating_sub(1);
                         self.state.select_layer(index);
                         return EventResult::Handled;
                     }
                     Key::ArrowRight => {
-                        let index = self.state.selected_layer + 1;
+                        let index = self.state.view.selected_layer + 1;
                         self.state.select_layer(index);
                         return EventResult::Handled;
                     }
@@ -154,7 +155,7 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::Character('/') if !cmd => {
-                        self.state.search_focus = true;
+                        self.state.view.search_focus = true;
                         return EventResult::Handled;
                     }
                     Key::Character('r') if !cmd => {
@@ -174,11 +175,11 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::Character('l') if !cmd => {
-                        self.state.loop_play = !self.state.loop_play;
+                        self.state.playback.loop_play = !self.state.playback.loop_play;
                         return EventResult::Handled;
                     }
                     Key::Character('z') if cmd => {
-                        if self.state.modifiers.shift {
+                        if self.state.view.modifiers.shift {
                             self.state.redo();
                         } else {
                             self.state.undo();
@@ -209,67 +210,67 @@ impl AppLogic for SfxLogic {
                 }
             }
             InputEvent::PointerDown { position, button } if *button == PointerButton::Left => {
-                self.state.cursor = *position;
+                self.state.view.cursor = *position;
                 let pointer_hit = ui::hit(&self.state, &layout, *position);
-                self.state.hover_hit = pointer_hit;
+                self.state.view.hover_hit = pointer_hit;
                 if pointer_hit != Some(ui::Hit::Search) {
-                    self.state.search_focus = false;
+                    self.state.view.search_focus = false;
                 }
-                if self.state.menu_open {
+                if self.state.view.menu_open {
                     match pointer_hit {
                         Some(ui::Hit::MenuToggle) => {
-                            self.state.menu_open = false;
+                            self.state.view.menu_open = false;
                         }
                         Some(ui::Hit::MenuItem(action)) => {
-                            self.state.menu_open = false;
+                            self.state.view.menu_open = false;
                             self.activate(action);
                         }
                         Some(ui::Hit::MenuPanel) => {}
                         _ => {
                             // Click outside closes the menu without also
                             // activating whatever is underneath it.
-                            self.state.menu_open = false;
+                            self.state.view.menu_open = false;
                         }
                     }
                     self.state.bump_view();
                     return EventResult::Handled;
                 }
                 if pointer_hit == Some(ui::Hit::MenuToggle) {
-                    self.state.menu_open = true;
-                    self.state.category_menu_open = false;
+                    self.state.view.menu_open = true;
+                    self.state.view.category_menu_open = false;
                     self.state.bump_view();
                     return EventResult::Handled;
                 }
-                if self.state.category_menu_open {
+                if self.state.view.category_menu_open {
                     match pointer_hit {
                         Some(ui::Hit::CategoryPick(category)) => {
                             self.pick_category(category);
                             return EventResult::Handled;
                         }
                         Some(ui::Hit::CategoryMenu | ui::Hit::CategoryFilter) => {
-                            self.state.category_menu_open = false;
+                            self.state.view.category_menu_open = false;
                             self.state.bump_view();
                             return EventResult::Handled;
                         }
                         _ => {
-                            self.state.category_menu_open = false;
+                            self.state.view.category_menu_open = false;
                             self.state.bump_view();
                         }
                     }
                 }
                 match pointer_hit {
                     Some(ui::Hit::Search) => {
-                        self.state.search_focus = true;
+                        self.state.view.search_focus = true;
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::Action(action)) => {
-                        self.state.hover = Some(action);
+                        self.state.view.hover = Some(action);
                         self.activate(action);
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::CategoryFilter) => {
-                        self.state.category_menu_open = !self.state.category_menu_open;
-                        self.state.menu_open = false;
+                        self.state.view.category_menu_open = !self.state.view.category_menu_open;
+                        self.state.view.menu_open = false;
                         self.state.bump_view();
                         return EventResult::Handled;
                     }
@@ -287,7 +288,7 @@ impl AppLogic for SfxLogic {
                     Some(ui::Hit::LayerField(field)) => {
                         self.state.begin_edit();
                         self.set_param_from_x(*position, ui::Hit::LayerField(field), &layout);
-                        self.state.drag = Drag::Layer {
+                        self.state.view.drag = Drag::Layer {
                             field,
                             last_x: position.x,
                         };
@@ -296,18 +297,18 @@ impl AppLogic for SfxLogic {
                     Some(ui::Hit::MusicField(field)) => {
                         self.state.begin_edit();
                         self.set_param_from_x(*position, ui::Hit::MusicField(field), &layout);
-                        self.state.drag = Drag::Music {
+                        self.state.view.drag = Drag::Music {
                             field,
                             last_x: position.x,
                         };
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::ClipField(field)) => {
-                        if let Some(index) = self.state.selected_clip {
+                        if let Some(index) = self.state.view.selected_clip {
                             self.state.begin_edit();
                             self.set_param_from_x(*position, ui::Hit::ClipField(field), &layout);
-                            self.state.drag = Drag::ClipField {
-                                layer: self.state.selected_layer,
+                            self.state.view.drag = Drag::ClipField {
+                                layer: self.state.view.selected_layer,
                                 clip: index,
                                 field,
                                 last_x: position.x,
@@ -329,8 +330,8 @@ impl AppLogic for SfxLogic {
                     }
                     Some(ui::Hit::Timeline { layer, clip, mode }) => {
                         self.state.begin_edit();
-                        if self.state.timeline_pin.is_none() {
-                            self.state.timeline_pin = Some(self.state.timeline_span());
+                        if self.state.view.timeline_pin.is_none() {
+                            self.state.view.timeline_pin = Some(self.state.timeline_span());
                         }
                         self.state.select_layer(layer);
                         let mut index = clip;
@@ -340,8 +341,8 @@ impl AppLogic for SfxLogic {
                                 index = Some(0);
                             }
                         }
-                        self.state.selected_clip = index;
-                        self.state.selected_env_point = None;
+                        self.state.view.selected_clip = index;
+                        self.state.view.selected_env_point = None;
                         if let Some(index) = index {
                             let (start, duration) = self
                                 .state
@@ -349,7 +350,7 @@ impl AppLogic for SfxLogic {
                                 .and_then(|l| l.clips.get(index))
                                 .map(|clip| (clip.start, clip.duration))
                                 .unwrap_or((0.0, 0.1));
-                            self.state.drag = Drag::Clip {
+                            self.state.view.drag = Drag::Clip {
                                 layer,
                                 clip: index,
                                 mode,
@@ -361,19 +362,19 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::Ruler(time)) => {
-                        self.state.drag = Drag::Seek { waveform: false };
+                        self.state.view.drag = Drag::Seek { waveform: false };
                         self.seek(time);
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::Waveform(time)) => {
-                        self.state.drag = Drag::Seek { waveform: true };
+                        self.state.view.drag = Drag::Seek { waveform: true };
                         self.seek(time);
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::LibraryScrollbar) => {
-                        self.state.drag = Drag::LibraryScroll {
+                        self.state.view.drag = Drag::LibraryScroll {
                             start_y: position.y,
-                            start_scroll: self.state.patch_scroll,
+                            start_scroll: self.state.view.patch_scroll,
                             travel: (layout.library_scrollbar.size.height
                                 - layout.library_thumb.size.height)
                                 .max(1.0),
@@ -382,24 +383,24 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::InspectorScrollbar) => {
-                        self.state.drag = Drag::InspectorScroll {
+                        self.state.view.drag = Drag::InspectorScroll {
                             start_y: position.y,
-                            start_scroll: self.state.inspector_scroll,
+                            start_scroll: self.state.view.inspector_scroll,
                         };
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::Pattern(row, step)) => {
                         self.push_undo();
-                        toggle_pattern(&mut self.state.project.music, row, step);
+                        toggle_pattern(&mut self.state.doc.project.music, row, step);
                         self.state.mark_dirty();
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::AutomationPoint(index)) => {
-                        if let Some(clip) = self.state.selected_clip {
+                        if let Some(clip) = self.state.view.selected_clip {
                             self.state.begin_edit();
-                            self.state.selected_env_point = Some(index);
-                            self.state.drag = Drag::AutomationPoint {
-                                layer: self.state.selected_layer,
+                            self.state.view.selected_env_point = Some(index);
+                            self.state.view.drag = Drag::AutomationPoint {
+                                layer: self.state.view.selected_layer,
                                 clip,
                                 index,
                             };
@@ -412,10 +413,10 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::AutomationLane { time, value }) => {
-                        if let Some(clip_index) = self.state.selected_clip {
+                        if let Some(clip_index) = self.state.view.selected_clip {
                             self.state.begin_edit();
-                            let layer_index = self.state.selected_layer;
-                            let kind = self.state.automation_lane;
+                            let layer_index = self.state.view.selected_layer;
+                            let kind = self.state.view.automation_lane;
                             let mut added = None;
                             if let Some(clip) = self
                                 .state
@@ -427,8 +428,8 @@ impl AppLogic for SfxLogic {
                                 self.state.mark_dirty();
                             }
                             if let Some(index) = added {
-                                self.state.selected_env_point = Some(index);
-                                self.state.drag = Drag::AutomationPoint {
+                                self.state.view.selected_env_point = Some(index);
+                                self.state.view.drag = Drag::AutomationPoint {
                                     layer: layer_index,
                                     clip: clip_index,
                                     index,
@@ -441,10 +442,10 @@ impl AppLogic for SfxLogic {
                 }
             }
             InputEvent::PointerMove { position } => {
-                self.state.cursor = *position;
+                self.state.view.cursor = *position;
                 let pointer_hit = ui::hit(&self.state, &layout, *position);
-                self.state.hover_hit = pointer_hit;
-                self.state.hover = match pointer_hit {
+                self.state.view.hover_hit = pointer_hit;
+                self.state.view.hover = match pointer_hit {
                     Some(ui::Hit::Action(action)) => Some(action),
                     _ => None,
                 };
@@ -453,8 +454,8 @@ impl AppLogic for SfxLogic {
             }
             InputEvent::PointerLeave => {
                 self.state.commit_edit();
-                self.state.hover = None;
-                self.state.hover_hit = None;
+                self.state.view.hover = None;
+                self.state.view.hover_hit = None;
                 return EventResult::Handled;
             }
             InputEvent::DoubleClick { position } => {
@@ -463,7 +464,7 @@ impl AppLogic for SfxLogic {
                     Some(ui::Hit::PatchRow(index)) => {
                         self.state.select_patch(index);
                         if let Some(patch) = self.state.patch() {
-                            self.state.modal = Some(Modal {
+                            self.state.view.modal = Some(Modal {
                                 title: "RENAME SOUND".into(),
                                 text: patch.name.clone(),
                                 action: ModalAction::RenamePatch,
@@ -479,9 +480,9 @@ impl AppLogic for SfxLogic {
                         }
                     }
                     Some(ui::Hit::ClipField(field)) => {
-                        if let Some(index) = self.state.selected_clip {
+                        if let Some(index) = self.state.view.selected_clip {
                             self.push_undo();
-                            let layer_index = self.state.selected_layer;
+                            let layer_index = self.state.view.selected_layer;
                             let max_duration = self
                                 .state
                                 .patch()
@@ -504,7 +505,7 @@ impl AppLogic for SfxLogic {
                     Some(ui::Hit::MusicField(field)) => {
                         self.push_undo();
                         let default = model::Music::default();
-                        field.set(&mut self.state.project.music, field.get(&default));
+                        field.set(&mut self.state.doc.project.music, field.get(&default));
                         self.state.mark_music_dirty();
                     }
                     _ => {}
@@ -513,9 +514,9 @@ impl AppLogic for SfxLogic {
             }
             InputEvent::PointerUp { position, .. } => {
                 self.state.commit_edit();
-                self.state.drag = Drag::None;
-                self.state.timeline_pin = None;
-                self.state.hover_hit = ui::hit(&self.state, &layout, *position);
+                self.state.view.drag = Drag::None;
+                self.state.view.timeline_pin = None;
+                self.state.view.hover_hit = ui::hit(&self.state, &layout, *position);
                 return EventResult::Handled;
             }
             InputEvent::Wheel {
@@ -524,21 +525,23 @@ impl AppLogic for SfxLogic {
                 let rows = (delta.y.abs() / 24.0).max(1.0) as i32;
                 let step = if delta.y > 0.0 { -rows } else { rows };
                 if layout.left.contains(*position) {
-                    let capacity = ui::library_capacity(self.state.viewport);
+                    let capacity = ui::library_capacity(self.state.view.viewport);
                     let max_start = self.state.visible_patches().len().saturating_sub(capacity);
-                    self.state.patch_scroll =
-                        (self.state.patch_scroll as i32 + step).clamp(0, max_start as i32) as usize;
+                    self.state.view.patch_scroll = (self.state.view.patch_scroll as i32 + step)
+                        .clamp(0, max_start as i32)
+                        as usize;
                     return EventResult::Handled;
                 }
                 if layout.right.contains(*position) {
                     let max_scroll =
                         (layout.inspector_content_h - layout.inspector.size.height).max(0.0);
-                    self.state.inspector_scroll =
-                        (self.state.inspector_scroll - step as f32 * 22.0).clamp(0.0, max_scroll);
+                    self.state.view.inspector_scroll = (self.state.view.inspector_scroll
+                        - step as f32 * 22.0)
+                        .clamp(0.0, max_scroll);
                     return EventResult::Handled;
                 }
                 if layout.timeline.contains(*position) {
-                    if self.state.modifiers.meta || self.state.modifiers.ctrl {
+                    if self.state.view.modifiers.meta || self.state.view.modifiers.ctrl {
                         // Zoom around the cursor: keep the time under the
                         // pointer anchored while the scale changes.
                         let plot_w =
@@ -547,28 +550,30 @@ impl AppLogic for SfxLogic {
                         let ratio = ((position.x - plot_left) / plot_w).clamp(0.0, 1.0);
                         let anchor = layout.x_time(position.x);
                         let factor = if delta.y > 0.0 { 1.25 } else { 0.8 };
-                        self.state.timeline_zoom =
-                            (self.state.timeline_zoom * factor).clamp(1.0, 32.0);
+                        self.state.view.timeline_zoom =
+                            (self.state.view.timeline_zoom * factor).clamp(1.0, 32.0);
                         let view_total = layout.timeline_total + 0.08;
-                        let scale = ((plot_w / view_total) * self.state.timeline_zoom).max(8.0);
+                        let scale =
+                            ((plot_w / view_total) * self.state.view.timeline_zoom).max(8.0);
                         let visible = plot_w / scale;
-                        self.state.timeline_offset =
+                        self.state.view.timeline_offset =
                             (anchor - ratio * visible).clamp(0.0, (view_total - visible).max(0.0));
                         self.state.bump_view();
                         return EventResult::Handled;
                     }
-                    if self.state.modifiers.shift {
+                    if self.state.view.modifiers.shift {
                         let view_total = layout.timeline_total + 0.08;
                         let step =
                             layout.timeline_visible * 0.1 * if delta.y > 0.0 { -1.0 } else { 1.0 };
-                        self.state.timeline_offset = (layout.timeline_offset + step)
+                        self.state.view.timeline_offset = (layout.timeline_offset + step)
                             .clamp(0.0, (view_total - layout.timeline_visible).max(0.0));
                         return EventResult::Handled;
                     }
                     if let Some(patch) = self.state.patch() {
-                        let capacity = ui::layer_capacity(self.state.viewport, patch.layers.len());
+                        let capacity =
+                            ui::layer_capacity(self.state.view.viewport, patch.layers.len());
                         let max_start = patch.layers.len().saturating_sub(capacity);
-                        self.state.layer_scroll = (self.state.layer_scroll as i32 + rows)
+                        self.state.view.layer_scroll = (self.state.view.layer_scroll as i32 + rows)
                             .clamp(0, max_start as i32)
                             as usize;
                     }
@@ -582,19 +587,19 @@ impl AppLogic for SfxLogic {
     }
 
     fn update(&mut self, ctx: &FrameContext<'_>) {
-        self.state.viewport = ctx.viewport().logical_size();
-        if matches!(self.state.drag, Drag::None) {
-            self.state.timeline_pin = None;
+        self.state.view.viewport = ctx.viewport().logical_size();
+        if matches!(self.state.view.drag, Drag::None) {
+            self.state.view.timeline_pin = None;
         }
-        if let Some((_, deadline)) = &self.state.toast {
+        if let Some((_, deadline)) = &self.state.ui.toast {
             if Instant::now() > *deadline {
-                self.state.toast = None;
+                self.state.ui.toast = None;
             }
         }
         self.poll_render();
         let rate = self.state.preview_rate();
-        if self.state.defer_render {
-            self.state.defer_render = false;
+        if self.state.playback.defer_render {
+            self.state.playback.defer_render = false;
         } else {
             self.request_preview(rate);
         }
@@ -602,18 +607,18 @@ impl AppLogic for SfxLogic {
             let playing = audio.is_playing();
             if playing {
                 let mut time = audio.position();
-                if self.state.tab == Tab::Music {
-                    let length = self.state.project.music.length_seconds();
+                if self.state.view.tab == Tab::Music {
+                    let length = self.state.doc.project.music.length_seconds();
                     if length > 0.0 {
                         time %= length;
                     }
                 }
-                self.state.playhead = time;
-            } else if self.state.was_playing {
-                self.state.playhead = 0.0;
-                self.state.seeked = false;
+                self.state.playback.playhead = time;
+            } else if self.state.playback.was_playing {
+                self.state.playback.playhead = 0.0;
+                self.state.playback.seeked = false;
             }
-            self.state.was_playing = playing;
+            self.state.playback.was_playing = playing;
         }
     }
 
@@ -625,7 +630,7 @@ impl AppLogic for SfxLogic {
     }
 
     fn needs_frame(&self) -> bool {
-        self.state.defer_render
+        self.state.playback.defer_render
             || self.state.preview_pending()
             || self
                 .audio
@@ -635,7 +640,7 @@ impl AppLogic for SfxLogic {
     }
 
     fn cursor(&self) -> Option<Cursor> {
-        match &self.state.drag {
+        match &self.state.view.drag {
             Drag::Clip {
                 mode: TimelineDrag::Resize | TimelineDrag::ResizeLeft,
                 ..
@@ -651,7 +656,7 @@ impl AppLogic for SfxLogic {
             }
             Drag::None => {}
         }
-        match self.state.hover_hit {
+        match self.state.view.hover_hit {
             Some(ui::Hit::Timeline {
                 mode: TimelineDrag::Resize | TimelineDrag::ResizeLeft,
                 ..
@@ -708,8 +713,8 @@ impl SfxLogic {
                 }
             }
             ui::Hit::ClipField(field) => {
-                if let Some(index) = self.state.selected_clip {
-                    let layer_index = self.state.selected_layer;
+                if let Some(index) = self.state.view.selected_clip {
+                    let layer_index = self.state.view.selected_layer;
                     let max_duration = self
                         .state
                         .patch()
@@ -733,7 +738,7 @@ impl SfxLogic {
             ui::Hit::MusicField(field) => {
                 let spec = field.spec();
                 let value = spec.snap(field.denorm(t)).clamp(spec.min, spec.max);
-                field.set(&mut self.state.project.music, value);
+                field.set(&mut self.state.doc.project.music, value);
                 self.state.mark_music_dirty();
             }
             _ => {}
@@ -741,20 +746,20 @@ impl SfxLogic {
     }
 
     fn handle_drag(&mut self, position: Vec2, layout: &ui::Layout) {
-        let drag = std::mem::replace(&mut self.state.drag, Drag::None);
-        let fine = if self.state.modifiers.shift {
+        let drag = std::mem::replace(&mut self.state.view.drag, Drag::None);
+        let fine = if self.state.view.modifiers.shift {
             0.15
-        } else if self.state.modifiers.alt {
+        } else if self.state.view.modifiers.alt {
             4.0
         } else {
             1.0
         };
         // Shift disables the time grid so clip edges can be placed freely.
-        let snap = !self.state.modifiers.shift;
+        let snap = !self.state.view.modifiers.shift;
         match drag {
             Drag::None => {}
             Drag::Layer { field, last_x } => {
-                if self.state.modifiers.shift || self.state.modifiers.alt {
+                if self.state.view.modifiers.shift || self.state.view.modifiers.alt {
                     let (_, _, step) = field.range();
                     let delta = (position.x - last_x) * step * fine;
                     if let Some(layer) = self.state.layer_mut() {
@@ -764,22 +769,22 @@ impl SfxLogic {
                 } else {
                     self.set_param_from_x(position, ui::Hit::LayerField(field), layout);
                 }
-                self.state.drag = Drag::Layer {
+                self.state.view.drag = Drag::Layer {
                     field,
                     last_x: position.x,
                 };
             }
             Drag::Music { field, last_x } => {
-                if self.state.modifiers.shift || self.state.modifiers.alt {
+                if self.state.view.modifiers.shift || self.state.view.modifiers.alt {
                     let (_, _, step) = field.range();
                     let delta = (position.x - last_x) * step * fine;
-                    let old = field.get(&self.state.project.music);
-                    field.set(&mut self.state.project.music, old + delta);
+                    let old = field.get(&self.state.doc.project.music);
+                    field.set(&mut self.state.doc.project.music, old + delta);
                     self.state.mark_music_dirty();
                 } else {
                     self.set_param_from_x(position, ui::Hit::MusicField(field), layout);
                 }
-                self.state.drag = Drag::Music {
+                self.state.view.drag = Drag::Music {
                     field,
                     last_x: position.x,
                 };
@@ -790,7 +795,7 @@ impl SfxLogic {
                 field,
                 last_x,
             } => {
-                if self.state.modifiers.shift || self.state.modifiers.alt {
+                if self.state.view.modifiers.shift || self.state.view.modifiers.alt {
                     let (_, _, step) = field.range();
                     let delta = (position.x - last_x) * step * fine;
                     if let Some(patch) = self.state.patch_mut() {
@@ -810,7 +815,7 @@ impl SfxLogic {
                 } else {
                     self.set_param_from_x(position, ui::Hit::ClipField(field), layout);
                 }
-                self.state.drag = Drag::ClipField {
+                self.state.view.drag = Drag::ClipField {
                     layer,
                     clip,
                     field,
@@ -827,7 +832,7 @@ impl SfxLogic {
                     layout.x_time(position.x).clamp(0.0, total)
                 };
                 self.seek(time);
-                self.state.drag = Drag::Seek { waveform };
+                self.state.view.drag = Drag::Seek { waveform };
             }
             Drag::LibraryScroll {
                 start_y,
@@ -836,11 +841,11 @@ impl SfxLogic {
                 max_start,
             } => {
                 let delta = (position.y - start_y) / travel.max(1.0) * max_start as f32;
-                self.state.patch_scroll = (start_scroll as f32 + delta)
+                self.state.view.patch_scroll = (start_scroll as f32 + delta)
                     .round()
                     .clamp(0.0, max_start as f32)
                     as usize;
-                self.state.drag = Drag::LibraryScroll {
+                self.state.view.drag = Drag::LibraryScroll {
                     start_y,
                     start_scroll,
                     travel,
@@ -856,11 +861,11 @@ impl SfxLogic {
                 let travel = (layout.inspector_scrollbar.size.height
                     - layout.inspector_thumb.size.height)
                     .max(1.0);
-                self.state.inspector_scroll = (start_scroll
+                self.state.view.inspector_scroll = (start_scroll
                     + (position.y - start_y) * max_scroll / travel)
                     .clamp(0.0, max_scroll);
                 self.state.bump_view();
-                self.state.drag = Drag::InspectorScroll {
+                self.state.view.drag = Drag::InspectorScroll {
                     start_y,
                     start_scroll,
                 };
@@ -874,8 +879,8 @@ impl SfxLogic {
                     .map(|c| c.duration)
                     .unwrap_or(0.1);
                 let (time, value) =
-                    layout.automation_at(position, duration, self.state.automation_lane);
-                let kind = self.state.automation_lane;
+                    layout.automation_at(position, duration, self.state.view.automation_lane);
+                let kind = self.state.view.automation_lane;
                 if let Some(clip_data) = self
                     .state
                     .patch_mut()
@@ -906,7 +911,7 @@ impl SfxLogic {
                         self.state.mark_dirty();
                     }
                 }
-                self.state.drag = Drag::AutomationPoint { layer, clip, index };
+                self.state.view.drag = Drag::AutomationPoint { layer, clip, index };
             }
             Drag::Clip {
                 layer,
@@ -950,7 +955,7 @@ impl SfxLogic {
                         self.state.mark_dirty();
                     }
                 }
-                self.state.drag = Drag::Clip {
+                self.state.view.drag = Drag::Clip {
                     layer,
                     clip,
                     mode,

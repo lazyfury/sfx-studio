@@ -102,9 +102,22 @@ pub enum Drag {
     },
 }
 
-pub struct State {
+pub struct DocState {
     pub project: Project,
     pub root: Option<PathBuf>,
+    pub dirty: bool,
+    /// Patch/document revision; invalidates the patch render cache.
+    pub version: u64,
+    /// Music revision; invalidates the music render cache independently.
+    pub music_version: u64,
+    pub undo: Vec<(String, Project)>,
+    pub redo: Vec<(String, Project)>,
+    /// Project clone captured at pointer-down; committed on pointer-up only if
+    /// something actually changed.
+    pub pending_edit: Option<Project>,
+}
+
+pub struct ViewState {
     pub tab: Tab,
     pub selected_patch: usize,
     pub selected_layer: usize,
@@ -113,45 +126,15 @@ pub struct State {
     pub automation_lane: AutomationKind,
     pub patch_scroll: usize,
     pub layer_scroll: usize,
-    pub undo: Vec<(String, Project)>,
-    pub redo: Vec<(String, Project)>,
-    /// Project clone captured at pointer-down; committed on pointer-up only if
-    /// something actually changed.
-    pub pending_edit: Option<Project>,
-    pub status: String,
-    pub dirty: bool,
-    /// Patch/document revision; invalidates the patch render cache.
-    pub version: u64,
-    /// Music revision; invalidates the music render cache independently.
-    pub music_version: u64,
     /// Pure view revision (selection/scroll/playhead); never renders audio.
     pub view_version: u64,
-    pub cache_version: u64,
-    pub music_cache_version: u64,
-    pub cache_rate: u32,
-    pub music_cache_rate: u32,
-    pub cache: Vec<f32>,
-    pub cache_peak: f32,
-    pub cache_envelope: Envelope,
-    pub music_cache: Vec<f32>,
-    pub music_cache_peak: f32,
-    pub music_envelope: Envelope,
-    pub loop_play: bool,
-    pub playhead: f32,
-    pub seeked: bool,
-    pub was_playing: bool,
     pub modifiers: Modifiers,
     pub drag: Drag,
     pub modal: Option<Modal>,
     pub hover: Option<ui::Action>,
     pub hover_hit: Option<ui::Hit>,
     pub viewport: Size,
-    pub audio_ok: bool,
-    pub audio_rate: u32,
     pub cursor: Vec2,
-    pub toast: Option<(String, Instant)>,
-    /// Time of the last actual preview render; throttles drag-time renders.
-    pub last_render: Instant,
     pub category_filter: Option<Category>,
     pub category_menu_open: bool,
     pub favorites_only: bool,
@@ -167,78 +150,119 @@ pub struct State {
     pub timeline_offset: f32,
     /// Top-left system menu (all file/export actions live here).
     pub menu_open: bool,
+}
+
+pub struct PlaybackState {
+    pub cache_version: u64,
+    pub music_cache_version: u64,
+    pub cache_rate: u32,
+    pub music_cache_rate: u32,
+    pub cache: Vec<f32>,
+    pub cache_peak: f32,
+    pub cache_envelope: Envelope,
+    pub music_cache: Vec<f32>,
+    pub music_cache_peak: f32,
+    pub music_envelope: Envelope,
+    pub loop_play: bool,
+    pub playhead: f32,
+    pub seeked: bool,
+    pub was_playing: bool,
+    pub audio_ok: bool,
+    pub audio_rate: u32,
+    /// Time of the last actual preview render; throttles drag-time renders.
+    pub last_render: Instant,
     /// Defer the next preview render by one frame so the shell/tab paints
-    /// before a potentially slow music/patch render blocks the UI thread.
+    /// before a potentially slow render blocks the UI thread.
     pub defer_render: bool,
+}
+
+pub struct UiState {
+    pub status: String,
+    pub toast: Option<(String, Instant)>,
+}
+
+pub struct State {
+    pub doc: DocState,
+    pub view: ViewState,
+    pub playback: PlaybackState,
+    pub ui: UiState,
 }
 
 impl State {
     pub fn new() -> Self {
         Self {
-            project: Project::demo("untitled"),
-            root: None,
-            tab: Tab::Patches,
-            selected_patch: 0,
-            selected_layer: 0,
-            selected_clip: None,
-            selected_env_point: None,
-            automation_lane: AutomationKind::Gain,
-            patch_scroll: 0,
-            layer_scroll: 0,
-            undo: Vec::new(),
-            redo: Vec::new(),
-            pending_edit: None,
-            status: "OPEN a Godot project folder · demo loaded".into(),
-            dirty: false,
-            version: 1,
-            music_version: 1,
-            view_version: 1,
-            cache_version: 0,
-            music_cache_version: 0,
-            cache_rate: 22050,
-            music_cache_rate: 11025,
-            cache: Vec::new(),
-            cache_peak: 0.0,
-            cache_envelope: Envelope::default(),
-            music_cache: Vec::new(),
-            music_cache_peak: 0.0,
-            music_envelope: Envelope::default(),
-            loop_play: false,
-            playhead: 0.0,
-            seeked: false,
-            was_playing: false,
-            modifiers: Modifiers::NONE,
-            drag: Drag::None,
-            modal: None,
-            hover: None,
-            hover_hit: None,
-            viewport: Size::new(theme::VIEW_W, theme::VIEW_H),
-            audio_ok: false,
-            audio_rate: 22050,
-            cursor: Vec2::ZERO,
-            toast: None,
-            last_render: Instant::now(),
-            category_filter: None,
-            category_menu_open: false,
-            favorites_only: false,
-            search: String::new(),
-            search_focus: false,
-            inspector_scroll: 0.0,
-            timeline_pin: None,
-            timeline_zoom: 1.0,
-            timeline_offset: 0.0,
-            menu_open: false,
-            defer_render: true,
+            doc: DocState {
+                project: Project::demo("untitled"),
+                root: None,
+                dirty: false,
+                version: 1,
+                music_version: 1,
+                undo: Vec::new(),
+                redo: Vec::new(),
+                pending_edit: None,
+            },
+            view: ViewState {
+                tab: Tab::Patches,
+                selected_patch: 0,
+                selected_layer: 0,
+                selected_clip: None,
+                selected_env_point: None,
+                automation_lane: AutomationKind::Gain,
+                patch_scroll: 0,
+                layer_scroll: 0,
+                view_version: 1,
+                modifiers: Modifiers::NONE,
+                drag: Drag::None,
+                modal: None,
+                hover: None,
+                hover_hit: None,
+                viewport: Size::new(theme::VIEW_W, theme::VIEW_H),
+                cursor: Vec2::ZERO,
+                category_filter: None,
+                category_menu_open: false,
+                favorites_only: false,
+                search: String::new(),
+                search_focus: false,
+                inspector_scroll: 0.0,
+                timeline_pin: None,
+                timeline_zoom: 1.0,
+                timeline_offset: 0.0,
+                menu_open: false,
+            },
+            playback: PlaybackState {
+                cache_version: 0,
+                music_cache_version: 0,
+                cache_rate: 22050,
+                music_cache_rate: 11025,
+                cache: Vec::new(),
+                cache_peak: 0.0,
+                cache_envelope: Envelope::default(),
+                music_cache: Vec::new(),
+                music_cache_peak: 0.0,
+                music_envelope: Envelope::default(),
+                loop_play: false,
+                playhead: 0.0,
+                seeked: false,
+                was_playing: false,
+                audio_ok: false,
+                audio_rate: 22050,
+                last_render: Instant::now(),
+                defer_render: true,
+            },
+            ui: UiState {
+                status: "OPEN a Godot project folder · demo loaded".into(),
+                toast: None,
+            },
         }
     }
 
     pub fn patch(&self) -> Option<&Patch> {
-        self.project.patches.get(self.selected_patch)
+        self.doc.project.patches.get(self.view.selected_patch)
     }
 
     /// Seconds represented by the timeline. Pinned during clip drags.
     pub fn timeline_span(&self) -> f32 {
-        self.timeline_pin.unwrap_or_else(|| {
+        self.view.timeline_pin.unwrap_or_else(|| {
             self.patch()
                 .map(|patch| patch.end().max(0.05))
                 .unwrap_or(0.2)
@@ -246,34 +270,37 @@ impl State {
     }
 
     pub fn patch_mut(&mut self) -> Option<&mut Patch> {
-        self.project.patches.get_mut(self.selected_patch)
+        self.doc.project.patches.get_mut(self.view.selected_patch)
     }
 
     pub fn layer(&self) -> Option<&Layer> {
-        self.patch().and_then(|p| p.layers.get(self.selected_layer))
+        self.patch()
+            .and_then(|p| p.layers.get(self.view.selected_layer))
     }
 
     pub fn layer_mut(&mut self) -> Option<&mut Layer> {
-        let index = self.selected_layer;
+        let index = self.view.selected_layer;
         self.patch_mut().and_then(|p| p.layers.get_mut(index))
     }
 
     pub fn patch_visible(&self, index: usize) -> bool {
-        let Some(patch) = self.project.patches.get(index) else {
+        let Some(patch) = self.doc.project.patches.get(index) else {
             return false;
         };
         let category_ok = self
+            .view
             .category_filter
             .map(|category| patch.category == category)
             .unwrap_or(true);
-        let favorite_ok = !self.favorites_only || patch.favorite;
-        let search = self.search.trim().to_lowercase();
+        let favorite_ok = !self.view.favorites_only || patch.favorite;
+        let search = self.view.search.trim().to_lowercase();
         let search_ok = search.is_empty() || patch.name.to_lowercase().contains(&search);
         category_ok && favorite_ok && search_ok
     }
 
     pub fn visible_patches(&self) -> Vec<usize> {
-        self.project
+        self.doc
+            .project
             .patches
             .iter()
             .enumerate()
@@ -283,51 +310,54 @@ impl State {
     }
 
     pub fn mark_dirty(&mut self) {
-        self.version = self.version.wrapping_add(1);
-        self.view_version = self.view_version.wrapping_add(1);
-        self.redo.clear();
-        self.dirty = true;
+        self.doc.version = self.doc.version.wrapping_add(1);
+        self.view.view_version = self.view.view_version.wrapping_add(1);
+        self.doc.redo.clear();
+        self.doc.dirty = true;
     }
 
     /// Music edits only invalidate the music cache; patch previews stay warm.
     pub fn mark_music_dirty(&mut self) {
-        self.music_version = self.music_version.wrapping_add(1);
-        self.view_version = self.view_version.wrapping_add(1);
-        self.redo.clear();
-        self.dirty = true;
+        self.doc.music_version = self.doc.music_version.wrapping_add(1);
+        self.view.view_version = self.view.view_version.wrapping_add(1);
+        self.doc.redo.clear();
+        self.doc.dirty = true;
     }
 
     pub fn bump_view(&mut self) {
-        self.view_version = self.view_version.wrapping_add(1);
+        self.view.view_version = self.view.view_version.wrapping_add(1);
     }
 
     pub fn select_patch(&mut self, index: usize) {
-        if index < self.project.patches.len() {
-            self.selected_patch = index;
-            self.inspector_scroll = 0.0;
-            self.selected_layer = self
-                .selected_layer
-                .min(self.project.patches[index].layers.len().saturating_sub(1));
+        if index < self.doc.project.patches.len() {
+            self.view.selected_patch = index;
+            self.view.inspector_scroll = 0.0;
+            self.view.selected_layer = self.view.selected_layer.min(
+                self.doc.project.patches[index]
+                    .layers
+                    .len()
+                    .saturating_sub(1),
+            );
             self.bump_view();
             // Selecting a different patch must re-render the preview even
             // though the document itself is unchanged.
-            self.cache_version = 0;
-            self.defer_render = true;
-            self.playhead = 0.0;
-            self.seeked = false;
-            self.selected_clip = None;
-            self.selected_env_point = None;
+            self.playback.cache_version = 0;
+            self.playback.defer_render = true;
+            self.playback.playhead = 0.0;
+            self.playback.seeked = false;
+            self.view.selected_clip = None;
+            self.view.selected_env_point = None;
             self.ensure_visible();
         }
     }
 
     pub fn select_layer(&mut self, index: usize) {
-        self.inspector_scroll = 0.0;
+        self.view.inspector_scroll = 0.0;
         if let Some(patch) = self.patch() {
             if index < patch.layers.len() {
-                self.selected_layer = index;
-                self.selected_clip = None;
-                self.selected_env_point = None;
+                self.view.selected_layer = index;
+                self.view.selected_clip = None;
+                self.view.selected_env_point = None;
                 self.bump_view();
                 self.ensure_visible();
             }
@@ -335,55 +365,56 @@ impl State {
     }
 
     pub fn ensure_visible(&mut self) {
-        let patch_capacity = ui::library_capacity(self.viewport);
+        let patch_capacity = ui::library_capacity(self.view.viewport);
         let visible = self.visible_patches();
         let position = visible
             .iter()
-            .position(|index| *index == self.selected_patch)
+            .position(|index| *index == self.view.selected_patch)
             .unwrap_or(0);
-        if position < self.patch_scroll {
-            self.patch_scroll = position;
-        } else if position >= self.patch_scroll + patch_capacity {
-            self.patch_scroll = position + 1 - patch_capacity;
+        if position < self.view.patch_scroll {
+            self.view.patch_scroll = position;
+        } else if position >= self.view.patch_scroll + patch_capacity {
+            self.view.patch_scroll = position + 1 - patch_capacity;
         }
-        self.patch_scroll = self
+        self.view.patch_scroll = self
+            .view
             .patch_scroll
             .min(visible.len().saturating_sub(patch_capacity));
 
         let layers = self.patch().map(|patch| patch.layers.len()).unwrap_or(1);
-        let layer_capacity = ui::layer_capacity(self.viewport, layers);
-        if self.selected_layer < self.layer_scroll {
-            self.layer_scroll = self.selected_layer;
-        } else if self.selected_layer >= self.layer_scroll + layer_capacity {
-            self.layer_scroll = self.selected_layer + 1 - layer_capacity;
+        let layer_capacity = ui::layer_capacity(self.view.viewport, layers);
+        if self.view.selected_layer < self.view.layer_scroll {
+            self.view.layer_scroll = self.view.selected_layer;
+        } else if self.view.selected_layer >= self.view.layer_scroll + layer_capacity {
+            self.view.layer_scroll = self.view.selected_layer + 1 - layer_capacity;
         }
     }
 
     /// Capture the pre-edit state once per pointer gesture. The snapshot is
     /// only pushed if the project actually changes (see [`Self::commit_edit`]).
     pub fn begin_edit(&mut self) {
-        if self.pending_edit.is_none() {
-            self.pending_edit = Some(self.project.clone());
+        if self.doc.pending_edit.is_none() {
+            self.doc.pending_edit = Some(self.doc.project.clone());
         }
     }
 
     /// Commit a gesture snapshot. No-op clicks / drags that change nothing do
     /// not pollute the undo stack.
     pub fn commit_edit(&mut self) {
-        let Some(before) = self.pending_edit.take() else {
+        let Some(before) = self.doc.pending_edit.take() else {
             return;
         };
-        if before != self.project {
+        if before != self.doc.project {
             self.push_snapshot("edit", before);
         }
     }
 
     fn push_snapshot(&mut self, label: impl Into<String>, project: Project) {
-        self.undo.push((label.into(), project));
-        if self.undo.len() > 64 {
-            self.undo.remove(0);
+        self.doc.undo.push((label.into(), project));
+        if self.doc.undo.len() > 64 {
+            self.doc.undo.remove(0);
         }
-        self.redo.clear();
+        self.doc.redo.clear();
     }
 
     pub fn push_undo(&mut self) {
@@ -392,14 +423,16 @@ impl State {
 
     pub fn push_undo_label(&mut self, label: impl Into<String>) {
         self.commit_edit();
-        self.push_snapshot(label, self.project.clone());
+        self.push_snapshot(label, self.doc.project.clone());
     }
 
     pub fn undo(&mut self) -> Option<String> {
         self.commit_edit();
-        let (label, previous) = self.undo.pop()?;
-        self.redo.push((label.clone(), self.project.clone()));
-        self.project = previous;
+        let (label, previous) = self.doc.undo.pop()?;
+        self.doc
+            .redo
+            .push((label.clone(), self.doc.project.clone()));
+        self.doc.project = previous;
         self.clamp_selection();
         self.invalidate_document();
         Some(label)
@@ -407,12 +440,14 @@ impl State {
 
     pub fn redo(&mut self) -> Option<String> {
         self.commit_edit();
-        let (label, next) = self.redo.pop()?;
-        self.undo.push((label.clone(), self.project.clone()));
-        if self.undo.len() > 64 {
-            self.undo.remove(0);
+        let (label, next) = self.doc.redo.pop()?;
+        self.doc
+            .undo
+            .push((label.clone(), self.doc.project.clone()));
+        if self.doc.undo.len() > 64 {
+            self.doc.undo.remove(0);
         }
-        self.project = next;
+        self.doc.project = next;
         self.clamp_selection();
         self.invalidate_document();
         Some(label)
@@ -421,92 +456,99 @@ impl State {
     fn invalidate_document(&mut self) {
         // Undo/redo must keep the opposite stack alive, so this deliberately
         // does not go through `mark_dirty` (which clears redo).
-        self.version = self.version.wrapping_add(1);
-        self.music_version = self.music_version.wrapping_add(1);
-        self.view_version = self.view_version.wrapping_add(1);
-        self.dirty = true;
-        self.cache_version = 0;
-        self.music_cache_version = 0;
-        self.defer_render = true;
-        self.playhead = 0.0;
-        self.seeked = false;
+        self.doc.version = self.doc.version.wrapping_add(1);
+        self.doc.music_version = self.doc.music_version.wrapping_add(1);
+        self.view.view_version = self.view.view_version.wrapping_add(1);
+        self.doc.dirty = true;
+        self.playback.cache_version = 0;
+        self.playback.music_cache_version = 0;
+        self.playback.defer_render = true;
+        self.playback.playhead = 0.0;
+        self.playback.seeked = false;
         self.ensure_visible();
     }
 
     fn clamp_selection(&mut self) {
-        self.selected_patch = self
+        self.view.selected_patch = self
+            .view
             .selected_patch
-            .min(self.project.patches.len().saturating_sub(1));
-        if let Some(patch) = self.project.patches.get(self.selected_patch) {
-            self.selected_layer = self
+            .min(self.doc.project.patches.len().saturating_sub(1));
+        if let Some(patch) = self.doc.project.patches.get(self.view.selected_patch) {
+            self.view.selected_layer = self
+                .view
                 .selected_layer
                 .min(patch.layers.len().saturating_sub(1));
-            if let Some(index) = self.selected_clip {
+            if let Some(index) = self.view.selected_clip {
                 let clips = patch
                     .layers
-                    .get(self.selected_layer)
+                    .get(self.view.selected_layer)
                     .map(|l| l.clips.len())
                     .unwrap_or(0);
-                self.selected_clip = if index < clips { Some(index) } else { None };
+                self.view.selected_clip = if index < clips { Some(index) } else { None };
             }
-            if let Some(index) = self.selected_env_point {
+            if let Some(index) = self.view.selected_env_point {
                 let points = patch
                     .layers
-                    .get(self.selected_layer)
-                    .and_then(|l| self.selected_clip.and_then(|c| l.clips.get(c)))
-                    .map(|c| self.automation_lane.points(c).len())
+                    .get(self.view.selected_layer)
+                    .and_then(|l| self.view.selected_clip.and_then(|c| l.clips.get(c)))
+                    .map(|c| self.view.automation_lane.points(c).len())
                     .unwrap_or(0);
-                self.selected_env_point = if index < points { Some(index) } else { None };
+                self.view.selected_env_point = if index < points { Some(index) } else { None };
             }
         }
     }
 
     pub fn preview_rate(&self) -> u32 {
-        if self.audio_ok {
-            self.audio_rate
+        if self.playback.audio_ok {
+            self.playback.audio_rate
         } else {
-            match self.tab {
+            match self.view.tab {
                 Tab::Patches => self.patch().map(|p| p.rate).unwrap_or(22050),
-                Tab::Music => self.project.music.rate,
+                Tab::Music => self.doc.project.music.rate,
             }
         }
     }
 
     pub fn ensure_cache(&mut self, rate: u32) {
-        let want_patch = self.tab == Tab::Patches;
-        let want_music = self.tab == Tab::Music;
-        let patch_dirty =
-            want_patch && (self.cache_version != self.version || self.cache_rate != rate);
+        let want_patch = self.view.tab == Tab::Patches;
+        let want_music = self.view.tab == Tab::Music;
+        let patch_dirty = want_patch
+            && (self.playback.cache_version != self.doc.version
+                || self.playback.cache_rate != rate);
         let music_dirty = want_music
-            && (self.music_cache_version != self.music_version || self.music_cache_rate != rate);
+            && (self.playback.music_cache_version != self.doc.music_version
+                || self.playback.music_cache_rate != rate);
         if !patch_dirty && !music_dirty {
             return;
         }
         if patch_dirty {
-            self.cache = self
+            self.playback.cache = self
                 .patch()
                 .map(|patch| synth::render_patch(patch, rate))
                 .unwrap_or_default();
-            self.cache_peak = synth::peak(&self.cache);
-            self.cache_envelope = synth::envelope(&self.cache, synth::ENVELOPE_BINS);
-            self.cache_version = self.version;
-            self.cache_rate = rate;
+            self.playback.cache_peak = synth::peak(&self.playback.cache);
+            self.playback.cache_envelope =
+                synth::envelope(&self.playback.cache, synth::ENVELOPE_BINS);
+            self.playback.cache_version = self.doc.version;
+            self.playback.cache_rate = rate;
         }
         if music_dirty {
-            self.music_cache = synth::render_music(&self.project.music, rate);
-            self.music_cache_peak = synth::peak(&self.music_cache);
-            self.music_envelope = synth::envelope(&self.music_cache, synth::ENVELOPE_BINS);
-            self.music_cache_version = self.music_version;
-            self.music_cache_rate = rate;
+            self.playback.music_cache = synth::render_music(&self.doc.project.music, rate);
+            self.playback.music_cache_peak = synth::peak(&self.playback.music_cache);
+            self.playback.music_envelope =
+                synth::envelope(&self.playback.music_cache, synth::ENVELOPE_BINS);
+            self.playback.music_cache_version = self.doc.music_version;
+            self.playback.music_cache_rate = rate;
         }
-        self.last_render = Instant::now();
+        self.playback.last_render = Instant::now();
     }
 
     /// Synchronous fallback used when the render worker is unavailable or
     /// stalled. Throttled to ~12×/s so dragging stays responsive.
     pub fn ensure_cache_soon(&mut self, rate: u32) {
-        let already_rendered = self.cache_version != 0 || self.music_cache_version != 0;
-        if already_rendered && self.last_render.elapsed() < Duration::from_millis(80) {
+        let already_rendered =
+            self.playback.cache_version != 0 || self.playback.music_cache_version != 0;
+        if already_rendered && self.playback.last_render.elapsed() < Duration::from_millis(80) {
             return;
         }
         self.ensure_cache(rate);
@@ -516,18 +558,21 @@ impl State {
     /// `needs_frame` so the deferred render gets a follow-up frame.
     pub fn preview_pending(&self) -> bool {
         let rate = self.preview_rate();
-        match self.tab {
-            Tab::Patches => self.cache_version != self.version || self.cache_rate != rate,
+        match self.view.tab {
+            Tab::Patches => {
+                self.playback.cache_version != self.doc.version || self.playback.cache_rate != rate
+            }
             Tab::Music => {
-                self.music_cache_version != self.music_version || self.music_cache_rate != rate
+                self.playback.music_cache_version != self.doc.music_version
+                    || self.playback.music_cache_rate != rate
             }
         }
     }
 
     pub fn toast(&mut self, text: impl Into<String>) {
         let text = text.into();
-        self.status = text.clone();
-        self.toast = Some((text, Instant::now() + Duration::from_secs(4)));
+        self.ui.status = text.clone();
+        self.ui.toast = Some((text, Instant::now() + Duration::from_secs(4)));
     }
 }
 
@@ -703,19 +748,19 @@ mod tests {
             audio: None,
             render: None,
         };
-        logic.state.hover_hit = Some(ui::Hit::Timeline {
+        logic.state.view.hover_hit = Some(ui::Hit::Timeline {
             layer: 0,
             clip: Some(0),
             mode: TimelineDrag::Resize,
         });
         assert_eq!(logic.cursor(), Some(Cursor::ColResize));
-        logic.state.hover_hit = Some(ui::Hit::Timeline {
+        logic.state.view.hover_hit = Some(ui::Hit::Timeline {
             layer: 0,
             clip: Some(0),
             mode: TimelineDrag::Move,
         });
         assert_eq!(logic.cursor(), Some(Cursor::Grab));
-        logic.state.drag = Drag::Clip {
+        logic.state.view.drag = Drag::Clip {
             layer: 0,
             clip: 0,
             mode: TimelineDrag::Move,
@@ -729,21 +774,21 @@ mod tests {
     #[test]
     fn search_and_filters_narrow_the_library() {
         let mut state = State::new();
-        state.search = "wind".into();
+        state.view.search = "wind".into();
         assert_eq!(state.visible_patches().len(), 1);
-        state.search.clear();
-        state.category_filter = Some(Category::Combat);
+        state.view.search.clear();
+        state.view.category_filter = Some(Category::Combat);
         let combat = state.visible_patches();
         assert_eq!(combat.len(), 2);
         assert!(combat
             .iter()
-            .all(|index| state.project.patches[*index].category == Category::Combat));
-        state.category_filter = None;
-        state.favorites_only = true;
+            .all(|index| state.doc.project.patches[*index].category == Category::Combat));
+        state.view.category_filter = None;
+        state.view.favorites_only = true;
         assert!(state
             .visible_patches()
             .iter()
-            .all(|index| state.project.patches[*index].favorite));
+            .all(|index| state.doc.project.patches[*index].favorite));
     }
 
     #[test]
@@ -754,7 +799,7 @@ mod tests {
             audio: None,
             render: None,
         };
-        let layout = ui::Layout::new(&logic.state, logic.state.viewport);
+        let layout = ui::Layout::new(&logic.state, logic.state.view.viewport);
         let hit = ui::Hit::LayerField(LayerField::Gain);
         let rect = param_row_rect(&layout, hit).expect("gain row");
         let track = ui::param_track(rect);
@@ -775,15 +820,15 @@ mod tests {
             audio: None,
             render: None,
         };
-        logic.state.selected_patch = 0;
+        logic.state.view.selected_patch = 0;
         let target = 2;
-        let before = logic.state.project.patches[target].favorite;
+        let before = logic.state.doc.project.patches[target].favorite;
         logic.toggle_patch_favorite(target);
-        assert_eq!(logic.state.project.patches[target].favorite, !before);
-        assert_eq!(logic.state.selected_patch, 0);
-        assert_eq!(logic.state.undo.len(), 1);
+        assert_eq!(logic.state.doc.project.patches[target].favorite, !before);
+        assert_eq!(logic.state.view.selected_patch, 0);
+        assert_eq!(logic.state.doc.undo.len(), 1);
         logic.state.undo();
-        assert_eq!(logic.state.project.patches[target].favorite, before);
+        assert_eq!(logic.state.doc.project.patches[target].favorite, before);
     }
 
     #[test]
@@ -794,17 +839,17 @@ mod tests {
             audio: None,
             render: None,
         };
-        logic.state.category_menu_open = true;
+        logic.state.view.category_menu_open = true;
         logic.pick_category(Some(Category::Combat));
-        assert_eq!(logic.state.category_filter, Some(Category::Combat));
-        assert!(!logic.state.category_menu_open);
+        assert_eq!(logic.state.view.category_filter, Some(Category::Combat));
+        assert!(!logic.state.view.category_menu_open);
         assert!(logic
             .state
             .visible_patches()
             .iter()
-            .all(|index| logic.state.project.patches[*index].category == Category::Combat));
+            .all(|index| logic.state.doc.project.patches[*index].category == Category::Combat));
         logic.pick_category(None);
-        assert_eq!(logic.state.category_filter, None);
+        assert_eq!(logic.state.view.category_filter, None);
     }
 
     #[test]
@@ -824,12 +869,12 @@ mod tests {
     #[test]
     fn startup_render_is_deferred_and_then_resolved() {
         let mut state = State::new();
-        assert!(state.defer_render);
+        assert!(state.playback.defer_render);
         assert!(state.preview_pending());
         state.ensure_cache(state.preview_rate());
         assert!(!state.preview_pending());
         state.select_patch(1);
-        assert!(state.defer_render);
+        assert!(state.playback.defer_render);
         assert!(state.preview_pending());
     }
 
@@ -837,15 +882,15 @@ mod tests {
     fn view_changes_do_not_rerender_audio() {
         let mut state = State::new();
         state.ensure_cache(8000);
-        let rendered = state.cache_version;
-        let samples = state.cache.len();
+        let rendered = state.playback.cache_version;
+        let samples = state.playback.cache.len();
         state.bump_view();
         state.ensure_cache(8000);
-        assert_eq!(state.cache_version, rendered);
-        assert_eq!(state.cache.len(), samples);
+        assert_eq!(state.playback.cache_version, rendered);
+        assert_eq!(state.playback.cache.len(), samples);
         state.mark_dirty();
         state.ensure_cache(8000);
-        assert_ne!(state.cache_version, rendered);
+        assert_ne!(state.playback.cache_version, rendered);
     }
 
     #[test]
@@ -856,8 +901,8 @@ mod tests {
             audio: None,
             render: None,
         };
-        logic.state.project.patches[0].layers[0] = Layer::new(Wave::Sine);
-        let layout = ui::Layout::new(&logic.state, logic.state.viewport);
+        logic.state.doc.project.patches[0].layers[0] = Layer::new(Wave::Sine);
+        let layout = ui::Layout::new(&logic.state, logic.state.view.viewport);
         let hit = ui::Hit::LayerField(LayerField::CutoffStart);
         let rect = param_row_rect(&layout, hit).expect("cutoff row");
         let track = ui::param_track(rect);
@@ -873,12 +918,12 @@ mod tests {
         let mut state = State::new();
         state.begin_edit();
         state.commit_edit();
-        assert!(state.undo.is_empty());
+        assert!(state.doc.undo.is_empty());
         let original = state.layer().unwrap().gain;
         state.begin_edit();
         state.layer_mut().unwrap().gain = 0.42;
         state.commit_edit();
-        assert_eq!(state.undo.len(), 1);
+        assert_eq!(state.doc.undo.len(), 1);
         assert!((state.layer().unwrap().gain - 0.42).abs() < 0.001);
         let _ = state.undo();
         assert!((state.layer().unwrap().gain - original).abs() < 0.001);
@@ -887,7 +932,7 @@ mod tests {
     #[test]
     fn undo_redo_restores_clips() {
         let mut state = State::new();
-        state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
+        state.view.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
         state.push_undo();
         state.layer_mut().unwrap().ensure_clips();
         assert_eq!(state.layer().unwrap().clips.len(), 1);

@@ -86,14 +86,14 @@ pub fn hit(state: &State, layout: &Layout, pos: Vec2) -> Option<Hit> {
         }
     }
 
-    if state.tab == Tab::Patches && layout.waveform.contains(pos) {
+    if state.view.tab == Tab::Patches && layout.waveform.contains(pos) {
         let duration = state.patch().map(|patch| patch.end()).unwrap_or(0.0);
         let t = ((pos.x - layout.waveform.left()) / layout.waveform.size.width.max(1.0))
             .clamp(0.0, 1.0)
             * duration;
         return Some(Hit::Waveform(t));
     }
-    if state.tab == Tab::Patches && layout.timeline.contains(pos) {
+    if state.view.tab == Tab::Patches && layout.timeline.contains(pos) {
         if pos.y < layout.timeline.top() + RULER_H {
             return Some(Hit::Ruler(layout.x_time(pos.x)));
         }
@@ -142,20 +142,20 @@ pub fn hit(state: &State, layout: &Layout, pos: Vec2) -> Option<Hit> {
             }
         }
     }
-    if state.tab == Tab::Patches && layout.automation.contains(pos) {
+    if state.view.tab == Tab::Patches && layout.automation.contains(pos) {
         for (kind, rect) in automation_tabs(layout) {
             if rect.contains(pos) {
                 return Some(Hit::Action(Action::AutomationLane(kind)));
             }
         }
         if let (Some(clip), Some(layer)) = (
-            state.selected_clip,
+            state.view.selected_clip,
             state
                 .patch()
-                .and_then(|p| p.layers.get(state.selected_layer)),
+                .and_then(|p| p.layers.get(state.view.selected_layer)),
         ) {
             if let Some(clip) = layer.clips.get(clip) {
-                let kind = state.automation_lane;
+                let kind = state.view.automation_lane;
                 for (index, point) in kind.points(clip).iter().enumerate() {
                     let xy = layout.automation_xy(point.time, point.value, kind, clip.duration);
                     if (xy - pos).length() <= 7.0 {

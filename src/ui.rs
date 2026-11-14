@@ -282,8 +282,8 @@ mod tests {
     #[test]
     fn layout_exposes_library_filters_and_system_menu() {
         let mut state = State::new();
-        state.menu_open = true;
-        let layout = Layout::new(&state, state.viewport);
+        state.view.menu_open = true;
+        let layout = Layout::new(&state, state.view.viewport);
         assert!(layout.search_rect.size.width > 0.0);
         assert!(layout.category_rect.size.width > 0.0);
         assert!(layout.favorite_rect.size.width > 0.0);
@@ -301,8 +301,8 @@ mod tests {
     #[test]
     fn system_menu_paints_and_hit_tests_actions() {
         let mut state = State::new();
-        state.menu_open = true;
-        let layout = Layout::new(&state, state.viewport);
+        state.view.menu_open = true;
+        let layout = Layout::new(&state, state.view.viewport);
         let open = layout
             .menu_items
             .iter()
@@ -332,7 +332,7 @@ mod tests {
     fn compact_layout_stays_inside_a_1024_window() {
         let mut state = State::new();
         let viewport = Size::new(1024.0, 720.0);
-        state.viewport = viewport;
+        state.view.viewport = viewport;
         let layout = Layout::new(&state, viewport);
         for button in layout
             .tab_buttons
@@ -354,8 +354,8 @@ mod tests {
     #[test]
     fn inspector_controls_keep_panel_margins() {
         let mut state = State::new();
-        state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
-        let layout = Layout::new(&state, state.viewport);
+        state.view.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
+        let layout = Layout::new(&state, state.view.viewport);
         let panel = layout.right;
         for item in &layout.items {
             let rect = match item {
@@ -388,15 +388,15 @@ mod tests {
     #[test]
     fn zoom_and_scroll_map_times_both_ways() {
         let mut state = State::new();
-        state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
+        state.view.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
         let total = state.timeline_span();
-        state.timeline_zoom = 2.0;
-        let layout = Layout::new(&state, state.viewport);
+        state.view.timeline_zoom = 2.0;
+        let layout = Layout::new(&state, state.view.viewport);
         assert!(layout.timeline_visible < total + 0.08);
         let x = layout.time_x(0.2);
         assert!((layout.x_time(x) - 0.2).abs() < 0.002);
-        state.timeline_offset = 99.0;
-        let layout = Layout::new(&state, state.viewport);
+        state.view.timeline_offset = 99.0;
+        let layout = Layout::new(&state, state.view.viewport);
         assert!(layout.timeline_offset + layout.timeline_visible <= total + 0.09);
         assert!((layout.x_time(layout.time_x(0.3)) - 0.3).abs() < 0.002);
     }
@@ -404,13 +404,13 @@ mod tests {
     #[test]
     fn library_scrollbar_reserves_the_right_gutter() {
         let mut state = State::new();
-        let layout = Layout::new(&state, state.viewport);
+        let layout = Layout::new(&state, state.view.viewport);
         assert_eq!(layout.library_scrollbar.size.height, 0.0);
-        let patch = state.project.patches[0].clone();
+        let patch = state.doc.project.patches[0].clone();
         for _ in 0..40 {
-            state.project.patches.push(patch.clone());
+            state.doc.project.patches.push(patch.clone());
         }
-        let layout = Layout::new(&state, state.viewport);
+        let layout = Layout::new(&state, state.view.viewport);
         assert!(layout.library_scrollbar.size.height > 0.0);
         assert!(layout.library_max_start > 0);
         let (_, row) = layout.patch_rows[0];
@@ -424,8 +424,8 @@ mod tests {
     #[test]
     fn category_menu_lists_and_hits_every_category() {
         let mut state = State::new();
-        state.category_menu_open = true;
-        let layout = Layout::new(&state, state.viewport);
+        state.view.category_menu_open = true;
+        let layout = Layout::new(&state, state.view.viewport);
         let menu = layout.category_menu.expect("menu open");
         assert_eq!(layout.category_items.len(), Category::ALL.len() + 1);
         for (category, rect) in &layout.category_items {
@@ -451,7 +451,7 @@ mod tests {
     #[test]
     fn music_inspector_follows_the_registry() {
         let mut state = State::new();
-        state.tab = Tab::Music;
+        state.view.tab = Tab::Music;
         let items = inspector_items(&state);
         let mut sections = Vec::new();
         let mut params = Vec::new();
@@ -497,7 +497,7 @@ mod tests {
     #[test]
     fn favorite_star_hit_is_split_from_the_row() {
         let state = State::new();
-        let layout = Layout::new(&state, state.viewport);
+        let layout = Layout::new(&state, state.view.viewport);
         let (index, row) = layout.patch_rows[0];
         assert_eq!(
             hit(&state, &layout, patch_star_rect(row).center()),
@@ -511,41 +511,41 @@ mod tests {
     fn pinned_timeline_span_keeps_the_scale_stable() {
         let mut state = State::new();
         let span = state.timeline_span();
-        let base = Layout::new(&state, state.viewport).timeline_scale;
-        state.timeline_pin = Some(span);
+        let base = Layout::new(&state, state.view.viewport).timeline_scale;
+        state.view.timeline_pin = Some(span);
         let layer = state.layer_mut().unwrap();
         layer.ensure_clips();
         layer.clips[0].duration += 1.5;
-        let pinned = Layout::new(&state, state.viewport).timeline_scale;
+        let pinned = Layout::new(&state, state.view.viewport).timeline_scale;
         assert!(
             (pinned - base).abs() < 0.001,
             "pinned scale moved from {base} to {pinned}"
         );
-        state.timeline_pin = None;
-        let refit = Layout::new(&state, state.viewport).timeline_scale;
+        state.view.timeline_pin = None;
+        let refit = Layout::new(&state, state.view.viewport).timeline_scale;
         assert!(refit < pinned, "release should refit the wider timeline");
     }
 
     #[test]
     fn timeline_grows_with_layers_and_gives_space_to_the_waveform() {
         let mut state = State::new();
-        state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
-        let few = Layout::new(&state, state.viewport);
+        state.view.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
+        let few = Layout::new(&state, state.view.viewport);
         assert!(
             few.timeline.size.height <= 200.0,
             "3 layers should not claim the whole column"
         );
         assert!(few.waveform.size.height > 128.0);
-        let layer = state.project.patches[0].layers[0].clone();
+        let layer = state.doc.project.patches[0].layers[0].clone();
         for _ in 0..30 {
-            state.project.patches[0].layers.push(layer.clone());
+            state.doc.project.patches[0].layers.push(layer.clone());
         }
-        let many = Layout::new(&state, state.viewport);
+        let many = Layout::new(&state, state.view.viewport);
         assert!(many.timeline.size.height > few.timeline.size.height);
         assert!(many.waveform.size.height < few.waveform.size.height);
-        assert!(many.layer_rows.len() <= layer_capacity(state.viewport, 31));
-        state.tab = Tab::Music;
-        let music = Layout::new(&state, state.viewport);
+        assert!(many.layer_rows.len() <= layer_capacity(state.view.viewport, 31));
+        state.view.tab = Tab::Music;
+        let music = Layout::new(&state, state.view.viewport);
         assert!(music.timeline.size.height < many.timeline.size.height);
         assert!(music.pattern_grid.size.height <= music.timeline.size.height);
     }
@@ -553,10 +553,10 @@ mod tests {
     #[test]
     fn layout_exposes_undo_and_clip_fields() {
         let mut state = State::new();
-        state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
+        state.view.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
         state.layer_mut().unwrap().ensure_clips();
-        state.selected_clip = Some(0);
-        let layout = Layout::new(&state, state.viewport);
+        state.view.selected_clip = Some(0);
+        let layout = Layout::new(&state, state.view.viewport);
         assert!(layout
             .header_buttons
             .iter()
@@ -577,11 +577,11 @@ mod tests {
     #[test]
     fn automation_lane_adds_and_hits_points() {
         let mut state = State::new();
-        state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
+        state.view.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
         state.layer_mut().unwrap().ensure_clips();
-        state.selected_clip = Some(0);
+        state.view.selected_clip = Some(0);
         state.layer_mut().unwrap().clips[0].add_point(AutomationKind::Gain, 0.05, 1.5);
-        let layout = Layout::new(&state, state.viewport);
+        let layout = Layout::new(&state, state.view.viewport);
         assert!(layout.automation.size.height > 0.0);
         let clip = &state.layer().unwrap().clips[0];
         let point = text_point(&layout, clip, 0.05, 1.5);
@@ -603,15 +603,15 @@ mod tests {
     #[test]
     fn clip_blocks_are_hit_testable() {
         let mut state = State::new();
-        state.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
+        state.view.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
         state.layer_mut().unwrap().ensure_clips();
-        let layout = Layout::new(&state, state.viewport);
+        let layout = Layout::new(&state, state.view.viewport);
         let clip = &state.layer().unwrap().clips[0];
         let x = layout.time_x(clip.start + clip.duration * 0.5);
         let row = layout
             .layer_rows
             .iter()
-            .find(|(index, _)| *index == state.selected_layer)
+            .find(|(index, _)| *index == state.view.selected_layer)
             .map(|(_, rect)| *rect)
             .unwrap();
         let hit = hit(&state, &layout, Vec2::new(x, row.center().y));
