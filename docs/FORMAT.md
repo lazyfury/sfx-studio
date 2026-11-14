@@ -34,7 +34,7 @@
 | `favorite` | 仅 Rust 端库筛选使用；不写入 `.tres`。 |
 | `rate` | 8000–48000；用于 bake 与无音频设备时的预览。 |
 | `normalize` | 峰值 > 0.95 时压到 0.95。 |
-| `dsp_version` | DSP 公式代次（当前 1），为未来版本化渲染保留。 |
+| `dsp_version` | DSP 公式代次（当前 2；0017 修正 clip ADSR 使用 clip 时长）。 |
 | `layers` | 每 patch 最多 32 层。 |
 
 ### Layer / Clip / Automation
@@ -98,7 +98,7 @@ audio/
       "patch": "Coin",
       "category": "UI",
       "favorite": true,
-      "dsp_version": 1,
+      "dsp_version": 2,
       "wav": "res://audio/baked/coin.wav",
       "rate": 22050,
       "duration": 0.11,

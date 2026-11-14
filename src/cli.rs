@@ -27,8 +27,50 @@ pub fn run() {
              --bake DIR     write audio/baked + manifest\n\
              --export DIR   write audio/sfx/*.tres + music.tres\n\
              --dump DIR     print a short project summary\n\
+             --parity-fixtures DIR  write Rust/Godot parity fixtures\n\
+             --parity-check DIR     compare Rust and Godot renders\n\
              --selfcheck    headless layout smoke test"
         );
+        return;
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "--parity-fixtures") {
+        let Some(path) = args.get(index + 1) else {
+            eprintln!("--parity-fixtures needs a folder");
+            std::process::exit(2);
+        };
+        match crate::parity::write_fixtures(&PathBuf::from(path)) {
+            Ok(names) => println!("wrote {} parity fixtures", names.len()),
+            Err(error) => {
+                eprintln!("parity fixtures failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "--parity-check") {
+        let Some(path) = args.get(index + 1) else {
+            eprintln!("--parity-check needs a folder");
+            std::process::exit(2);
+        };
+        match crate::parity::compare(&PathBuf::from(path)) {
+            Ok(reports) => {
+                for report in reports {
+                    println!(
+                        "  {:<12} peak Δ{:>6.3} dB  RMS Δ{:>6.3} dB  max Δ{:>7.5}  ({} frames)",
+                        report.name,
+                        report.peak_delta_db,
+                        report.rms_delta_db,
+                        report.max_abs_delta,
+                        report.frames
+                    );
+                }
+                println!("parity ok");
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
     if args.iter().any(|arg| arg == "--selfcheck") {

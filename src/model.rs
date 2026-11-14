@@ -13,7 +13,7 @@ pub const PROJECT_FILE: &str = "sfx.project.json";
 pub const PROJECT_VERSION: u32 = 4;
 
 /// Current DSP formula generation. Reserved for versioned render dispatch.
-pub const DSP_VERSION: u32 = 1;
+pub const DSP_VERSION: u32 = 2;
 
 fn default_project_version() -> u32 {
     1

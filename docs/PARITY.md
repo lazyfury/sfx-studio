@@ -17,7 +17,7 @@
 | 项目 | Rust | Godot | 状态 |
 |---|---|---|---|
 | 层叠加 / 最长时长 | `render_patch` | `SfxPatch._build_layers` | ✅ |
-| clip 起点/时长/增益 | `render_patch` | `SfxPatch._build_layers` | ✅ |
+| clip 起点/时长/增益 | `render_patch`（ADSR 使用 clip 时长） | `SfxPatch._build_layers` | ✅ 0017 golden 对齐 |
 | clip 变调 | `Layer::with_pitch` | `SfxLayer.with_pitch` | ✅ |
 | 增益/截止自动化 | `Clip::gain_at/cutoff_at` | `SfxClip` | ✅ |
 | ADSR 公式 | `synth::adsr` | `SfxSynth.adsr` | ✅ |
@@ -52,11 +52,34 @@
 3. 每个版本至少保留一组 `fixtures/*.json` + 期望 WAV 指纹（Phase 3 落地）。
 4. 不允许为了让测试通过而单方面修改公式而不改另一端。
 
-## 5. Golden 测试计划（Phase 3）
+## 5. Golden 测试（0017 起可运行）
 
-1. `fixtures/patches/*.json`：覆盖每种波形、clip、自动化、tone_env、normalize。
-2. Rust：`cargo run -- --golden fixtures/` 输出 WAV + `sha256`/RMS/peak 报告。
-3. Godot：扩展 `plugins/sfx_studio/tools/self_test.gd`，读取同一 JSON，渲染后比较 RMS/峰值（容差）。
-4. CI：两端都跑；差异超过阈值即失败。
+```bash
+./scripts/parity.sh                 # 默认 /Applications/Godot.app/.../Godot
+GODOT=/path/to/godot ./scripts/parity.sh
+```
 
-在 golden 落地前，Rust 侧的单测只保证「确定性、有限、长度正确」，不保证跨端一致。
+脚本流程：
+
+1. `cargo run -- --parity-fixtures target/parity`：生成 9 个确定性 `.tres` + Rust 渲染 WAV。
+2. 建临时 Godot 工程，symlink `plugins/sfx_studio` 到 `addons/`，跑一次 `--editor --quit` 注册全局 class。
+3. `render.gd` 逐个 `load().build().save_to_wav()`。
+4. `cargo run -- --parity-check target/parity`：比较 peak / RMS（容差各 0.2 dB）与逐样本 max |Δ|（容差 0.01）。
+
+当前覆盖：
+
+- SINE / TRIANGLE / SAW / PULSE / SQUARE（含 ADSR、freq sweep）
+- FM、ARP
+- 多 clip（起点/时长/增益/变调）
+- 多层 normalize
+
+不覆盖（有意）：
+
+- Noise / Pluck / 鼓：仍受 D1 RNG 差异影响；
+- 采样层：Godot 内嵌 `AudioStreamWAV`，Rust 为路径 WAV；
+- automation：导出时整段 bake，不参与逐层 golden。
+
+0017 结果：9/9 fixture 的 peak/RMS 差异均为 0.000 dB；max |Δ| 最差 0.00674（SINE，f32/f64 数学差异），其余 ≤0.00183（Godot 4.7.2，`Patch.rate` 渲染）。
+
+DSP 修正：clip 的 ADSR 现在使用 `min(clip.duration, layer.duration)`，与 Godot flatten 行为一致；`DSP_VERSION` 升为 2，旧工程（dsp v1）仍保留 layer 长度的包络。
+

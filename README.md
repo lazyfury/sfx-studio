@@ -44,6 +44,8 @@ cargo run -- --selfcheck
 cargo test
 # quality gate (fmt + clippy + tests + selfcheck)
 ./scripts/preflight.sh
+# Rust ↔ Godot deterministic golden (needs Godot 4.x)
+./scripts/parity.sh
 ```
 
 The release binary is `target/release/sfx-studio`.

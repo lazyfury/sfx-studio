@@ -26,6 +26,7 @@ pub fn render_patch(patch: &Patch, rate: u32) -> Vec<f32> {
     // minutes of audio on the UI thread.
     let total = total.min((rate as f32 * 30.0) as usize);
     let mut buf = vec![0.0f32; total];
+    let clip_adsr = patch.dsp_version >= 2;
     for layer in &patch.layers {
         if !layer.enabled {
             continue;
@@ -43,10 +44,17 @@ pub fn render_patch(patch: &Patch, rate: u32) -> Vec<f32> {
                 if clip.gain <= 0.0 {
                     continue;
                 }
-                let source_layer = if clip.pitch.abs() > 0.001 {
+                let mut source_layer = if clip.pitch.abs() > 0.001 {
                     layer.with_pitch(clip.pitch)
                 } else {
                     layer.clone()
+                };
+                // Godot flattens clips to layers with the clip duration, so
+                // dsp v2 follows the clip; v1 keeps the old layer-length ADSR.
+                source_layer.duration = if clip_adsr {
+                    clip.duration.min(layer.duration)
+                } else {
+                    layer.duration
                 };
                 let source = render_layer(&source_layer, rate);
                 let start = (clip.start * rate as f32) as usize;
@@ -803,6 +811,37 @@ impl Rng {
 mod tests {
     use super::*;
     use crate::model::{Layer, Music, Patch, ToneEnv, Wave};
+
+    #[test]
+    fn dsp_v1_keeps_the_old_clip_envelope() {
+        use crate::model::{Clip, Patch};
+        let mut layer = Layer::new(Wave::Sine);
+        layer.duration = 0.3;
+        layer.sustain = 0.6;
+        layer.release = 0.1;
+        layer.gain = 1.0;
+        layer.clips = vec![Clip {
+            start: 0.0,
+            duration: 0.1,
+            ..Clip::default()
+        }];
+        let mut patch = Patch {
+            dsp_version: 1,
+            layers: vec![layer],
+            normalize: false,
+            ..Patch::default()
+        };
+        let old = render_patch(&patch, 22050);
+        patch.dsp_version = 2;
+        let new = render_patch(&patch, 22050);
+        let frames = old.len().min(new.len());
+        assert!(frames > 0);
+        // v1 still has sustain near the end of the clip; v2 has released.
+        assert!(old[..frames]
+            .iter()
+            .zip(new[..frames].iter())
+            .any(|(a, b)| (a - b).abs() > 1e-4));
+    }
 
     #[test]
     fn sample_layers_loop_and_apply_pitch() {

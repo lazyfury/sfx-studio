@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连与 0016 Rust 端采样波形；跨端 golden 见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；RNG 一致性与采样 `.tres` 往返见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -79,12 +79,12 @@
 
 ## 2. 本轮验收证据
 
-审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`、`0008-timeline-zoom-and-library.md`、`0009-module-split.md`、`0010-background-preview-render.md`、`0011-state-field-groups.md`、`0012-stable-ids.md`、`0013-id-based-selection.md`、`0014-rt-audio-callback.md`、`0015-48k-resample-reconnect.md`、`0016-sample-waveform.md`（status: approved，source_hash 匹配）。
+审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`、`0008-timeline-zoom-and-library.md`、`0009-module-split.md`、`0010-background-preview-render.md`、`0011-state-field-groups.md`、`0012-stable-ids.md`、`0013-id-based-selection.md`、`0014-rt-audio-callback.md`、`0015-48k-resample-reconnect.md`、`0016-sample-waveform.md`、`0017-parity-golden.md`（status: approved，source_hash 匹配）。
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                 # 79 passed
+cargo test                 # 83 passed
 cargo run -- --selfcheck   # 2 frames / 2555 commands / 119 text runs
 ./scripts/preflight.sh
 ./scripts/review_gate.sh   # 需要 docs/reviews/*.md 中 approved + 匹配 source_hash
@@ -99,9 +99,10 @@ cargo run -- --selfcheck   # 2 frames / 2555 commands / 119 text runs
 
 ## 3. Backlog（下一迭代，按依赖排序）
 
-1. **采样 `.tres` 往返**：解析/写入 `AudioStreamWAV` 子资源，或导入 `baked` WAV 作为 Sample 层。
-2. **跨语言一致性**：PCG32 测试向量 + Godot fixtures/golden（需 headless Godot 工程）。
+1. **RNG / D3 一致性**：PCG32 双端实现 + 噪声类 golden；噪声低通按采样率归一；`dsp_version` dispatch 完整化。
+2. **采样 `.tres` 往返**：解析/写入 `AudioStreamWAV` 子资源，或导入 `baked` WAV 作为 Sample 层。
 3. **音频 RT 余项**：设备重连的硬件回归、退役槽满时的回调 drop 兜底、bake 端统一 48k/重采样。
+4. **CI**：服务器上安装/缓存 Godot，把 `scripts/parity.sh` 接入 `scripts/ci.sh`。
 4. **i18n 与可访问性**：文案表、焦点遍历、键盘可达全部操作。
 5. **CLI 产品化**：`clap` 子命令、`--golden` 渲染校验、批量导出接入游戏仓库 CI。
 6. **可选项**：自动化点稳定 ID；`Drag::Clip` 的瞬时索引改为 ID；导出 manifest 暴露 patch id。
@@ -243,7 +244,15 @@ cargo run -- --selfcheck   # 2 frames / 2555 commands / 119 text runs
 - `PROJECT_VERSION` 3 → 4；`docs/FORMAT.md` 增加字段与迁移说明；`.tres` 导出的采样 patch 自动整段 bake（Godot 侧直接播放 baked）。
 - 新增 6 条测试：WAV 读写、采样渲染循环/变调、JSON 字段、`load_samples`、采样导出 bake、检查器控件；`cargo test` 79 passed。
 
-## 20. Definition of Done（每个 PR 必须满足）
+## 20. 本轮增量（0017）
+
+- 新增 `src/parity.rs`：9 个确定性 fixture（SINE/TRI/SAW/PULSE/SQR/FM/ARP/多 clip/多层 normalize），生成 `.tres` + Rust WAV，并比较 peak / RMS / max |Δ|。
+- 新增 CLI：`--parity-fixtures DIR`、`--parity-check DIR`；Godot 侧 `scripts/parity/render.gd`，编排脚本 `scripts/parity.sh`（自动建临时工程、symlink addon、editor import、headless render）。
+- 修正 clip 渲染的包络时长：v2 使用 `min(clip.duration, layer.duration)`，与 Godot flatten 一致；dsp v1 保留旧行为。`DSP_VERSION` 1 → 2。
+- 实测（Godot 4.7.2）：9/9 fixture peak/RMS 0.000 dB，max |Δ| 最差 0.00674，`parity ok`。
+- 新增 4 条测试：fixture 确定性、比较器容差、fixture→WAV→compare 闭环、dsp v1/v2 包络差异；`cargo test` 83 passed。
+
+## 21. Definition of Done（每个 PR 必须满足）
 
 - [ ] `docs/PLAN.md` 对应条目状态更新。
 - [ ] `scripts/preflight.sh` 全绿（fmt / clippy -D warnings / test / selfcheck）。
