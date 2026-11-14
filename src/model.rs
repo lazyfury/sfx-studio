@@ -1921,9 +1921,118 @@ pub fn layer_sections(wave: Wave) -> &'static [LayerSectionSpec] {
     }
 }
 
+/// Fields shown for a selected clip, in inspector order.
+pub const CLIP_FIELDS: [ClipField; 4] = [
+    ClipField::Start,
+    ClipField::Duration,
+    ClipField::Gain,
+    ClipField::Pitch,
+];
+
+/// One row of the music inspector: a slider, a wave picker, or a static note.
+#[derive(Clone, Copy, Debug)]
+pub enum MusicRowSpec {
+    Field(MusicField),
+    BassWaveOptions,
+    ArpWaveOptions,
+    ChordPresets,
+    TransposeOptions,
+    PatternToggle,
+    ResetOptions,
+    PreviewNote,
+    ChordNote,
+}
+
+/// A titled block of music inspector rows.
+#[derive(Clone, Copy, Debug)]
+pub struct MusicSectionSpec {
+    pub title: &'static str,
+    pub rows: &'static [MusicRowSpec],
+}
+
+static MUSIC_SECTIONS: &[MusicSectionSpec] = &[
+    MusicSectionSpec {
+        title: "MUSIC",
+        rows: &[
+            MusicRowSpec::Field(MusicField::Bpm),
+            MusicRowSpec::Field(MusicField::Bars),
+            MusicRowSpec::Field(MusicField::Rate),
+            MusicRowSpec::Field(MusicField::Volume),
+            MusicRowSpec::Field(MusicField::Swing),
+            MusicRowSpec::PreviewNote,
+        ],
+    },
+    MusicSectionSpec {
+        title: "INSTRUMENTS",
+        rows: &[MusicRowSpec::BassWaveOptions, MusicRowSpec::ArpWaveOptions],
+    },
+    MusicSectionSpec {
+        title: "MIX",
+        rows: &[
+            MusicRowSpec::Field(MusicField::BassGain),
+            MusicRowSpec::Field(MusicField::BassHarsh),
+            MusicRowSpec::Field(MusicField::BassDecay),
+            MusicRowSpec::Field(MusicField::ArpGain),
+            MusicRowSpec::Field(MusicField::ArpHarsh),
+            MusicRowSpec::Field(MusicField::ArpDecay),
+            MusicRowSpec::Field(MusicField::KickGain),
+            MusicRowSpec::Field(MusicField::HatGain),
+            MusicRowSpec::Field(MusicField::Seed),
+        ],
+    },
+    MusicSectionSpec {
+        title: "HARMONY",
+        rows: &[MusicRowSpec::ChordPresets, MusicRowSpec::TransposeOptions],
+    },
+    MusicSectionSpec {
+        title: "PATTERN",
+        rows: &[
+            MusicRowSpec::PatternToggle,
+            MusicRowSpec::ResetOptions,
+            MusicRowSpec::ChordNote,
+        ],
+    },
+];
+
+/// Inspector layout for the music tab.
+pub fn music_sections() -> &'static [MusicSectionSpec] {
+    MUSIC_SECTIONS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn music_and_clip_registries_keep_their_order() {
+        let titles: Vec<_> = music_sections()
+            .iter()
+            .map(|section| section.title)
+            .collect();
+        assert_eq!(
+            titles,
+            vec!["MUSIC", "INSTRUMENTS", "MIX", "HARMONY", "PATTERN"]
+        );
+        let music_fields: Vec<_> = music_sections()
+            .iter()
+            .flat_map(|section| section.rows.iter())
+            .filter_map(|row| match row {
+                MusicRowSpec::Field(field) => Some(*field),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(music_fields.first(), Some(&MusicField::Bpm));
+        assert!(music_fields.contains(&MusicField::Seed));
+        assert_eq!(
+            CLIP_FIELDS,
+            [
+                ClipField::Start,
+                ClipField::Duration,
+                ClipField::Gain,
+                ClipField::Pitch
+            ]
+        );
+    }
 
     #[test]
     fn layer_sections_expose_wave_specific_fields() {

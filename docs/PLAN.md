@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复与 0007 图层检查器注册表；app/ui 主体拆分与后台渲染见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾；app/ui 主体拆分与后台渲染见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -65,7 +65,7 @@
 | P2-1 | 共享布局 metrics | ✅ 已完成 |
 | P2-2 | 预览渲染节流 | ✅ 已完成（50 ms） |
 | P2-3 | 波形包络 | ✅ 已完成 |
-| P2-4 | 参数元数据单表（`FieldSpec`：label/unit/range/scale/format）+ 图层 section 表 | ✅ 已完成（0007 起 `layer_sections()` 驱动 inspector 分组/可见性） |
+| P2-4 | 参数元数据单表（`FieldSpec`：label/unit/range/scale/format）+ section 表 | ✅ 已完成（0007/0008 起 `layer_sections()` / `music_sections()` 驱动 inspector） |
 | P2-5 | 模块拆分（app/ui → state/commands/input/ui/*） | 🟡 部分完成：`cli.rs`、`project_io.rs` 已拆；`app.rs`/`ui.rs` 主体待拆 |
 | P2-13 | UI 精简：顶部按钮收进 `MENU`、移除 Trigger Pad | ✅ 已完成 |
 | P2-14 | 启动/切换 tab 首帧延迟渲染（先画壳，下一帧渲染音频） | ✅ 已完成（后台渲染仍为 Backlog） |
@@ -79,13 +79,13 @@
 
 ## 2. 本轮验收证据
 
-审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`（status: approved，source_hash 匹配）。
+审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`、`0008-timeline-zoom-and-library.md`（status: approved，source_hash 匹配）。
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                 # 55 passed
-cargo run -- --selfcheck   # 2 frames / 2550 commands / 118 text runs
+cargo test                 # 62 passed
+cargo run -- --selfcheck   # 2 frames / 2552 commands / 118 text runs
 ./scripts/preflight.sh
 ./scripts/review_gate.sh   # 需要 docs/reviews/*.md 中 approved + 匹配 source_hash
 ```
@@ -99,16 +99,14 @@ cargo run -- --selfcheck   # 2 frames / 2550 commands / 118 text runs
 
 ## 3. Backlog（下一迭代，按依赖排序）
 
-1. **检查器注册表（剩余）**：把 Clip / Music inspector 也迁到 `layer_sections()` 风格的声明式 section 表；Layer 已在 0007 完成。
-2. **状态拆分（继续）**：`State { doc, view, playback, ui }`；`app.rs` 拆 `commands/input/audio_bridge`；`ui.rs` 拆 `layout/hit/paint/*`。（`cli.rs` / `project_io.rs` 已完成）
-3. **后台渲染**：`RenderRequest { revision, tab, rate }` → worker → `RenderResult { generation, samples, envelope, peak }`；UI 只接受最新 generation，拖动期间不阻塞。
-4. **稳定 ID + 迁移 v3**：`Patch/Layer/Clip.id`；选区/撤销/导出引用 ID；`Project.version` 升 3 并提供迁移。
-5. **音频 RT 化**：无锁 ring buffer、设备热插拔、48k 固定渲染 + `rubato` 重采样、欠载统计。
-6. **跨语言一致性**：PCG32 测试向量、相位回绕、f32/f64 策略、容差 golden（见 `docs/PARITY.md`）。
-7. **采样波形**：`Wave::Sample` + WAV 导入 + `sample_pitch/loop` 导入导出。
-8. **i18n 与可访问性**：文案表、焦点遍历、键盘可达全部操作。
-9. **CLI 产品化**：`clap` 子命令、`--golden` 渲染校验、批量导出接入游戏仓库 CI。
-10. **UI 体验跟进（0006 之后）**：时间线缩放/横向滚动、库列表滚动条、分类下拉、拖拽吸附步长可切换（Shift 关闭）、Clip Move 上界校验。
+1. **状态拆分（继续）**：`State { doc, view, playback, ui }`；`app.rs` 拆 `commands/input/audio_bridge`；`ui.rs` 拆 `layout/hit/paint/*`。（`cli.rs` / `project_io.rs` 已完成）
+2. **后台渲染**：`RenderRequest { revision, tab, rate }` → worker → `RenderResult { generation, samples, envelope, peak }`；UI 只接受最新 generation，拖动期间不阻塞。
+3. **稳定 ID + 迁移 v3**：`Patch/Layer/Clip.id`；选区/撤销/导出引用 ID；`Project.version` 升 3 并提供迁移。
+4. **音频 RT 化**：无锁 ring buffer、设备热插拔、48k 固定渲染 + `rubato` 重采样、欠载统计。
+5. **跨语言一致性**：PCG32 测试向量、相位回绕、f32/f64 策略、容差 golden（见 `docs/PARITY.md`）。
+6. **采样波形**：`Wave::Sample` + WAV 导入 + `sample_pitch/loop` 导入导出。
+7. **i18n 与可访问性**：文案表、焦点遍历、键盘可达全部操作。
+8. **CLI 产品化**：`clap` 子命令、`--golden` 渲染校验、批量导出接入游戏仓库 CI。
 
 ## 4. 已验证的端到端场景
 
@@ -165,7 +163,17 @@ cargo run -- --selfcheck   # 2 frames / 2550 commands / 118 text runs
 - `ui::inspector_items` 只负责把 section 表渲染成 `RawItem`（含 TONE ENV / ENV / FILTER 选项行），约减 120 行重复代码，UI 输出保持不变。
 - 新增 `layer_sections_expose_wave_specific_fields`（模型）与 `inspector_renders_the_layer_registry`（UI 顺序）测试；`cargo test` 55 passed。
 
-## 11. Definition of Done（每个 PR 必须满足）
+## 11. 本轮增量（0008）
+
+- **检查器注册表收尾**：`CLIP_FIELDS` 与 `music_sections()`（MUSIC / INSTRUMENTS / MIX / HARMONY / PATTERN）驱动 Clip/Music inspector；行类型含字段、波形选项、和弦/移调、Pattern 开关、说明文案。`inspector_items` 不再手写这两块。
+- **时间线缩放/平移**：`State::timeline_zoom`（1–32×）与 `timeline_offset`；`Layout::time_x/x_time` 统一带偏移，标尺按可见窗口取 tick；⌘/Ctrl+滚轮围绕指针缩放，Shift+滚轮平移，状态栏显示倍率；播放头移出视口时不再画在错误位置。
+- **库列表滚动条**：行右侧留 8px gutter，溢出时出现 4px 轨道 + 可拖动 thumb（`Hit::LibraryScrollbar` / `Drag::LibraryScroll`），滚轮与拖动共用 `patch_scroll`。
+- **分类下拉**：`ALL` 按钮改为弹出列表（`CategoryPick(Option<Category>)`），当前项打勾；点击外部/Esc 关闭，`C` 快捷键仍可循环。
+- **吸附与边界**：Shift 关闭 Clip/自动化 5ms 吸附（状态栏显示 FREE）；Clip Move 起始时间 clamp 到 `ClipField::Start` 上界。
+- 标尺末端放不下的 tick 文案不再被卡片裁切。
+- 新增 7 条测试（缩放映射、库滚动条、分类菜单、Music 注册表、Shift 关闭吸附、分类过滤）：`cargo test` 62 passed。
+
+## 12. Definition of Done（每个 PR 必须满足）
 
 - [ ] `docs/PLAN.md` 对应条目状态更新。
 - [ ] `scripts/preflight.sh` 全绿（fmt / clippy -D warnings / test / selfcheck）。

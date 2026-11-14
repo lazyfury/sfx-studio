@@ -89,6 +89,12 @@ pub enum Drag {
         start_y: f32,
         start_scroll: f32,
     },
+    LibraryScroll {
+        start_y: f32,
+        start_scroll: usize,
+        travel: f32,
+        max_start: usize,
+    },
 }
 
 pub struct State {
@@ -142,6 +148,7 @@ pub struct State {
     /// Time of the last actual preview render; throttles drag-time renders.
     pub last_render: Instant,
     pub category_filter: Option<Category>,
+    pub category_menu_open: bool,
     pub favorites_only: bool,
     pub search: String,
     pub search_focus: bool,
@@ -149,6 +156,10 @@ pub struct State {
     /// Timeline span (seconds) frozen while a clip gesture is in flight, so
     /// the scale cannot drift under the cursor as the clip grows.
     pub timeline_pin: Option<f32>,
+    /// Zoom factor over the fitted timeline (1.0 = fit) and its left edge in
+    /// seconds. Both are clamped by `Layout` every frame.
+    pub timeline_zoom: f32,
+    pub timeline_offset: f32,
     /// Top-left system menu (all file/export actions live here).
     pub menu_open: bool,
     /// Defer the next preview render by one frame so the shell/tab paints
@@ -203,11 +214,14 @@ impl State {
             toast: None,
             last_render: Instant::now(),
             category_filter: None,
+            category_menu_open: false,
             favorites_only: false,
             search: String::new(),
             search_focus: false,
             inspector_scroll: 0.0,
             timeline_pin: None,
+            timeline_zoom: 1.0,
+            timeline_offset: 0.0,
             menu_open: false,
             defer_render: true,
         }
@@ -786,6 +800,8 @@ impl SfxLogic {
     }
 
     fn open_folder_now(&mut self, folder: PathBuf) {
+        self.state.timeline_zoom = 1.0;
+        self.state.timeline_offset = 0.0;
         match open_folder(&mut self.state, folder) {
             Ok(warnings) => {
                 let message = if warnings.is_empty() {
@@ -971,6 +987,12 @@ impl SfxLogic {
             Some(category) => format!("filter: {}", category.label()),
             None => "filter: all sounds".into(),
         });
+    }
+
+    fn pick_category(&mut self, category: Option<Category>) {
+        self.state.category_filter = category;
+        self.state.category_menu_open = false;
+        self.refresh_filter();
     }
 
     fn toggle_favorite_filter(&mut self) {
@@ -1233,7 +1255,10 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::Escape => {
-                        if self.state.menu_open {
+                        if self.state.category_menu_open {
+                            self.state.category_menu_open = false;
+                            self.state.bump_view();
+                        } else if self.state.menu_open {
                             self.state.menu_open = false;
                             self.state.bump_view();
                         } else {
@@ -1388,8 +1413,26 @@ impl AppLogic for SfxLogic {
                 }
                 if pointer_hit == Some(ui::Hit::MenuToggle) {
                     self.state.menu_open = true;
+                    self.state.category_menu_open = false;
                     self.state.bump_view();
                     return EventResult::Handled;
+                }
+                if self.state.category_menu_open {
+                    match pointer_hit {
+                        Some(ui::Hit::CategoryPick(category)) => {
+                            self.pick_category(category);
+                            return EventResult::Handled;
+                        }
+                        Some(ui::Hit::CategoryMenu | ui::Hit::CategoryFilter) => {
+                            self.state.category_menu_open = false;
+                            self.state.bump_view();
+                            return EventResult::Handled;
+                        }
+                        _ => {
+                            self.state.category_menu_open = false;
+                            self.state.bump_view();
+                        }
+                    }
                 }
                 match pointer_hit {
                     Some(ui::Hit::Search) => {
@@ -1402,7 +1445,16 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::CategoryFilter) => {
-                        self.activate(ui::Action::CategoryCycle);
+                        self.state.category_menu_open = !self.state.category_menu_open;
+                        self.state.menu_open = false;
+                        self.state.bump_view();
+                        return EventResult::Handled;
+                    }
+                    Some(ui::Hit::CategoryPick(category)) => {
+                        self.pick_category(category);
+                        return EventResult::Handled;
+                    }
+                    Some(ui::Hit::CategoryMenu) => {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::FavoriteFilter) => {
@@ -1493,6 +1545,17 @@ impl AppLogic for SfxLogic {
                     Some(ui::Hit::Waveform(time)) => {
                         self.state.drag = Drag::Seek { waveform: true };
                         self.seek(time);
+                        return EventResult::Handled;
+                    }
+                    Some(ui::Hit::LibraryScrollbar) => {
+                        self.state.drag = Drag::LibraryScroll {
+                            start_y: position.y,
+                            start_scroll: self.state.patch_scroll,
+                            travel: (layout.library_scrollbar.size.height
+                                - layout.library_thumb.size.height)
+                                .max(1.0),
+                            max_start: layout.library_max_start,
+                        };
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::InspectorScrollbar) => {
@@ -1652,6 +1715,33 @@ impl AppLogic for SfxLogic {
                     return EventResult::Handled;
                 }
                 if layout.timeline.contains(*position) {
+                    if self.state.modifiers.meta || self.state.modifiers.ctrl {
+                        // Zoom around the cursor: keep the time under the
+                        // pointer anchored while the scale changes.
+                        let plot_w =
+                            (layout.timeline.size.width - ui::TIMELINE_LABEL - 8.0).max(1.0);
+                        let plot_left = layout.timeline.left() + ui::TIMELINE_LABEL;
+                        let ratio = ((position.x - plot_left) / plot_w).clamp(0.0, 1.0);
+                        let anchor = layout.x_time(position.x);
+                        let factor = if delta.y > 0.0 { 1.25 } else { 0.8 };
+                        self.state.timeline_zoom =
+                            (self.state.timeline_zoom * factor).clamp(1.0, 32.0);
+                        let view_total = layout.timeline_total + 0.08;
+                        let scale = ((plot_w / view_total) * self.state.timeline_zoom).max(8.0);
+                        let visible = plot_w / scale;
+                        self.state.timeline_offset =
+                            (anchor - ratio * visible).clamp(0.0, (view_total - visible).max(0.0));
+                        self.state.bump_view();
+                        return EventResult::Handled;
+                    }
+                    if self.state.modifiers.shift {
+                        let view_total = layout.timeline_total + 0.08;
+                        let step =
+                            layout.timeline_visible * 0.1 * if delta.y > 0.0 { -1.0 } else { 1.0 };
+                        self.state.timeline_offset = (layout.timeline_offset + step)
+                            .clamp(0.0, (view_total - layout.timeline_visible).max(0.0));
+                        return EventResult::Handled;
+                    }
                     if let Some(patch) = self.state.patch() {
                         let capacity = ui::layer_capacity(self.state.viewport, patch.layers.len());
                         let max_start = patch.layers.len().saturating_sub(capacity);
@@ -1732,7 +1822,9 @@ impl AppLogic for SfxLogic {
             }
             Drag::AutomationPoint { .. } => return Some(Cursor::Grabbing),
             Drag::Seek { .. } => return Some(Cursor::Grab),
-            Drag::InspectorScroll { .. } => return Some(Cursor::RowResize),
+            Drag::InspectorScroll { .. } | Drag::LibraryScroll { .. } => {
+                return Some(Cursor::RowResize)
+            }
             Drag::None => {}
         }
         match self.state.hover_hit {
@@ -1743,7 +1835,9 @@ impl AppLogic for SfxLogic {
             Some(ui::Hit::Timeline { .. }) => Some(Cursor::Grab),
             Some(ui::Hit::Ruler(_) | ui::Hit::Waveform(_)) => Some(Cursor::Pointer),
             Some(ui::Hit::Search) => Some(Cursor::Text),
-            Some(ui::Hit::InspectorScrollbar) => Some(Cursor::RowResize),
+            Some(ui::Hit::InspectorScrollbar | ui::Hit::LibraryScrollbar) => {
+                Some(Cursor::RowResize)
+            }
             Some(ui::Hit::AutomationPoint(_)) => Some(Cursor::Grab),
             Some(ui::Hit::AutomationLane { .. }) => Some(Cursor::Pointer),
             Some(ui::Hit::LayerField(_) | ui::Hit::ClipField(_) | ui::Hit::MusicField(_)) => {
@@ -1759,6 +1853,8 @@ impl AppLogic for SfxLogic {
                 | ui::Hit::LayerRow(_)
                 | ui::Hit::Pattern(_, _)
                 | ui::Hit::CategoryFilter
+                | ui::Hit::CategoryPick(_)
+                | ui::Hit::CategoryMenu
                 | ui::Hit::FavoriteFilter,
             ) => Some(Cursor::Pointer),
             None => Some(Cursor::Default),
@@ -1824,6 +1920,8 @@ impl SfxLogic {
         } else {
             1.0
         };
+        // Shift disables the time grid so clip edges can be placed freely.
+        let snap = !self.state.modifiers.shift;
         match drag {
             Drag::None => {}
             Drag::Layer { field, last_x } => {
@@ -1902,6 +2000,24 @@ impl SfxLogic {
                 self.seek(time);
                 self.state.drag = Drag::Seek { waveform };
             }
+            Drag::LibraryScroll {
+                start_y,
+                start_scroll,
+                travel,
+                max_start,
+            } => {
+                let delta = (position.y - start_y) / travel.max(1.0) * max_start as f32;
+                self.state.patch_scroll = (start_scroll as f32 + delta)
+                    .round()
+                    .clamp(0.0, max_start as f32)
+                    as usize;
+                self.state.drag = Drag::LibraryScroll {
+                    start_y,
+                    start_scroll,
+                    travel,
+                    max_start,
+                };
+            }
             Drag::InspectorScroll {
                 start_y,
                 start_scroll,
@@ -1951,7 +2067,7 @@ impl SfxLogic {
                     };
                     let (lo, hi, _) = kind.range();
                     if let Some(point) = points.get_mut(index) {
-                        point.time = ui::snap_time(time).clamp(min, max);
+                        point.time = snap_drag_time(time, snap).clamp(min, max);
                         let decimals = if kind == AutomationKind::Gain {
                             100.0
                         } else {
@@ -1980,16 +2096,23 @@ impl SfxLogic {
                         .get_mut(layer)
                         .and_then(|l| l.clips.get_mut(clip))
                     {
+                        let snap_time = |value: f32| {
+                            if snap {
+                                ui::snap_time(value)
+                            } else {
+                                value
+                            }
+                        };
+                        let max_start = ClipField::Start.spec().max;
                         match mode {
                             TimelineDrag::Move => {
-                                clip.start = ui::snap_time(start + dt).max(0.0);
+                                clip.start = snap_time(start + dt).clamp(0.0, max_start);
                             }
                             TimelineDrag::Resize => {
-                                clip.duration =
-                                    ui::snap_time(duration + dt).clamp(0.005, max_duration);
+                                clip.duration = snap_time(duration + dt).clamp(0.005, max_duration);
                             }
                             TimelineDrag::ResizeLeft => {
-                                let new_start = ui::snap_time(start + dt).max(0.0);
+                                let new_start = snap_time(start + dt).clamp(0.0, max_start);
                                 let delta = new_start - start;
                                 clip.start = new_start;
                                 clip.duration = (duration - delta).clamp(0.005, max_duration);
@@ -2008,6 +2131,15 @@ impl SfxLogic {
                 };
             }
         }
+    }
+}
+
+/// Time under a drag; `snap = false` (Shift) keeps sub-grid precision.
+fn snap_drag_time(value: f32, snap: bool) -> f32 {
+    if snap {
+        ui::snap_time(value)
+    } else {
+        value
     }
 }
 
@@ -2243,6 +2375,32 @@ mod tests {
         assert_eq!(logic.state.undo.len(), 1);
         logic.state.undo();
         assert_eq!(logic.state.project.patches[target].favorite, before);
+    }
+
+    #[test]
+    fn picking_a_category_closes_the_menu_and_filters() {
+        let mut logic = SfxLogic {
+            state: State::new(),
+            measurer: None,
+            audio: None,
+        };
+        logic.state.category_menu_open = true;
+        logic.pick_category(Some(Category::Combat));
+        assert_eq!(logic.state.category_filter, Some(Category::Combat));
+        assert!(!logic.state.category_menu_open);
+        assert!(logic
+            .state
+            .visible_patches()
+            .iter()
+            .all(|index| logic.state.project.patches[*index].category == Category::Combat));
+        logic.pick_category(None);
+        assert_eq!(logic.state.category_filter, None);
+    }
+
+    #[test]
+    fn shift_disables_the_clip_snap_grid() {
+        assert!((snap_drag_time(0.1234, true) - 0.125).abs() < 0.0001);
+        assert_eq!(snap_drag_time(0.1234, false), 0.1234);
     }
 
     #[test]

@@ -58,9 +58,12 @@ cargo run -- --help
 
 ## Workflow
 
-- **Library** — search (`/`), category filter (`ALL` / `C`), favorites filter
-  (star), selectable sound list; each row's star toggles its favourite.
+- **Library** — search (`/`), category filter (`ALL` dropdown / `C`), favorites
+  filter (star), selectable sound list; each row's star toggles its favourite
+  and a thin scrollbar appears when the list overflows.
 - **Sound** — waveform, play/stop/loop, randomize, A/B/C variations, favorite.
+- **Timeline** — drag clips to move/trim (5 ms snap, hold Shift for free
+  placement); ⌘/Ctrl+wheel zooms around the cursor and Shift+wheel pans.
 - **Parameters** — scrollable panel; click a slider to jump, drag to adjust,
   Shift/Alt for fine control, double-click to reset. Waveform/ruler can be
   dragged to scrub the playhead.
@@ -86,6 +89,9 @@ cargo run -- --help
 | ⌘/Ctrl+O | Open project folder |
 | ⌘/Ctrl+E | Export 48 kHz WAV |
 | ⌘/Ctrl+B | Bake Godot assets |
+| ⌘/Ctrl + wheel (timeline) | Zoom timeline |
+| Shift + wheel (timeline) | Pan timeline |
+| Shift + drag clip | Free placement (no 5 ms snap) |
 
 ## Godot side
 
