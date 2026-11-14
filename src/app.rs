@@ -554,14 +554,9 @@ impl State {
     }
 
     pub fn preview_rate(&self) -> u32 {
-        if self.playback.audio_ok {
-            self.playback.audio_rate
-        } else {
-            match self.view.tab {
-                Tab::Patches => self.patch().map(|p| p.rate).unwrap_or(22050),
-                Tab::Music => self.doc.project.music.rate,
-            }
-        }
+        // Preview always renders at the export rate; the audio callback
+        // resamples to whatever the device asks for.
+        synth::PREVIEW_RATE
     }
 
     pub fn ensure_cache(&mut self, rate: u32) {

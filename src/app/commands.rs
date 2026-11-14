@@ -358,7 +358,7 @@ impl SfxLogic {
         else {
             return;
         };
-        let rate = 48_000;
+        let rate = synth::PREVIEW_RATE;
         let samples = synth::render_patch(patch, rate);
         match synth::write_wav(&path, &samples, rate) {
             Ok(()) => self

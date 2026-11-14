@@ -605,9 +605,17 @@ impl AppLogic for SfxLogic {
         } else {
             self.request_preview(rate);
         }
-        if let Some(audio) = &self.audio {
-            if audio.take_device_errors() > 0 {
-                self.state.toast("audio device error · playback stopped");
+        if let Some(audio) = &mut self.audio {
+            audio.reclaim();
+            let errors = audio.take_device_errors();
+            let underruns = audio.take_underruns();
+            if errors > 0 {
+                self.state.toast("audio device error · reconnecting");
+            } else if underruns > 0 {
+                self.state.toast("audio underrun");
+            }
+            if !audio.is_alive() && audio.try_reconnect() {
+                self.state.toast("audio device restored");
             }
             let playing = audio.is_playing();
             if playing {

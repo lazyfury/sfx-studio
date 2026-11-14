@@ -5,6 +5,9 @@ use crate::model::{EnvShape, FilterMode, Layer, Music, MusicWave, Patch, ToneEnv
 
 const TAU: f32 = std::f32::consts::TAU;
 
+/// Preview/export render rate. Audio output resamples from this rate.
+pub const PREVIEW_RATE: u32 = 48_000;
+
 /// Bucket count for the cached waveform envelope.
 pub const ENVELOPE_BINS: usize = 2048;
 

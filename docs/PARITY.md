@@ -38,8 +38,8 @@
 | D3 | 噪声低通系数与采样率无关（`lerp(low, noise, lowpass_from)`） | 22.05k / 48k 下噪声音色不同 | 有意保留以兼容 Godot；Phase 3 双端同时改为按 Hz 归一化，并升 `dsp_version` |
 | D4 | Godot `Wave.SAMPLE(9)` 无 Rust 实现，目前导入映射为 `Pluck` | 采样层无法正确往返 | Phase 3：新增 `Wave::Sample` + WAV 导入；当前在文档中标注 |
 | D5 | `_s16` 截断 vs Rust `round()` | 最差 1 LSB | 不修（人耳不可闻）；若做 bit-exact 再统一 |
-| D6 | `Patch.rate` 不参与实时预览（预览用设备率） | 预览与 bake 的滤波/噪声系数可能不同 | 文档化；Phase 2 固定 48k 渲染 + 重采样 |
-| D7 | `MusicField::Rate` 仅影响 bake，不影响实时预览 | UI 标注为 `BAKE RATE` | 已标注；Phase 2 重采样后统一 |
+| D6 | 实时预览固定 48k 并线性重采样到设备率；bake 仍按 `Patch.rate` | 预览与 bake 的滤波/噪声系数仍可能不同（D3） | 0015 已完成预览侧固定 48k + 重采样；bake 统一待 D3 决策 |
+| D7 | `MusicField::Rate` 仅影响 bake；实时预览已固定 48k | UI 标注为 `BAKE RATE` | 0015 起预览 48k + 设备重采样；bake 仍独立 |
 
 ## 4. 必须遵守的改动规则
 
