@@ -148,23 +148,16 @@ pub fn hit(state: &State, layout: &Layout, pos: Vec2) -> Option<Hit> {
                 return Some(Hit::Action(Action::AutomationLane(kind)));
             }
         }
-        if let (Some(clip), Some(layer)) = (
-            state.view.selected_clip,
-            state
-                .patch()
-                .and_then(|p| p.layers.get(state.view.selected_layer)),
-        ) {
-            if let Some(clip) = layer.clips.get(clip) {
-                let kind = state.view.automation_lane;
-                for (index, point) in kind.points(clip).iter().enumerate() {
-                    let xy = layout.automation_xy(point.time, point.value, kind, clip.duration);
-                    if (xy - pos).length() <= 7.0 {
-                        return Some(Hit::AutomationPoint(index));
-                    }
+        if let Some(clip) = state.clip() {
+            let kind = state.view.automation_lane;
+            for (index, point) in kind.points(clip).iter().enumerate() {
+                let xy = layout.automation_xy(point.time, point.value, kind, clip.duration);
+                if (xy - pos).length() <= 7.0 {
+                    return Some(Hit::AutomationPoint(index));
                 }
-                let (time, value) = layout.automation_at(pos, clip.duration, kind);
-                return Some(Hit::AutomationLane { time, value });
             }
+            let (time, value) = layout.automation_at(pos, clip.duration, kind);
+            return Some(Hit::AutomationLane { time, value });
         }
     }
     for (row, step, rect) in &layout.pattern_cells {

@@ -189,7 +189,8 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
     }
     for (index, rect) in &layout.patch_rows {
         let patch = &state.doc.project.patches[*index];
-        let selected = *index == state.view.selected_patch && state.view.tab == Tab::Patches;
+        let selected =
+            Some(patch.id) == state.view.selected_patch && state.view.tab == Tab::Patches;
         if selected {
             fill(ctx, *rect, ACTIVE);
             fill(
@@ -649,7 +650,7 @@ fn paint_header(
                 TITLE,
                 ACCENT,
             );
-            let layer = patch.layers.get(state.view.selected_layer);
+            let layer = state.layer();
             let meta = format!(
                 "{}  /  {}  ·  {:.3}s  ·  gain {:.2}",
                 patch.layers.len(),
@@ -753,7 +754,7 @@ fn paint_timeline(
     if let Some(patch) = state.patch() {
         for (index, row_rect) in &layout.layer_rows {
             if let Some(layer) = patch.layers.get(*index) {
-                let selected = *index == state.view.selected_layer;
+                let selected = state.view.selected_layer == Some(layer.id);
                 let hovered_row = matches!(
                     state.view.hover_hit,
                     Some(Hit::Timeline { layer, .. }) if layer == *index
@@ -803,7 +804,8 @@ fn paint_timeline(
                             layer.gain * clip.gain,
                             layer,
                             selected,
-                            state.view.selected_clip == Some(clip_index),
+                            state.view.selected_clip
+                                == layer.clips.get(clip_index).map(|clip| clip.id),
                             *index,
                             Some(clip_index),
                         );
@@ -876,7 +878,7 @@ fn paint_automation(
             state.view.automation_lane == kind,
         );
     }
-    let Some(clip_index) = state.view.selected_clip else {
+    let Some(clip_index) = state.clip_index() else {
         text_top(
             ctx,
             measurer,
@@ -888,11 +890,7 @@ fn paint_automation(
         );
         return;
     };
-    let Some(clip) = state
-        .patch()
-        .and_then(|p| p.layers.get(state.view.selected_layer))
-        .and_then(|l| l.clips.get(clip_index))
-    else {
+    let Some(clip) = state.clip() else {
         return;
     };
     let kind = state.view.automation_lane;
@@ -1356,7 +1354,7 @@ pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
         };
         items.push(RawItem::Section(format!(
             "LAYER {:02}  /  {}",
-            state.view.selected_layer + 1,
+            state.layer_index().unwrap_or(0) + 1,
             layer.wave.label()
         )));
         items.push(RawItem::Options {
@@ -1386,7 +1384,7 @@ pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
         for field in [LayerField::Delay, LayerField::Duration, LayerField::Gain] {
             items.push(layer_param(field, layer));
         }
-        if let Some(index) = state.view.selected_clip {
+        if let Some(index) = state.clip_index() {
             if let Some(clip) = layer.clips.get(index) {
                 items.push(RawItem::Section(format!("CLIP {:02}", index + 1)));
                 for field in CLIP_FIELDS {
@@ -1885,13 +1883,8 @@ fn hover_info(state: &State) -> Option<String> {
         }
         Some(Hit::Ruler(time)) => Some(format!("PLAYHEAD  {time:.3}s  ·  click to seek")),
         Some(Hit::AutomationPoint(index)) => {
-            let clip = state.view.selected_clip?;
-            let layer = state.patch()?.layers.get(state.view.selected_layer)?;
-            let point = state
-                .view
-                .automation_lane
-                .points(layer.clips.get(clip)?)
-                .get(index)?;
+            let clip = state.clip()?;
+            let point = state.view.automation_lane.points(clip).get(index)?;
             Some(format!(
                 "AUTOMATION {:02}  {}  T {:.3}s  {:.2}  ·  drag / Delete",
                 index + 1,

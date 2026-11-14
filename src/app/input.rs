@@ -91,19 +91,15 @@ impl AppLogic for SfxLogic {
                     }
                     Key::Delete => {
                         if self.state.view.tab == Tab::Patches {
-                            if let (Some(index), Some(clip_index)) = (
-                                self.state.view.selected_env_point,
-                                self.state.view.selected_clip,
-                            ) {
+                            if let Some(index) = self
+                                .state
+                                .view
+                                .selected_env_point
+                                .filter(|_| self.state.clip_index().is_some())
+                            {
                                 self.push_undo();
-                                let layer_index = self.state.view.selected_layer;
                                 let kind = self.state.view.automation_lane;
-                                if let Some(clip) = self
-                                    .state
-                                    .patch_mut()
-                                    .and_then(|p| p.layers.get_mut(layer_index))
-                                    .and_then(|l| l.clips.get_mut(clip_index))
-                                {
+                                if let Some(clip) = self.state.clip_mut() {
                                     let points = kind.points_mut(clip);
                                     if index < points.len() {
                                         points.remove(index);
@@ -119,9 +115,15 @@ impl AppLogic for SfxLogic {
                     }
                     Key::ArrowUp => {
                         let visible = self.state.visible_patches();
-                        let position = visible
-                            .iter()
-                            .position(|index| *index == self.state.view.selected_patch)
+                        let position = self
+                            .state
+                            .view
+                            .selected_patch
+                            .and_then(|id| {
+                                visible.iter().position(|index| {
+                                    self.state.doc.project.patches[*index].id == id
+                                })
+                            })
                             .unwrap_or(0);
                         if let Some(index) = visible.get(position.saturating_sub(1)) {
                             self.state.select_patch(*index);
@@ -130,9 +132,15 @@ impl AppLogic for SfxLogic {
                     }
                     Key::ArrowDown => {
                         let visible = self.state.visible_patches();
-                        let position = visible
-                            .iter()
-                            .position(|index| *index == self.state.view.selected_patch)
+                        let position = self
+                            .state
+                            .view
+                            .selected_patch
+                            .and_then(|id| {
+                                visible.iter().position(|index| {
+                                    self.state.doc.project.patches[*index].id == id
+                                })
+                            })
                             .unwrap_or(0);
                         if let Some(index) = visible.get(position + 1) {
                             self.state.select_patch(*index);
@@ -140,12 +148,12 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::ArrowLeft => {
-                        let index = self.state.view.selected_layer.saturating_sub(1);
+                        let index = self.state.layer_index().unwrap_or(0).saturating_sub(1);
                         self.state.select_layer(index);
                         return EventResult::Handled;
                     }
                     Key::ArrowRight => {
-                        let index = self.state.view.selected_layer + 1;
+                        let index = self.state.layer_index().unwrap_or(0) + 1;
                         self.state.select_layer(index);
                         return EventResult::Handled;
                     }
@@ -304,11 +312,13 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::ClipField(field)) => {
-                        if let Some(index) = self.state.view.selected_clip {
+                        if let (Some(index), Some(layer)) =
+                            (self.state.clip_index(), self.state.layer_index())
+                        {
                             self.state.begin_edit();
                             self.set_param_from_x(*position, ui::Hit::ClipField(field), &layout);
                             self.state.view.drag = Drag::ClipField {
-                                layer: self.state.view.selected_layer,
+                                layer,
                                 clip: index,
                                 field,
                                 last_x: position.x,
@@ -341,8 +351,13 @@ impl AppLogic for SfxLogic {
                                 index = Some(0);
                             }
                         }
-                        self.state.view.selected_clip = index;
-                        self.state.view.selected_env_point = None;
+                        self.state.doc.project.ensure_ids();
+                        if let Some(index) = index {
+                            self.state.select_clip(index);
+                        } else {
+                            self.state.view.selected_clip = None;
+                            self.state.view.selected_env_point = None;
+                        }
                         if let Some(index) = index {
                             let (start, duration) = self
                                 .state
@@ -396,14 +411,12 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::AutomationPoint(index)) => {
-                        if let Some(clip) = self.state.view.selected_clip {
+                        if let (Some(clip), Some(layer)) =
+                            (self.state.clip_index(), self.state.layer_index())
+                        {
                             self.state.begin_edit();
                             self.state.view.selected_env_point = Some(index);
-                            self.state.view.drag = Drag::AutomationPoint {
-                                layer: self.state.view.selected_layer,
-                                clip,
-                                index,
-                            };
+                            self.state.view.drag = Drag::AutomationPoint { layer, clip, index };
                         }
                         return EventResult::Handled;
                     }
@@ -413,17 +426,13 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::AutomationLane { time, value }) => {
-                        if let Some(clip_index) = self.state.view.selected_clip {
+                        if let (Some(clip_index), Some(layer_index)) =
+                            (self.state.clip_index(), self.state.layer_index())
+                        {
                             self.state.begin_edit();
-                            let layer_index = self.state.view.selected_layer;
                             let kind = self.state.view.automation_lane;
                             let mut added = None;
-                            if let Some(clip) = self
-                                .state
-                                .patch_mut()
-                                .and_then(|p| p.layers.get_mut(layer_index))
-                                .and_then(|l| l.clips.get_mut(clip_index))
-                            {
+                            if let Some(clip) = self.state.clip_mut() {
                                 added = Some(clip.add_point(kind, time, value));
                                 self.state.mark_dirty();
                             }
@@ -480,22 +489,15 @@ impl AppLogic for SfxLogic {
                         }
                     }
                     Some(ui::Hit::ClipField(field)) => {
-                        if let Some(index) = self.state.view.selected_clip {
+                        if self.state.clip_index().is_some() {
                             self.push_undo();
-                            let layer_index = self.state.view.selected_layer;
                             let max_duration = self
                                 .state
-                                .patch()
-                                .and_then(|patch| patch.layers.get(layer_index))
+                                .layer()
                                 .map(|layer| layer.duration)
                                 .unwrap_or(3.0);
                             let default = Clip::default();
-                            if let Some(clip) = self
-                                .state
-                                .patch_mut()
-                                .and_then(|patch| patch.layers.get_mut(layer_index))
-                                .and_then(|layer| layer.clips.get_mut(index))
-                            {
+                            if let Some(clip) = self.state.clip_mut() {
                                 field.set(clip, field.get(&default));
                                 clip.duration = clip.duration.clamp(0.005, max_duration);
                                 self.state.mark_dirty();
@@ -713,22 +715,15 @@ impl SfxLogic {
                 }
             }
             ui::Hit::ClipField(field) => {
-                if let Some(index) = self.state.view.selected_clip {
-                    let layer_index = self.state.view.selected_layer;
+                if self.state.clip_index().is_some() {
                     let max_duration = self
                         .state
-                        .patch()
-                        .and_then(|patch| patch.layers.get(layer_index))
+                        .layer()
                         .map(|layer| layer.duration)
                         .unwrap_or(3.0);
                     let spec = field.spec();
                     let value = spec.snap(field.denorm(t)).clamp(spec.min, spec.max);
-                    if let Some(clip) = self
-                        .state
-                        .patch_mut()
-                        .and_then(|patch| patch.layers.get_mut(layer_index))
-                        .and_then(|layer| layer.clips.get_mut(index))
-                    {
+                    if let Some(clip) = self.state.clip_mut() {
                         field.set(clip, value);
                         clip.duration = clip.duration.clamp(0.005, max_duration);
                         self.state.mark_dirty();

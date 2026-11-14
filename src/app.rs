@@ -119,9 +119,11 @@ pub struct DocState {
 
 pub struct ViewState {
     pub tab: Tab,
-    pub selected_patch: usize,
-    pub selected_layer: usize,
-    pub selected_clip: Option<usize>,
+    /// Stable IDs of the current selection; resolve to indices through the
+    /// `State` helpers so reordering/deleting rows cannot silently retarget.
+    pub selected_patch: Option<u32>,
+    pub selected_layer: Option<u32>,
+    pub selected_clip: Option<u32>,
     pub selected_env_point: Option<usize>,
     pub automation_lane: AutomationKind,
     pub patch_scroll: usize,
@@ -190,7 +192,7 @@ pub struct State {
 
 impl State {
     pub fn new() -> Self {
-        Self {
+        let mut state = Self {
             doc: DocState {
                 project: Project::demo("untitled"),
                 root: None,
@@ -203,8 +205,8 @@ impl State {
             },
             view: ViewState {
                 tab: Tab::Patches,
-                selected_patch: 0,
-                selected_layer: 0,
+                selected_patch: None,
+                selected_layer: None,
                 selected_clip: None,
                 selected_env_point: None,
                 automation_lane: AutomationKind::Gain,
@@ -253,11 +255,23 @@ impl State {
                 status: "OPEN a Godot project folder · demo loaded".into(),
                 toast: None,
             },
-        }
+        };
+        state.clamp_selection();
+        state
+    }
+
+    pub fn patch_index(&self) -> Option<usize> {
+        let id = self.view.selected_patch?;
+        self.doc
+            .project
+            .patches
+            .iter()
+            .position(|patch| patch.id == id)
     }
 
     pub fn patch(&self) -> Option<&Patch> {
-        self.doc.project.patches.get(self.view.selected_patch)
+        self.patch_index()
+            .and_then(|index| self.doc.project.patches.get(index))
     }
 
     /// Seconds represented by the timeline. Pinned during clip drags.
@@ -270,17 +284,42 @@ impl State {
     }
 
     pub fn patch_mut(&mut self) -> Option<&mut Patch> {
-        self.doc.project.patches.get_mut(self.view.selected_patch)
+        let index = self.patch_index()?;
+        self.doc.project.patches.get_mut(index)
+    }
+
+    pub fn layer_index(&self) -> Option<usize> {
+        let id = self.view.selected_layer?;
+        self.patch()
+            .and_then(|patch| patch.layers.iter().position(|layer| layer.id == id))
     }
 
     pub fn layer(&self) -> Option<&Layer> {
-        self.patch()
-            .and_then(|p| p.layers.get(self.view.selected_layer))
+        let index = self.layer_index()?;
+        self.patch().and_then(|patch| patch.layers.get(index))
     }
 
     pub fn layer_mut(&mut self) -> Option<&mut Layer> {
-        let index = self.view.selected_layer;
-        self.patch_mut().and_then(|p| p.layers.get_mut(index))
+        let index = self.layer_index()?;
+        self.patch_mut()
+            .and_then(|patch| patch.layers.get_mut(index))
+    }
+
+    pub fn clip_index(&self) -> Option<usize> {
+        let id = self.view.selected_clip?;
+        self.layer()
+            .and_then(|layer| layer.clips.iter().position(|clip| clip.id == id))
+    }
+
+    pub fn clip(&self) -> Option<&Clip> {
+        let index = self.clip_index()?;
+        self.layer().and_then(|layer| layer.clips.get(index))
+    }
+
+    pub fn clip_mut(&mut self) -> Option<&mut Clip> {
+        let index = self.clip_index()?;
+        self.layer_mut()
+            .and_then(|layer| layer.clips.get_mut(index))
     }
 
     pub fn patch_visible(&self, index: usize) -> bool {
@@ -332,15 +371,17 @@ impl State {
     }
 
     pub fn select_patch(&mut self, index: usize) {
-        if index < self.doc.project.patches.len() {
-            self.view.selected_patch = index;
+        let previous_layer = self.layer_index().unwrap_or(0);
+        if let Some(patch) = self.doc.project.patches.get(index) {
+            self.view.selected_patch = Some(patch.id);
             self.view.inspector_scroll = 0.0;
-            self.view.selected_layer = self.view.selected_layer.min(
-                self.doc.project.patches[index]
-                    .layers
-                    .len()
-                    .saturating_sub(1),
-            );
+            let keep_layer = self
+                .view
+                .selected_layer
+                .filter(|id| patch.layers.iter().any(|layer| layer.id == *id));
+            let clamped_slot = previous_layer.min(patch.layers.len().saturating_sub(1));
+            self.view.selected_layer =
+                keep_layer.or_else(|| patch.layers.get(clamped_slot).map(|layer| layer.id));
             self.bump_view();
             // Selecting a different patch must re-render the preview even
             // though the document itself is unchanged.
@@ -357,8 +398,8 @@ impl State {
     pub fn select_layer(&mut self, index: usize) {
         self.view.inspector_scroll = 0.0;
         if let Some(patch) = self.patch() {
-            if index < patch.layers.len() {
-                self.view.selected_layer = index;
+            if let Some(layer) = patch.layers.get(index) {
+                self.view.selected_layer = Some(layer.id);
                 self.view.selected_clip = None;
                 self.view.selected_env_point = None;
                 self.bump_view();
@@ -367,12 +408,26 @@ impl State {
         }
     }
 
+    pub fn select_clip(&mut self, index: usize) {
+        self.view.selected_clip = self
+            .layer()
+            .and_then(|layer| layer.clips.get(index))
+            .map(|clip| clip.id);
+        self.view.selected_env_point = None;
+        self.bump_view();
+    }
+
     pub fn ensure_visible(&mut self) {
         let patch_capacity = ui::library_capacity(self.view.viewport);
         let visible = self.visible_patches();
-        let position = visible
-            .iter()
-            .position(|index| *index == self.view.selected_patch)
+        let position = self
+            .view
+            .selected_patch
+            .and_then(|id| {
+                visible
+                    .iter()
+                    .position(|index| self.doc.project.patches[*index].id == id)
+            })
             .unwrap_or(0);
         if position < self.view.patch_scroll {
             self.view.patch_scroll = position;
@@ -386,10 +441,11 @@ impl State {
 
         let layers = self.patch().map(|patch| patch.layers.len()).unwrap_or(1);
         let layer_capacity = ui::layer_capacity(self.view.viewport, layers);
-        if self.view.selected_layer < self.view.layer_scroll {
-            self.view.layer_scroll = self.view.selected_layer;
-        } else if self.view.selected_layer >= self.view.layer_scroll + layer_capacity {
-            self.view.layer_scroll = self.view.selected_layer + 1 - layer_capacity;
+        let layer_index = self.layer_index().unwrap_or(0);
+        if layer_index < self.view.layer_scroll {
+            self.view.layer_scroll = layer_index;
+        } else if layer_index >= self.view.layer_scroll + layer_capacity {
+            self.view.layer_scroll = layer_index + 1 - layer_capacity;
         }
     }
 
@@ -475,28 +531,24 @@ impl State {
         self.view.selected_patch = self
             .view
             .selected_patch
-            .min(self.doc.project.patches.len().saturating_sub(1));
-        if let Some(patch) = self.doc.project.patches.get(self.view.selected_patch) {
-            self.view.selected_layer = self
-                .view
+            .filter(|id| self.doc.project.patches.iter().any(|patch| patch.id == *id))
+            .or_else(|| self.doc.project.patches.first().map(|patch| patch.id));
+        self.view.selected_layer = self.patch().and_then(|patch| {
+            self.view
                 .selected_layer
-                .min(patch.layers.len().saturating_sub(1));
-            if let Some(index) = self.view.selected_clip {
-                let clips = patch
-                    .layers
-                    .get(self.view.selected_layer)
-                    .map(|l| l.clips.len())
-                    .unwrap_or(0);
-                self.view.selected_clip = if index < clips { Some(index) } else { None };
-            }
-            if let Some(index) = self.view.selected_env_point {
-                let points = patch
-                    .layers
-                    .get(self.view.selected_layer)
-                    .and_then(|l| self.view.selected_clip.and_then(|c| l.clips.get(c)))
-                    .map(|c| self.view.automation_lane.points(c).len())
-                    .unwrap_or(0);
-                self.view.selected_env_point = if index < points { Some(index) } else { None };
+                .filter(|id| patch.layers.iter().any(|layer| layer.id == *id))
+                .or_else(|| patch.layers.first().map(|layer| layer.id))
+        });
+        if self.clip_index().is_none() {
+            self.view.selected_clip = None;
+        }
+        if self.view.selected_env_point.is_some() {
+            let points = self
+                .clip()
+                .map(|clip| self.view.automation_lane.points(clip).len())
+                .unwrap_or(0);
+            if self.view.selected_env_point.unwrap_or(0) >= points {
+                self.view.selected_env_point = None;
             }
         }
     }
@@ -823,12 +875,11 @@ mod tests {
             audio: None,
             render: None,
         };
-        logic.state.view.selected_patch = 0;
         let target = 2;
         let before = logic.state.doc.project.patches[target].favorite;
         logic.toggle_patch_favorite(target);
         assert_eq!(logic.state.doc.project.patches[target].favorite, !before);
-        assert_eq!(logic.state.view.selected_patch, 0);
+        assert_eq!(logic.state.patch_index(), Some(0));
         assert_eq!(logic.state.doc.undo.len(), 1);
         logic.state.undo();
         assert_eq!(logic.state.doc.project.patches[target].favorite, before);
@@ -859,6 +910,46 @@ mod tests {
     fn shift_disables_the_clip_snap_grid() {
         assert!((snap_drag_time(0.1234, true) - 0.125).abs() < 0.0001);
         assert_eq!(snap_drag_time(0.1234, false), 0.1234);
+    }
+
+    #[test]
+    fn selection_uses_stable_ids_across_reorders() {
+        let mut logic = SfxLogic {
+            state: State::new(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        logic.state.select_patch(2);
+        let patch_id = logic.state.view.selected_patch.expect("patch selected");
+        let patch = logic.state.doc.project.patches.remove(2);
+        logic.state.doc.project.patches.insert(0, patch);
+        assert_eq!(logic.state.patch_index(), Some(0));
+        assert_eq!(logic.state.view.selected_patch, Some(patch_id));
+
+        logic.state.select_layer(1);
+        let layer_id = logic.state.view.selected_layer.expect("layer selected");
+        if let Some(patch) = logic.state.patch_mut() {
+            patch.layers.insert(0, Layer::default());
+        }
+        logic.state.mark_dirty();
+        assert_eq!(logic.state.layer_index(), Some(2));
+        assert_eq!(logic.state.layer().map(|layer| layer.id), Some(layer_id));
+    }
+
+    #[test]
+    fn deleting_the_selected_patch_selects_its_neighbour_by_id() {
+        let mut logic = SfxLogic {
+            state: State::new(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        logic.state.select_patch(0);
+        let neighbour = logic.state.doc.project.patches[1].id;
+        logic.activate(ui::Action::DeletePatch);
+        assert_eq!(logic.state.patch_index(), Some(0));
+        assert_eq!(logic.state.view.selected_patch, Some(neighbour));
     }
 
     #[test]
@@ -904,7 +995,9 @@ mod tests {
             audio: None,
             render: None,
         };
+        let old_id = logic.state.doc.project.patches[0].layers[0].id;
         logic.state.doc.project.patches[0].layers[0] = Layer::new(Wave::Sine);
+        logic.state.doc.project.patches[0].layers[0].id = old_id;
         let layout = ui::Layout::new(&logic.state, logic.state.view.viewport);
         let hit = ui::Hit::LayerField(LayerField::CutoffStart);
         let rect = param_row_rect(&layout, hit).expect("cutoff row");

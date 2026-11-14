@@ -86,34 +86,21 @@ impl SfxLogic {
             }
             A::DeletePatch => {
                 if self.state.doc.project.patches.len() > 1 {
-                    self.state
-                        .doc
-                        .project
-                        .patches
-                        .remove(self.state.view.selected_patch);
-                    self.state.view.selected_patch = self
-                        .state
-                        .view
-                        .selected_patch
-                        .min(self.state.doc.project.patches.len() - 1);
-                    self.state.view.selected_layer = 0;
+                    let index = self.state.patch_index().unwrap_or(0);
+                    self.state.doc.project.patches.remove(index);
                     self.state.mark_dirty();
-                    self.state.bump_view();
+                    let next = index.min(self.state.doc.project.patches.len() - 1);
+                    self.state.select_patch(next);
                 }
             }
             A::DuplicatePatch => {
+                let index = self.state.patch_index().unwrap_or(0);
                 if let Some(patch) = self.state.patch().cloned() {
                     let mut copy = patch;
                     copy.name = format!("{}_copy", copy.name);
-                    self.state
-                        .doc
-                        .project
-                        .patches
-                        .insert(self.state.view.selected_patch + 1, copy);
-                    self.state.view.selected_patch += 1;
-                    self.state.view.selected_layer = 0;
+                    self.state.doc.project.patches.insert(index + 1, copy);
                     self.state.mark_dirty();
-                    self.state.bump_view();
+                    self.state.select_patch(index + 1);
                 }
             }
             A::RenamePatch => {
@@ -131,28 +118,39 @@ impl SfxLogic {
             A::AddLayer => {
                 if let Some(patch) = self.state.patch_mut() {
                     patch.layers.push(Layer::default());
-                    self.state.view.selected_layer = patch.layers.len() - 1;
-                    self.state.mark_dirty();
                 }
+                self.state.mark_dirty();
+                let index = self
+                    .state
+                    .layer()
+                    .map(|_| {
+                        self.state
+                            .patch()
+                            .map(|p| p.layers.len())
+                            .unwrap_or(0)
+                            .saturating_sub(1)
+                    })
+                    .unwrap_or(0);
+                self.state.select_layer(index);
             }
             A::DuplicateLayer => {
-                let selected = self.state.view.selected_layer;
+                let selected = self.state.layer_index().unwrap_or(0);
                 if let Some(patch) = self.state.patch_mut() {
                     if let Some(layer) = patch.layers.get(selected).cloned() {
                         patch.layers.insert(selected + 1, layer);
-                        self.state.view.selected_layer = selected + 1;
                         self.state.mark_dirty();
+                        self.state.select_layer(selected + 1);
                     }
                 }
             }
             A::DeleteLayer => {
-                let selected = self.state.view.selected_layer;
+                let selected = self.state.layer_index().unwrap_or(0);
                 if let Some(patch) = self.state.patch_mut() {
                     if patch.layers.len() > 1 {
                         patch.layers.remove(selected);
-                        self.state.view.selected_layer =
-                            selected.min(patch.layers.len().saturating_sub(1));
                         self.state.mark_dirty();
+                        let remaining = self.state.patch().map(|p| p.layers.len()).unwrap_or(1);
+                        self.state.select_layer(selected.min(remaining - 1));
                     }
                 }
             }
@@ -220,13 +218,17 @@ impl SfxLogic {
                         gain_points: Vec::new(),
                         cutoff_points: Vec::new(),
                     });
-                    self.state.view.selected_clip = Some(layer.clips.len() - 1);
-                    self.state.view.selected_env_point = None;
-                    self.state.mark_dirty();
                 }
+                self.state.mark_dirty();
+                let last = self
+                    .state
+                    .layer()
+                    .map(|layer| layer.clips.len().saturating_sub(1))
+                    .unwrap_or(0);
+                self.state.select_clip(last);
             }
             A::DeleteClip => {
-                if let Some(index) = self.state.view.selected_clip {
+                if let Some(index) = self.state.clip_index() {
                     if let Some(layer) = self.state.layer_mut() {
                         if index < layer.clips.len() {
                             layer.clips.remove(index);
@@ -387,7 +389,7 @@ impl SfxLogic {
         let Some(base) = self.state.patch().cloned() else {
             return;
         };
-        let start = self.state.view.selected_patch;
+        let start = self.state.patch_index().unwrap_or(0);
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos() as u64)
@@ -406,11 +408,8 @@ impl SfxLogic {
                 .patches
                 .insert(start + 1 + index, copy);
         }
-        self.state.view.selected_patch = start + 1;
-        self.state.view.selected_layer = 0;
-        self.state.view.selected_clip = None;
         self.state.mark_dirty();
-        self.state.bump_view();
+        self.state.select_patch(start + 1);
         self.state.toast("created 3 variations (A/B/C)");
     }
 
@@ -496,7 +495,11 @@ impl SfxLogic {
     }
 
     fn keep_selection_visible(&mut self) {
-        if self.state.patch_visible(self.state.view.selected_patch) {
+        if self
+            .state
+            .patch_index()
+            .is_some_and(|index| self.state.patch_visible(index))
+        {
             return;
         }
         if let Some(index) = self.state.visible_patches().first().copied() {
@@ -548,10 +551,10 @@ impl SfxLogic {
                     .project
                     .patches
                     .push(Patch::new_layer(name.clone(), Wave::Sine));
-                self.state.view.selected_patch = self.state.doc.project.patches.len() - 1;
-                self.state.view.selected_layer = 0;
                 self.state.mark_dirty();
-                self.state.bump_view();
+                let last = self.state.doc.project.patches.len() - 1;
+                self.state.select_patch(last);
+                self.state.select_layer(0);
             }
             ModalAction::RenamePatch => {
                 self.push_undo();

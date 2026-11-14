@@ -555,7 +555,8 @@ mod tests {
         let mut state = State::new();
         state.view.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
         state.layer_mut().unwrap().ensure_clips();
-        state.view.selected_clip = Some(0);
+        state.mark_dirty();
+        state.select_clip(0);
         let layout = Layout::new(&state, state.view.viewport);
         assert!(layout
             .header_buttons
@@ -579,7 +580,8 @@ mod tests {
         let mut state = State::new();
         state.view.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
         state.layer_mut().unwrap().ensure_clips();
-        state.view.selected_clip = Some(0);
+        state.mark_dirty();
+        state.select_clip(0);
         state.layer_mut().unwrap().clips[0].add_point(AutomationKind::Gain, 0.05, 1.5);
         let layout = Layout::new(&state, state.view.viewport);
         assert!(layout.automation.size.height > 0.0);
@@ -611,7 +613,13 @@ mod tests {
         let row = layout
             .layer_rows
             .iter()
-            .find(|(index, _)| *index == state.view.selected_layer)
+            .find(|(index, _)| {
+                state
+                    .patch()
+                    .and_then(|patch| patch.layers.get(*index))
+                    .map(|layer| layer.id)
+                    == state.view.selected_layer
+            })
             .map(|(_, rect)| *rect)
             .unwrap();
         let hit = hit(&state, &layout, Vec2::new(x, row.center().y));

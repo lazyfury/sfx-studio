@@ -13,8 +13,8 @@ pub(crate) fn open_folder(state: &mut State, folder: PathBuf) -> Result<Vec<Stri
     let (project, warnings) = load_folder(&folder)?;
     state.doc.project = project;
     state.doc.root = Some(folder);
-    state.view.selected_patch = 0;
-    state.view.selected_layer = 0;
+    state.view.selected_patch = None;
+    state.view.selected_layer = None;
     state.view.selected_clip = None;
     state.view.selected_env_point = None;
     state.view.inspector_scroll = 0.0;
