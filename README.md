@@ -63,7 +63,8 @@ cargo run -- --help
 - **Library** — search (`/`), category filter (`ALL` dropdown / `C`), favorites
   filter (star), selectable sound list; each row's star toggles its favourite
   and a thin scrollbar appears when the list overflows.
-- **Sound** — waveform, play/stop/loop, randomize, A/B/C variations, favorite.
+- **Sound** — waveform, play/stop/loop, randomize, A/B/C variations, favorite;
+  `SAMPLE` layers load a WAV with pitch/loop controls (see `docs/FORMAT.md`).
 - **Timeline** — drag clips to move/trim (5 ms snap, hold Shift for free
   placement); ⌘/Ctrl+wheel zooms around the cursor and Shift+wheel pans.
 - **Parameters** — scrollable panel; click a slider to jump, drag to adjust,

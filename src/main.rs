@@ -11,6 +11,7 @@ mod synth;
 mod theme;
 mod tres;
 mod ui;
+mod wav;
 
 fn main() {
     cli::run();

@@ -28,6 +28,7 @@
 | 空 notes/chords → 空流 | `render_music` | `SfxSynth.music` | ✅ 本轮补齐 |
 | 16 步 pattern / kick/hat 位掩码 | `render_music` | `SfxSynth.music` | ✅ |
 | 文件元数据 | `resource_name`、`group` | `SfxPatch.group` | ✅ 本轮补齐 |
+| 采样层渲染公式 | `render_sample` | `_build_sample` | ✅ Rust 单端（路径 WAV）；`.tres` 往返未支持 |
 
 ## 3. 已知差异（必须知晓）
 
@@ -36,7 +37,7 @@
 | D1 | RNG：Rust xorshift64* vs Godot `RandomNumberGenerator`（PCG32） | **所有噪声类波形**（Noise/Pluck/Snare/Hat/Clap）同 seed 声音不同 | Phase 3：双端统一算法 + 测试向量；在此之前不要承诺「同 seed 同声音」 |
 | D2 | 精度：GDScript `float` 为 f64，Rust DSP 为 f32 | 长音相位/滤波轻微漂移 | Phase 3：相位回绕（`rem_euclid(TAU)`）双端同时做；以容差测试为准 |
 | D3 | 噪声低通系数与采样率无关（`lerp(low, noise, lowpass_from)`） | 22.05k / 48k 下噪声音色不同 | 有意保留以兼容 Godot；Phase 3 双端同时改为按 Hz 归一化，并升 `dsp_version` |
-| D4 | Godot `Wave.SAMPLE(9)` 无 Rust 实现，目前导入映射为 `Pluck` | 采样层无法正确往返 | Phase 3：新增 `Wave::Sample` + WAV 导入；当前在文档中标注 |
+| D4 | Godot `SAMPLE` 使用内嵌 `AudioStreamWAV`；Rust 使用 `sample_path` + WAV 解码 | `.tres` 导入仍映射 `SAMPLE→Pluck`；Rust 样例 patch 导出时整段 bake，不做逐层采样往返 | 0016：Rust 端预览/JSON/bake 已支持；`.tres` 单端差异已标注 |
 | D5 | `_s16` 截断 vs Rust `round()` | 最差 1 LSB | 不修（人耳不可闻）；若做 bit-exact 再统一 |
 | D6 | 实时预览固定 48k 并线性重采样到设备率；bake 仍按 `Patch.rate` | 预览与 bake 的滤波/噪声系数仍可能不同（D3） | 0015 已完成预览侧固定 48k + 重采样；bake 统一待 D3 决策 |
 | D7 | `MusicField::Rate` 仅影响 bake；实时预览已固定 48k | UI 标注为 `BAKE RATE` | 0015 起预览 48k + 设备重采样；bake 仍独立 |

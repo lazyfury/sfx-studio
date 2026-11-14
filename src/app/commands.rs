@@ -47,6 +47,8 @@ impl SfxLogic {
                 | A::DeleteClip
                 | A::Randomize
                 | A::Vary
+                | A::LoadSample
+                | A::ToggleSampleLoop
         );
         if snapshot {
             self.push_undo();
@@ -204,6 +206,8 @@ impl SfxLogic {
                 self.state.doc.project.music.reset_patterns();
                 self.state.mark_music_dirty();
             }
+            A::LoadSample => self.load_sample(),
+            A::ToggleSampleLoop => self.toggle_sample_loop(),
             A::AddClip => {
                 let playhead = self.state.playback.playhead;
                 if let Some(layer) = self.state.layer_mut() {
@@ -383,6 +387,72 @@ impl SfxLogic {
         self.state.mark_dirty();
         self.state.bump_view();
         self.state.toast("randomized current sound");
+    }
+
+    fn load_sample(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Load a WAV sample")
+            .add_filter("WAV audio", &["wav"])
+            .pick_file()
+        else {
+            return;
+        };
+        let data = match crate::wav::load(&path) {
+            Ok(data) => data,
+            Err(error) => {
+                self.state.toast(format!("sample load failed: {error}"));
+                return;
+            }
+        };
+        self.push_undo();
+        let stored = self.store_sample(&path);
+        if let Some(layer) = self.state.layer_mut() {
+            layer.wave = Wave::Sample;
+            layer.sample_pitch = 0.0;
+            layer.sample_loop = false;
+            layer.duration = (data.samples.len() as f32 / data.rate as f32).clamp(0.005, 3.0);
+            layer.sample_path = stored;
+            layer.sample_data = Some(data);
+        }
+        self.state.mark_dirty();
+        self.state.bump_view();
+        self.state.toast("sample loaded");
+    }
+
+    /// Copy the WAV into the project when possible so the JSON stays portable.
+    fn store_sample(&self, source: &std::path::Path) -> String {
+        let Some(root) = &self.state.doc.root else {
+            return source.display().to_string();
+        };
+        let dir = root.join("audio").join("sfx").join("samples");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return source.display().to_string();
+        }
+        let stem = source
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(model::sanitize)
+            .unwrap_or_else(|| "sample".into());
+        let mut name = format!("{stem}.wav");
+        let mut index = 2;
+        while dir.join(&name).exists() {
+            name = format!("{stem}_{index}.wav");
+            index += 1;
+        }
+        let target = dir.join(&name);
+        if std::fs::copy(source, &target).is_err() {
+            return source.display().to_string();
+        }
+        format!("audio/sfx/samples/{name}")
+    }
+
+    fn toggle_sample_loop(&mut self) {
+        self.push_undo();
+        if let Some(layer) = self.state.layer_mut() {
+            layer.sample_loop = !layer.sample_loop;
+        }
+        self.state.mark_dirty();
+        self.state.bump_view();
     }
 
     fn vary(&mut self) {

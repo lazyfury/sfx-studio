@@ -93,6 +93,7 @@ pub fn render_layer(layer: &Layer, rate: u32) -> Vec<f32> {
         Wave::Arp => render_arp(layer, rate),
         Wave::Fm => render_fm(layer, rate),
         Wave::Pluck => render_pluck(layer, rate),
+        Wave::Sample => render_sample(layer, rate),
         Wave::Kick => render_kick(layer, rate),
         Wave::Snare => render_snare(layer, rate),
         Wave::Hat => render_hat(layer, rate),
@@ -401,6 +402,54 @@ fn render_pluck(layer: &Layer, rate: u32) -> Vec<f32> {
                 layer.release,
             )
             * layer.gain;
+    }
+    out
+}
+
+/// Mirrors Godot `SfxLayer._build_sample`: linear interpolation, optional
+/// loop, fixed source ratio plus `sample_pitch`, ADSR and layer gain.
+fn render_sample(layer: &Layer, rate: u32) -> Vec<f32> {
+    let count = (rate as f32 * layer.duration) as usize;
+    let mut out = vec![0.0f32; count];
+    let Some(data) = layer.sample_data.as_ref() else {
+        return out;
+    };
+    if data.samples.is_empty() || data.rate == 0 {
+        return out;
+    }
+    let frames = data.samples.len();
+    let ratio = (data.rate as f32 / rate as f32) * 2f32.powf(layer.sample_pitch / 12.0);
+    let mut pos = 0.0f32;
+    for (i, slot) in out.iter_mut().enumerate() {
+        if !layer.sample_loop && pos >= (frames as f32 - 1.0) {
+            break;
+        }
+        let index = pos as usize;
+        if index >= frames {
+            break;
+        }
+        let frac = pos - index as f32;
+        let a = data.samples[index];
+        let b = if index + 1 < frames {
+            data.samples[index + 1]
+        } else {
+            a
+        };
+        let t = i as f32 / rate as f32;
+        *slot = (a + (b - a) * frac)
+            * adsr(
+                t,
+                layer.duration,
+                layer.attack,
+                layer.decay,
+                layer.sustain,
+                layer.release,
+            )
+            * layer.gain;
+        pos += ratio;
+        if layer.sample_loop {
+            pos %= frames as f32;
+        }
     }
     out
 }
@@ -756,10 +805,48 @@ mod tests {
     use crate::model::{Layer, Music, Patch, ToneEnv, Wave};
 
     #[test]
+    fn sample_layers_loop_and_apply_pitch() {
+        let mut layer = Layer::new(Wave::Sample);
+        layer.duration = 4.5 / 48_000.0;
+        layer.gain = 1.0;
+        layer.attack = 0.0;
+        layer.decay = 0.0;
+        layer.sustain = 1.0;
+        layer.release = 0.0;
+        layer.sample_loop = true;
+        layer.sample_data = Some(crate::wav::SampleData {
+            rate: 48_000,
+            samples: vec![0.0, 1.0, 0.0, -1.0],
+        });
+        let out = render_layer(&layer, 48_000);
+        assert_eq!(out.len(), 4);
+        assert!((out[0] - 0.0).abs() < 0.01);
+        assert!((out[1] - 1.0).abs() < 0.01);
+        assert!((out[2] - 0.0).abs() < 0.01);
+        assert!((out[3] + 1.0).abs() < 0.01);
+
+        layer.sample_pitch = 12.0;
+        layer.sample_data = Some(crate::wav::SampleData {
+            rate: 48_000,
+            samples: vec![0.0, 1.0, 2.0, 3.0],
+        });
+        let faster = render_layer(&layer, 48_000);
+        assert!((faster[0] - 0.0).abs() < 0.01);
+        assert!((faster[1] - 2.0).abs() < 0.01);
+    }
+
+    #[test]
     fn every_wave_renders_finite_samples() {
         for wave in Wave::ALL {
             let mut layer = Layer::new(wave);
             layer.duration = 0.08;
+            if wave == Wave::Sample {
+                layer.sample_loop = true;
+                layer.sample_data = Some(crate::wav::SampleData {
+                    rate: 22050,
+                    samples: vec![0.0, 0.5, -0.5, 1.0],
+                });
+            }
             let samples = render_layer(&layer, 22050);
             assert!(!samples.is_empty(), "{} empty", wave.label());
             assert!(

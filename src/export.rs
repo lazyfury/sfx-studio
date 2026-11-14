@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::model::{self, Layer, Music, Patch, Project};
+use crate::model::{self, Layer, Music, Patch, Project, Wave};
 use crate::synth;
 
 /// Deterministic, collision-free file stems for the whole project. Two patches
@@ -87,7 +87,9 @@ pub fn export_tres(project: &Project, root: &Path) -> Result<String, String> {
     let names = unique_names(project);
     let mut baked_count = 0;
     for (patch, name) in project.patches.iter().zip(names.iter()) {
-        let text = if patch.has_automation() {
+        let needs_bake =
+            patch.has_automation() || patch.layers.iter().any(|layer| layer.wave == Wave::Sample);
+        let text = if needs_bake {
             // Automation cannot be flattened to SfxLayer. Bake the exact result
             // and point `baked` at it; the layer parameters stay in the file.
             let samples = synth::render_patch(patch, patch.rate);
@@ -383,6 +385,34 @@ mod tests {
         };
         let back = tres::parse_patch(&patch_tres(&patch)).expect("parse");
         assert!((back.layers[0].freq_start - 880.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn sample_patches_bake_for_tres_export() {
+        use crate::model::{Patch, Wave};
+        let root = temp_project_root("sample-export");
+        let mut project = crate::model::Project::demo("sample-export");
+        let mut patch = Patch::new_layer("sample", Wave::Sample);
+        let layer = &mut patch.layers[0];
+        layer.duration = 4.0 / 48_000.0;
+        layer.gain = 1.0;
+        layer.attack = 0.0;
+        layer.decay = 0.0;
+        layer.sustain = 1.0;
+        layer.release = 0.0;
+        layer.sample_loop = true;
+        layer.sample_path = "audio/sfx/samples/x.wav".into();
+        layer.sample_data = Some(crate::wav::SampleData {
+            rate: 48_000,
+            samples: vec![0.0, 0.5, -0.5, 1.0],
+        });
+        project.patches.push(patch);
+
+        export_tres(&project, &root).expect("tres");
+        assert!(root.join("audio/baked/sample.wav").exists());
+        let text = std::fs::read_to_string(root.join("audio/sfx/sample.tres")).unwrap();
+        assert!(text.contains("baked = ExtResource"), "{text}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

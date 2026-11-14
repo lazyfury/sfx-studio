@@ -66,6 +66,8 @@ pub enum Action {
     ResetPatterns,
     AddClip,
     DeleteClip,
+    LoadSample,
+    ToggleSampleLoop,
     Undo,
     Redo,
     AutomationLane(AutomationKind),
@@ -212,6 +214,7 @@ fn action_icon(action: Action) -> Option<Icon> {
         Action::Bake => Some(Icon::Package),
         Action::Tres => Some(Icon::FileCode),
         Action::AddLayer | Action::AddClip => Some(Icon::Plus),
+        Action::LoadSample => Some(Icon::FolderOpen),
         Action::Play => Some(Icon::Play),
         Action::Stop => Some(Icon::Stop),
         Action::Loop => Some(Icon::Loop),
@@ -249,6 +252,8 @@ fn action_tip(action: Action) -> &'static str {
         Action::DeleteLayer => "删除图层 · Delete layer",
         Action::AddClip => "添加 Clip · Add clip",
         Action::DeleteClip => "删除 Clip · Delete clip",
+        Action::LoadSample => "载入 WAV 采样 · Load sample",
+        Action::ToggleSampleLoop => "采样循环 · Sample loop",
         Action::SetWave(_) => "切换波形 · Wave",
         Action::SetFilter(_) => "切换滤波器 · Filter",
         Action::SetEnv(_) => "切换包络 · Envelope",
@@ -446,6 +451,34 @@ mod tests {
             hit(&state, &layout, layout.category_rect.center()),
             Some(Hit::CategoryFilter)
         );
+    }
+
+    #[test]
+    fn sample_layer_exposes_load_pitch_and_loop() {
+        let mut state = State::new();
+        if let Some(layer) = state.layer_mut() {
+            layer.wave = Wave::Sample;
+            layer.sample_path = "audio/sfx/samples/x.wav".into();
+        }
+        let items = inspector_items(&state);
+        let mut has_load = false;
+        let mut has_loop = false;
+        let mut has_pitch = false;
+        for item in &items {
+            match item {
+                RawItem::Options { options, .. } => {
+                    has_load |= options
+                        .iter()
+                        .any(|(_, action, _)| *action == Action::LoadSample);
+                }
+                RawItem::Toggle { action, .. } => {
+                    has_loop |= *action == Action::ToggleSampleLoop;
+                }
+                RawItem::Param { label, .. } => has_pitch |= label == "PITCH",
+                _ => {}
+            }
+        }
+        assert!(has_load && has_loop && has_pitch);
     }
 
     #[test]

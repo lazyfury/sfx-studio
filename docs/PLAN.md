@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁与 0015 48k 预览/重采样/设备重连；采样波形与跨端 golden 见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连与 0016 Rust 端采样波形；跨端 golden 见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -79,13 +79,13 @@
 
 ## 2. 本轮验收证据
 
-审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`、`0008-timeline-zoom-and-library.md`、`0009-module-split.md`、`0010-background-preview-render.md`、`0011-state-field-groups.md`、`0012-stable-ids.md`、`0013-id-based-selection.md`、`0014-rt-audio-callback.md`、`0015-48k-resample-reconnect.md`（status: approved，source_hash 匹配）。
+审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`、`0008-timeline-zoom-and-library.md`、`0009-module-split.md`、`0010-background-preview-render.md`、`0011-state-field-groups.md`、`0012-stable-ids.md`、`0013-id-based-selection.md`、`0014-rt-audio-callback.md`、`0015-48k-resample-reconnect.md`、`0016-sample-waveform.md`（status: approved，source_hash 匹配）。
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                 # 73 passed
-cargo run -- --selfcheck   # 2 frames / 2552 commands / 118 text runs
+cargo test                 # 79 passed
+cargo run -- --selfcheck   # 2 frames / 2555 commands / 119 text runs
 ./scripts/preflight.sh
 ./scripts/review_gate.sh   # 需要 docs/reviews/*.md 中 approved + 匹配 source_hash
 ```
@@ -99,7 +99,7 @@ cargo run -- --selfcheck   # 2 frames / 2552 commands / 118 text runs
 
 ## 3. Backlog（下一迭代，按依赖排序）
 
-1. **采样波形**：`Wave::Sample` + WAV 导入 + `sample_pitch/loop`；需要 schema v4（采样路径）与 Godot `.tres` 往返设计。
+1. **采样 `.tres` 往返**：解析/写入 `AudioStreamWAV` 子资源，或导入 `baked` WAV 作为 Sample 层。
 2. **跨语言一致性**：PCG32 测试向量 + Godot fixtures/golden（需 headless Godot 工程）。
 3. **音频 RT 余项**：设备重连的硬件回归、退役槽满时的回调 drop 兜底、bake 端统一 48k/重采样。
 4. **i18n 与可访问性**：文案表、焦点遍历、键盘可达全部操作。
@@ -233,7 +233,17 @@ cargo run -- --selfcheck   # 2 frames / 2552 commands / 118 text runs
 - `docs/PARITY.md` D6/D7 更新为「预览固定 48k + 设备重采样，bake 仍独立」。
 - 新增 2 条音频测试（重采样插值、退役 buffer 交还）；`cargo test` 73 passed。
 
-## 19. Definition of Done（每个 PR 必须满足）
+## 19. 本轮增量（0016）
+
+- 新增 `src/wav.rs`：RIFF/WAVE 读取，支持 PCM16 / F32、单声道/立体声，单声道归一化；拒绝未知格式。
+- `Wave::Sample`（Godot id 9）；`Layer` 增加 `sample_path` / `sample_pitch` / `sample_loop` 与 `#[serde(skip)] sample_data`。
+- `Project::load_samples(root)` 在打开工程时按路径解码（相对路径基于工程根目录）；失败进入 warnings。
+- `synth::render_sample` 对齐 Godot `_build_sample`：线性插值、循环 wrap、源率/目标率比 + `2^(pitch/12)`、ADSR、gain。
+- 检查器新增 SAMPLE 段：`LOAD WAV…`（rfd 选择 + 复制到 `audio/sfx/samples/`）、`PITCH`、`LOOP`；`Action::LoadSample` / `ToggleSampleLoop`。
+- `PROJECT_VERSION` 3 → 4；`docs/FORMAT.md` 增加字段与迁移说明；`.tres` 导出的采样 patch 自动整段 bake（Godot 侧直接播放 baked）。
+- 新增 6 条测试：WAV 读写、采样渲染循环/变调、JSON 字段、`load_samples`、采样导出 bake、检查器控件；`cargo test` 79 passed。
+
+## 20. Definition of Done（每个 PR 必须满足）
 
 - [ ] `docs/PLAN.md` 对应条目状态更新。
 - [ ] `scripts/preflight.sh` 全绿（fmt / clippy -D warnings / test / selfcheck）。

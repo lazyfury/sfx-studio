@@ -77,6 +77,7 @@ pub(crate) fn load_folder(folder: &Path) -> Result<(Project, Vec<String>), Strin
         }
     };
     project.migrate();
-    let warnings = project.validate();
+    let mut warnings = project.validate();
+    warnings.extend(project.load_samples(folder));
     Ok((project, warnings))
 }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub const PROJECT_FILE: &str = "sfx.project.json";
 
 /// Current on-disk project schema. Bump this whenever a migration is needed.
-pub const PROJECT_VERSION: u32 = 3;
+pub const PROJECT_VERSION: u32 = 4;
 
 /// Current DSP formula generation. Reserved for versioned render dispatch.
 pub const DSP_VERSION: u32 = 1;
@@ -36,6 +36,7 @@ pub enum Wave {
     Arp,
     Fm,
     Pluck,
+    Sample,
     Kick,
     Snare,
     Hat,
@@ -43,7 +44,7 @@ pub enum Wave {
 }
 
 impl Wave {
-    pub const ALL: [Wave; 13] = [
+    pub const ALL: [Wave; 14] = [
         Wave::Sine,
         Wave::Triangle,
         Wave::Saw,
@@ -53,6 +54,7 @@ impl Wave {
         Wave::Arp,
         Wave::Fm,
         Wave::Pluck,
+        Wave::Sample,
         Wave::Kick,
         Wave::Snare,
         Wave::Hat,
@@ -70,6 +72,7 @@ impl Wave {
             Wave::Arp => "ARP",
             Wave::Fm => "FM",
             Wave::Pluck => "PLUCK",
+            Wave::Sample => "SAMPLE",
             Wave::Kick => "KICK",
             Wave::Snare => "SNARE",
             Wave::Hat => "HAT",
@@ -100,6 +103,7 @@ impl Wave {
             Wave::Arp => 6,
             Wave::Fm => 7,
             Wave::Pluck => 8,
+            Wave::Sample => 9,
             Wave::Kick => 10,
             Wave::Snare => 11,
             Wave::Hat => 12,
@@ -117,7 +121,10 @@ impl Wave {
             5 => Wave::Noise,
             6 => Wave::Arp,
             7 => Wave::Fm,
-            8 | 9 => Wave::Pluck,
+            8 => Wave::Pluck,
+            // Godot SAMPLE layers embed an AudioStreamWAV; the Rust client
+            // imports them as Pluck (see docs/PARITY.md D4).
+            9 => Wave::Pluck,
             10 => Wave::Kick,
             11 => Wave::Snare,
             12 => Wave::Hat,
@@ -461,6 +468,16 @@ pub struct Layer {
     pub drum_snap: f32,
     /// Empty = one implicit clip using `delay` / `duration` / layer gain.
     pub clips: Vec<Clip>,
+    /// WAV path for `Wave::Sample` (relative to the project root when copied).
+    #[serde(default)]
+    pub sample_path: String,
+    #[serde(default)]
+    pub sample_pitch: f32,
+    #[serde(default)]
+    pub sample_loop: bool,
+    /// Decoded samples; loaded from `sample_path` on open, never serialized.
+    #[serde(skip)]
+    pub sample_data: Option<crate::wav::SampleData>,
 }
 
 impl Default for Layer {
@@ -468,6 +485,10 @@ impl Default for Layer {
         Self {
             id: 0,
             wave: Wave::Sine,
+            sample_path: String::new(),
+            sample_pitch: 0.0,
+            sample_loop: false,
+            sample_data: None,
             enabled: true,
             delay: 0.0,
             duration: 0.15,
@@ -512,6 +533,10 @@ impl Layer {
     pub fn new(wave: Wave) -> Self {
         Self {
             id: 0,
+            sample_path: String::new(),
+            sample_pitch: 0.0,
+            sample_loop: false,
+            sample_data: None,
             wave,
             ..Default::default()
         }
@@ -1158,6 +1183,34 @@ impl Project {
         self.next_id = next.max(self.next_id);
     }
 
+    /// Decode every `sample_path` into `sample_data`. Paths are resolved
+    /// relative to `root` (the project folder); absolute paths still work.
+    pub fn load_samples(&mut self, root: &Path) -> Vec<String> {
+        let mut warnings = Vec::new();
+        for patch in &mut self.patches {
+            for layer in &mut patch.layers {
+                layer.sample_data = None;
+                if layer.sample_path.is_empty() {
+                    continue;
+                }
+                let path = Path::new(&layer.sample_path);
+                let resolved = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    root.join(path)
+                };
+                match crate::wav::load(&resolved) {
+                    Ok(data) => layer.sample_data = Some(data),
+                    Err(error) => warnings.push(format!(
+                        "{}: sample {} unreadable ({error})",
+                        patch.name, layer.sample_path
+                    )),
+                }
+            }
+        }
+        warnings
+    }
+
     pub fn next_patch_name(&self) -> String {
         let mut index = self.patches.len() + 1;
         loop {
@@ -1524,6 +1577,7 @@ pub enum LayerField {
     FmDecay,
     PluckDamping,
     PluckBrightness,
+    SamplePitch,
     DrumTone,
     DrumSnap,
     Seed,
@@ -1564,6 +1618,7 @@ impl LayerField {
             Self::FmDecay => FieldSpec::new("FM DECAY", "", 0.5, 30.0, 0.1, Linear),
             Self::PluckDamping => FieldSpec::new("DAMPING", "", 0.9, 0.9999, 0.0001, Linear),
             Self::PluckBrightness => FieldSpec::new("BRIGHT", "", 0.0, 1.0, 0.001, Linear),
+            Self::SamplePitch => FieldSpec::new("PITCH", "st", -24.0, 24.0, 0.1, Linear),
             Self::DrumTone => FieldSpec::new("TONE", "", 0.25, 2.0, 0.01, Linear),
             Self::DrumSnap => FieldSpec::new("SNAP", "", 0.0, 2.0, 0.01, Linear),
             Self::Seed => FieldSpec::new("SEED", "", 0.0, 99_999_999.0, 1.0, Linear),
@@ -1620,6 +1675,7 @@ impl LayerField {
             Self::FmDecay => layer.fm_decay,
             Self::PluckDamping => layer.pluck_damping,
             Self::PluckBrightness => layer.pluck_brightness,
+            Self::SamplePitch => layer.sample_pitch,
             Self::DrumTone => layer.drum_tone,
             Self::DrumSnap => layer.drum_snap,
             Self::Seed => layer.seed as f32,
@@ -1662,6 +1718,7 @@ impl LayerField {
             Self::FmDecay => layer.fm_decay = value.max(0.5),
             Self::PluckDamping => layer.pluck_damping = value.clamp(0.9, 0.9999),
             Self::PluckBrightness => layer.pluck_brightness = value.clamp(0.0, 1.0),
+            Self::SamplePitch => layer.sample_pitch = value.clamp(-24.0, 24.0),
             Self::DrumTone => layer.drum_tone = value.max(0.25),
             Self::DrumSnap => layer.drum_snap = value.max(0.0),
             Self::Seed => layer.seed = value.max(0.0) as u32,
@@ -1804,6 +1861,8 @@ pub enum LayerRowSpec {
     ToneEnvOptions,
     EnvShapeOptions,
     FilterOptions,
+    SampleFile,
+    SampleLoop,
 }
 
 /// A row plus the predicate that decides whether it applies to a layer.
@@ -1945,6 +2004,15 @@ static PLUCK_SECTIONS: &[LayerSectionSpec] = &[LayerSectionSpec {
     ],
 }];
 
+static SAMPLE_SECTIONS: &[LayerSectionSpec] = &[LayerSectionSpec {
+    title: "SAMPLE",
+    rows: &[
+        row(LayerRowSpec::SampleFile, always),
+        row(LayerRowSpec::Field(LayerField::SamplePitch), always),
+        row(LayerRowSpec::SampleLoop, always),
+    ],
+}];
+
 static DRUM_SECTIONS: &[LayerSectionSpec] = &[LayerSectionSpec {
     title: "DRUM",
     rows: &[
@@ -1965,6 +2033,7 @@ pub fn layer_sections(wave: Wave) -> &'static [LayerSectionSpec] {
             Wave::Arp => ARP_SECTIONS,
             Wave::Fm => FM_SECTIONS,
             Wave::Pluck => PLUCK_SECTIONS,
+            Wave::Sample => SAMPLE_SECTIONS,
             _ if wave.is_drum() => DRUM_SECTIONS,
             _ => TONE_SECTIONS,
         }
@@ -2187,6 +2256,46 @@ mod tests {
             ..Clip::default()
         };
         assert!((clip.cutoff_at(0.05) - 5100.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn sample_fields_roundtrip_and_load() {
+        let root = std::env::temp_dir().join(format!(
+            "sfx-studio-sample-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("audio/sfx/samples")).unwrap();
+        let wav_path = root.join("audio/sfx/samples/click.wav");
+        crate::synth::write_wav(&wav_path, &[0.0, 0.5, -0.5], 22_050).unwrap();
+
+        let mut project = Project::demo("samples");
+        let layer = &mut project.patches[0].layers[0];
+        layer.wave = Wave::Sample;
+        layer.sample_path = "audio/sfx/samples/click.wav".into();
+        layer.sample_pitch = 7.0;
+        layer.sample_loop = true;
+
+        let text = serde_json::to_string_pretty(&project).unwrap();
+        let back: Project = serde_json::from_str(&text).unwrap();
+        let layer = &back.patches[0].layers[0];
+        assert_eq!(layer.sample_path, "audio/sfx/samples/click.wav");
+        assert!((layer.sample_pitch - 7.0).abs() < 0.001);
+        assert!(layer.sample_loop);
+        assert!(layer.sample_data.is_none());
+
+        let warnings = project.load_samples(&root);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let data = project.patches[0].layers[0]
+            .sample_data
+            .as_ref()
+            .expect("sample decoded");
+        assert_eq!(data.rate, 22_050);
+        assert_eq!(data.samples.len(), 3);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

@@ -1454,6 +1454,23 @@ pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
                         });
                     }
                     LayerRowSpec::FilterOptions => items.push(filter_options(layer.filter)),
+                    LayerRowSpec::SampleFile => {
+                        items.push(RawItem::Options {
+                            label: "WAV".into(),
+                            columns: 1,
+                            options: vec![("LOAD WAV…".into(), Action::LoadSample, false)],
+                        });
+                        items.push(RawItem::Note(if layer.sample_path.is_empty() {
+                            "no sample loaded".into()
+                        } else {
+                            layer.sample_path.clone()
+                        }));
+                    }
+                    LayerRowSpec::SampleLoop => items.push(RawItem::Toggle {
+                        label: "LOOP".into(),
+                        value: layer.sample_loop,
+                        action: Action::ToggleSampleLoop,
+                    }),
                 }
             }
         }
@@ -1623,6 +1640,7 @@ fn wave_color(wave: Wave) -> Color {
         Wave::Arp => hex(0x82E2A6),
         Wave::Fm => hex(0xFF9E64),
         Wave::Pluck => hex(0x9CDCFE),
+        Wave::Sample => hex(0x6EE7D8),
         Wave::Kick => hex(0xF78C6C),
         Wave::Snare => hex(0xE6C889),
         Wave::Hat => hex(0xB8C7DA),

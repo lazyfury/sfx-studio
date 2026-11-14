@@ -8,7 +8,7 @@
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "next_id": 128,
   "name": "my_game",
   "patches": [],
@@ -39,6 +39,8 @@
 
 ### Layer / Clip / Automation
 
+- `sample_path` / `sample_pitch` / `sample_loop`：`Wave::Sample` 的 WAV 路径与变调/循环参数。`sample_data`（解码后的单声道样本）不写入 JSON，加载工程时重新读取；相对路径按工程根目录解析。
+- `.tres` 导出的采样 patch 会整段 bake 到 `audio/baked/*.wav`（避免 Godot 侧嵌入 `AudioStreamWAV`）；`.tres` 导入仍把 `SAMPLE` 映射为 `Pluck`，不逐层往返采样。
 - 所有数值在加载时 `validate()`：NaN/Inf 修复、范围 clamp、数组上限、重名去重。
 - `tone_env`：`adsr`（默认）或 `exp`；`exp_decay` 范围 0.5–30。
 - `clip.start` 0–8s、`clip.duration` 0.005–3s、每层最多 64 个 clip。
@@ -127,5 +129,6 @@ audio/
 | 1 | 无 `version` 字段的初始格式。 |
 | 2 | 增加 `version`、`Patch.dsp_version`、`Layer.tone_env/exp_decay`；加载时自动迁移。 |
 | 3 | 增加稳定 ID：`Project.next_id`、`Patch/Layer/Clip.id`；缺失/重复时自动分配，加载时迁移。 |
+| 4 | 增加 `Wave::Sample` 的 `Layer.sample_path/sample_pitch/sample_loop`；采样数据不入 JSON，加载时按路径解码。 |
 
 迁移函数：`model::Project::migrate`。新增字段一律 `#[serde(default)]`，保证旧文件可读。
