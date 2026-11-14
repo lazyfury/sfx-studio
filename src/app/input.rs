@@ -606,6 +606,9 @@ impl AppLogic for SfxLogic {
             self.request_preview(rate);
         }
         if let Some(audio) = &self.audio {
+            if audio.take_device_errors() > 0 {
+                self.state.toast("audio device error · playback stopped");
+            }
             let playing = audio.is_playing();
             if playing {
                 let mut time = audio.position();

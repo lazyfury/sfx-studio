@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3 与 0013 ID 化选区；音频 RT 化见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区与 0014 音频回调去锁；48k 固定渲染/重采样与设备重连见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -79,12 +79,12 @@
 
 ## 2. 本轮验收证据
 
-审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`、`0008-timeline-zoom-and-library.md`、`0009-module-split.md`、`0010-background-preview-render.md`、`0011-state-field-groups.md`、`0012-stable-ids.md`、`0013-id-based-selection.md`（status: approved，source_hash 匹配）。
+审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`、`0008-timeline-zoom-and-library.md`、`0009-module-split.md`、`0010-background-preview-render.md`、`0011-state-field-groups.md`、`0012-stable-ids.md`、`0013-id-based-selection.md`、`0014-rt-audio-callback.md`（status: approved，source_hash 匹配）。
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                 # 68 passed
+cargo test                 # 71 passed
 cargo run -- --selfcheck   # 2 frames / 2552 commands / 118 text runs
 ./scripts/preflight.sh
 ./scripts/review_gate.sh   # 需要 docs/reviews/*.md 中 approved + 匹配 source_hash
@@ -99,7 +99,7 @@ cargo run -- --selfcheck   # 2 frames / 2552 commands / 118 text runs
 
 ## 3. Backlog（下一迭代，按依赖排序）
 
-1. **音频 RT 化**：无锁 ring buffer、设备热插拔、48k 固定渲染 + `rubato` 重采样、欠载统计。
+1. **音频 RT 收尾**：48k 固定渲染 + 重采样、欠载统计、设备热插拔/自动重连、回调内不 deallocate（退役 buffer 由 UI 回收）。
 2. **跨语言一致性**：PCG32 测试向量、相位回绕、f32/f64 策略、容差 golden（见 `docs/PARITY.md`）。
 3. **采样波形**：`Wave::Sample` + WAV 导入 + `sample_pitch/loop` 导入导出。
 4. **i18n 与可访问性**：文案表、焦点遍历、键盘可达全部操作。
@@ -215,7 +215,15 @@ cargo run -- --selfcheck   # 2 frames / 2552 commands / 118 text runs
 - `select_patch` 在新 patch 中找不到原 layer ID 时，按之前的 layer 槽位 clamp 选择，保持旧交互习惯。
 - 新增 2 条测试：重排后选区仍指向同一 ID、删除选中 patch 后按邻居 ID 选中；`cargo test` 68 passed。
 
-## 17. Definition of Done（每个 PR 必须满足）
+## 17. 本轮增量（0014）
+
+- **音频回调去锁**：去掉 `Mutex<Playback>`。回调持有自己的 `Playback`（samples/pos/loop/fade），只通过 `Arc<Mutex<Option<Command>>>` 的单槽传递 `Play/Stop`，并用 `try_lock` 读取，回调永不阻塞。
+- `AudioEngine::play/stop` 只做一次短暂加锁写命令，不阻塞音频线程；`position` / `is_playing` 仍为原子读取。
+- **设备错误处理**：cpal error callback 累加 `device_errors`、置 `playing=false` 并标记 `alive=false`；UI 下一帧读取计数并 toast「audio device error · playback stopped」，`play()` 在设备失联时直接拒绝启动。
+- `Playback::apply` 可测试化；新增 3 条音频测试（按帧重启、Stop 渐隐、命令槽 try_lock 读取），旧循环/渐隐测试保留。
+- 本轮不包含：48k 固定渲染 + 重采样、回调内零 deallocation、设备自动重连、欠载统计。
+
+## 18. Definition of Done（每个 PR 必须满足）
 
 - [ ] `docs/PLAN.md` 对应条目状态更新。
 - [ ] `scripts/preflight.sh` 全绿（fmt / clippy -D warnings / test / selfcheck）。
