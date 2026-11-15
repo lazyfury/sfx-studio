@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::app::{LibraryMode, State, Tab};
 use crate::model::{self, Project};
+use crate::music_bank::MusicBank;
 use crate::presets::PresetBank;
 use crate::tres;
 
@@ -15,6 +16,8 @@ pub(crate) fn open_folder(state: &mut State, folder: PathBuf) -> Result<Vec<Stri
     state.doc.project = project;
     state.doc.root = Some(folder.clone());
     warnings.extend(state.presets.load_project(&folder));
+    warnings.extend(state.music_bank.load_project(&folder));
+    state.audio_bank.load_project(&folder);
     state.view.selected_patch = None;
     state.view.selected_layer = None;
     state.view.selected_clip = None;
@@ -25,6 +28,12 @@ pub(crate) fn open_folder(state: &mut State, folder: PathBuf) -> Result<Vec<Stri
     state.view.layer_scroll = 0;
     state.view.library_mode = LibraryMode::Project;
     state.view.selected_preset = None;
+    state.view.selected_library = None;
+    state.view.kind_filter = None;
+    state.view.kind_menu_open = false;
+    state.view.library_scroll = 0;
+    state.view.folded_folders.clear();
+    state.view.kind_filter = None;
     state.view.category_filter = None;
     state.view.favorites_only = false;
     state.view.search.clear();
@@ -93,6 +102,11 @@ pub(crate) fn create_project(folder: &Path) -> Result<(Project, Vec<String>), St
         .and_then(|name| name.to_str())
         .unwrap_or("project");
     let mut project = Project::starter(name);
+    // Start the MUSIC tab on the same demo arrangement that is written to
+    // `<project>/music/`, so the file library and the current bed agree.
+    if let Some(track) = crate::demo::tracks().first() {
+        project.music = track.music.clone();
+    }
     let warnings = project.validate();
     model::save_project(folder, &project).map_err(|error| error.to_string())?;
     // Preset bank = the hand-built demo sounds + the jsfxr-style builtin
@@ -102,7 +116,36 @@ pub(crate) fn create_project(folder: &Path) -> Result<(Project, Vec<String>), St
     if let Err(error) = PresetBank::write_presets(folder, &presets) {
         return Err(format!("presets: {error}"));
     }
+    let demo_tracks = crate::demo::tracks();
+    let tracks: Vec<(&str, &model::Music)> = demo_tracks
+        .iter()
+        .map(|track| (track.key, &track.music))
+        .collect();
+    if let Err(error) = MusicBank::write_tracks(folder, &tracks) {
+        return Err(format!("music: {error}"));
+    }
     Ok((project, warnings))
+}
+
+/// Open a project folder, bootstrapping a new project when the directory is
+/// empty. Used by the interactive picker / OPEN so a freshly created folder
+/// gets `sfx.project.json`, category presets and demo music without the CLI.
+pub(crate) fn open_or_create(
+    state: &mut State,
+    folder: PathBuf,
+) -> Result<(Vec<String>, bool), String> {
+    if !folder.join(model::PROJECT_FILE).exists() && directory_is_empty(&folder) {
+        create_project(&folder)?;
+        let warnings = open_folder(state, folder)?;
+        return Ok((warnings, true));
+    }
+    Ok((open_folder(state, folder)?, false))
+}
+
+fn directory_is_empty(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false)
 }
 
 /// Load `sfx.project.json` when present, otherwise import `audio/sfx/*.tres`.

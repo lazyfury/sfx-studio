@@ -73,28 +73,37 @@ cargo run -- --demo-reel --out reel.wav
 
 ## Workflow
 
-- **Library** — `PROJECT | PRESETS` segmented control in the left title strip.
-  PROJECT lists the sounds stored in `sfx.project.json`; PRESETS is the
-  project-local library at `<project>/presets/*.json`. Search (`/`), category
-  filter (`ALL` dropdown / `C`), favorites filter (star) and the scrollbar work
-  in both modes. Clicking a preset auditions it without touching the project;
-  the star (or `F`) keeps a preset favourite in
+- **Library** — one unified list for four resource kinds, with a type filter
+  (`ALL / SOUND / AUDIO / PRESET / MUSIC`) and a `×` clear button in the left
+  title strip. Presets and audio are grouped into collapsible folder headers;
+  new projects write presets into category folders (`impact/`, `laser/`, …). SOUND lists the patches in `sfx.project.json`; AUDIO scans
+  `<project>/audio/**/*.wav` (generated `baked/` and `demo/` folders are
+  skipped); PRESET is the project-local library at `<project>/presets/*.json`;
+  MUSIC lists arrangement files at `<project>/music/**/*.json` (new projects
+  seed NEON DRIVE / BOSS THEME / STAR MENU there) and clicking one loads it into
+  the current project while switching the right panel to the MUSIC inspector. Search (`/`),
+  category filter (`ALL` dropdown / `C`), favorites filter (star) and the
+  scrollbar work across the list; category/favorites only apply to
+  SOUND/PRESET rows. Clicking a preset auditions it without touching the
+  project; the star (or `F`) keeps a preset favourite in
   `<project>/presets/.favorites.json`. With a preset selected, `MENU → EXPORT
   WAV` (or `⌘/Ctrl+E`) renders it directly to a 48 kHz / 24-bit stereo WAV
-  without adding it to the project. Space auditions that preset instead of the
-  project patch. PRESETS is strictly read-only: the right inspector shows the
-  selected preset summary and project-edit controls are disabled. An empty
-  library offers `INSTALL BUILTIN PRESETS`; `MENU → SAVE AS PRESET` adds the
-  current project sound to the same library, while `RENAME PRESET` / `DELETE
-  PRESET` manage the selected row. Delete moves the JSON to
-  `presets/.trash/` instead of destroying it; `RESTORE LAST PRESET` moves the
-  newest backup back. PRESETS sample audio is decoded lazily on audition,
-  export or drag-in, so opening a project with many sample presets stays light.
-- **Preset drag-in** — drag a preset row onto the timeline to copy its layers
-  into the current patch at the drop time (5 ms snap, Shift for free
+  without adding it to the project. Space auditions the selected audio/preset
+  instead of the project patch. PRESET/AUDIO/MUSIC selections are read-only:
+  the right inspector shows the selected summary and project-edit controls are
+  disabled. An empty preset bank offers `INSTALL BUILTIN PRESETS`;
+  `MENU → SAVE AS PRESET` adds the current project sound to the same library,
+  while `RENAME PRESET` / `DELETE PRESET` manage the selected row. Delete moves
+  the JSON to `presets/.trash/` instead of destroying it; `RESTORE LAST PRESET`
+  moves the newest backup back. PRESETS sample audio is decoded lazily on
+  audition, export or drag-in, so opening a project with many sample presets
+  stays light.
+- **Preset / audio drag-in** — drag a preset row onto the timeline to copy its
+  layers into the current patch at the drop time (5 ms snap, Shift for free
   placement); drop it on the left panel to copy it into the project library.
-  A 4 px threshold keeps click-to-audition separate from dragging. Project
-  patches stay click-to-open; only PRESETS rows start a drag.
+  Drag an AUDIO row onto the timeline to insert one `SAMPLE` layer anchored at
+  the drop time. A 4 px threshold keeps click-to-audition separate from
+  dragging. SOUND rows stay click-to-open; only AUDIO/PRESET rows start a drag.
 - **Sound** — waveform, play/stop/loop, randomize, A/B/C variations, favorite;
   `CURVE` layers add an editable single-cycle canvas and a drawable amplitude
   curve (drag to draw, double-click to reset); `SAMPLE` layers load a WAV with
@@ -123,15 +132,15 @@ cargo run -- --demo-reel --out reel.wav
 
 | Key | Action |
 | --- | --- |
-| Space | Play / pause (PROJECT) · audition selected preset (PRESETS) |
+| Space | Play / pause project · audition selected audio/preset |
 | / | Focus search |
 | 1–8 | Trigger patch 1–8 |
 | R | Randomize current sound |
 | V | Create A/B/C variations |
-| F | Favorite patch (PROJECT) / selected preset (PRESETS) |
+| F | Favorite selected sound / preset |
 | ↑ / ↓ | Move through the active library |
 | ← / → | Select previous / next layer |
-| C | Cycle category filter |
+| C | Cycle category filter (SOUND/PRESET) |
 | L | Toggle loop |
 | ⌘/Ctrl+Z / ⇧⌘Z | Undo / redo |
 | ⌘/Ctrl+S | Save project |
@@ -152,17 +161,33 @@ project plus an internal preset library:
 ```text
 <project>/
 ├── sfx.project.json
-├── presets/              # project-local presets, one Patch JSON per file
-│   ├── laser.json        # 11 hand-built demo sounds
-│   ├── pickup_coin.json  # + 11 jsfxr-style builtin families
+├── presets/              # project-local presets, grouped by category folder
+│   ├── impact/           # 11 hand-built demo sounds + 11 jsfxr families
+│   ├── laser/            # (files are distributed across these folders)
+│   ├── ui/
+│   ├── movement/
+│   ├── magic/
+│   ├── environment/
+│   ├── combat/
 │   ├── .favorites.json   # optional UI favourites
-│   └── .trash/           # deleted preset JSON backups
-└── audio/...
+│   └── .trash/           # deleted preset JSON backups (folder structure kept)
+├── music/                # one Music JSON per arrangement
+│   ├── neon_drive.json
+│   ├── boss_theme.json
+│   └── star_menu.json
+├── audio/
+│   ├── sfx/samples/      # WAV assets listed in the AUDIO library
+│   ├── baked/            # generated by BAKE GODOT (skipped by AUDIO)
+│   └── demo/             # generated demo pack audio (skipped by AUDIO)
+└── ...
 ```
 
-The PRESETS tab is read-only with respect to sound parameters but supports
-favourites, rename, delete and export; it always reflects the currently open
-project, so switching projects switches the library. Preset JSON may reference
+PRESET, AUDIO and MUSIC rows are read-only with respect to sound parameters.
+PRESETS support favourites, rename, delete and export; the preset bank always
+reflects the currently open project, so switching projects switches the
+library. AUDIO lists the WAV files already inside the project (the `LOAD WAV`
+command copies external files there); dragging one to the timeline creates a
+SAMPLE layer. Preset JSON may reference
 sample layers through `sample_path`; they are resolved relative to the project
 root when a preset is auditioned, exported or dragged in, exactly like project
 patches. JSON parsing/validation stays eager, PCM decoding stays lazy. An old project without a preset bank
@@ -191,8 +216,9 @@ overwritten.
 
 `src/demo.rs` ships three small arrangements — `NEON DRIVE` (138 BPM),
 `BOSS THEME` (168 BPM) and `STAR MENU` (92 BPM) — plus sound-effect cues placed
-over the music. The MUSIC inspector has a `DEMO TRACKS` section that loads any
-of them into the current project (undoable). `--demo <new-dir>` writes a
+over the music. New projects write them to `<project>/music/*.json`, where the
+left MUSIC library lists and loads them; the MUSIC inspector also keeps a
+`DEMO TRACKS` section for quick access. `--demo <new-dir>` writes a
 self-contained pack:
 
 ```text

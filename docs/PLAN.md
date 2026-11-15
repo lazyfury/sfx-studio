@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节、0022 预设直接导出 WAV 见第 24 节、0023 预设可用性 / 读-编辑边界 / 采样内存见第 25 节、0024 预设文件生命周期 / 采样预设 / 和弦高亮见第 26 节、0025 预设采样懒加载 / .trash 恢复见第 27 节、0026 右侧检查器滚动修复 / 0027 滚轮方向对齐见第 28/29 节、0028 参数中文副标题 / 波形指南见第 30 节、0029 CURVE 通用波形 / 曲线编辑器见第 31 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节、0022 预设直接导出 WAV 见第 24 节、0023 预设可用性 / 读-编辑边界 / 采样内存见第 25 节、0024 预设文件生命周期 / 采样预设 / 和弦高亮见第 26 节、0025 预设采样懒加载 / .trash 恢复见第 27 节、0026 右侧检查器滚动修复 / 0027 滚轮方向对齐见第 28/29 节、0028 参数中文副标题 / 波形指南见第 30 节、0029 CURVE 通用波形 / 曲线编辑器见第 31 节、0030 统一 Library 四类资源见第 32 节、0031 预设文件夹 / 折叠目录 / music 点击见第 33 节、0033 MUSIC 文件库见第 34 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -682,3 +682,103 @@ cargo run -- --selfcheck
   `Hit::Curve`；拖动绘制与双击重置共享同一个 undo 事务。
 - CURVE patch 的 `.tres` 导出整段 bake 到 `audio/baked/curve.wav`。
 - `./scripts/preflight.sh` 通过；工程 schema 仍为 v4。
+
+## 32. 本轮增量（0030）— 统一 Library：sound / audio / preset / music
+
+目标：把左栏从「PROJECT | PRESETS 两个数据源」改成统一资源库，用类型下拉和
+清除按钮管理四类条目；不改变工程 schema、DSP、导出格式。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0030-1 | 统一条目 | 新增 `src/library.rs`：`LibraryKind::{Sound,Audio,Preset,Music}`、`LibraryKey`、`LibraryEntry`；行身份为 `Copy` 的小枚举，可直接进入 `Hit`/`Drag` | `library_keys_keep_their_kind` |
+| 0030-2 | 数据来源 | Sound = `Project.patches`；Audio = `<project>/audio/**/*.wav`（跳过 `baked/`、`demo/`、隐藏文件）；Preset = `presets/*.json`；Music = `<project>/music/**/*.json`（0033 起改为真实文件，见第 34 节） | `audio_bank_scans_wavs_but_skips_generated_folders` |
+| 0030-3 | 统一筛选 | `ViewState.kind_filter/kind_menu_open/selected_library/library_scroll`；类型下拉 `ALL/SOUND/AUDIO/PRESET/MUSIC`，保留分类、收藏、搜索；`×` 清除全部筛选 | `unified_library_lists_all_four_kinds_and_filters_them`、`kind_menu_lists_every_resource_and_clear_is_clickable` |
+| 0030-4 | 行行为 | Sound 选中；Preset 试听/拖入（保留原行为）；Audio 试听/拖入时间线生成 `Wave::Sample` 层；Music 切到 MUSIC tab / 载入 demo track（可撤销） | `dropping_audio_on_the_timeline_creates_a_sample_layer`、`music_rows_load_the_project_or_a_demo_track` |
+| 0030-5 | 只读边界 | 选中 Audio/Music 时菜单编辑命令按只读处理；Preset 仍沿用原只读规则；WAV 导出仅对 Sound/Preset 可用 | `preset_mode_disables_project_only_actions` |
+| 0030-6 | 工程打开 | `open_folder` 重新扫描 `audio/`，重置统一筛选/选区；`LOAD WAV` 复制后刷新 audio bank | 代码路径 + `opening_a_project_loads_its_internal_presets` |
+| 0030-7 | 自检 | headless required labels 改为 `ALL`/`SND`，不再要求已移除的 `PROJECT`/`PRESETS` 模式按钮 | `--selfcheck` |
+
+非目标：把时间线 `Clip` 变成独立库条目（需要新资源模型）；多首 music 的
+工程级列表（需要 schema v5 / `music/` 目录）；外部 Finder 文件拖放。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-15）：
+
+- `cargo test` 162 passed；`--selfcheck` 2 frames / 3947 commands / 191 text runs。
+- 左栏统一列出四类条目，类型下拉 5 项（ALL + 4 类），`×` 清空类型/分类/
+  搜索/收藏；分类与收藏只作用于 Sound/Preset。
+- 工程 schema 仍为 v4；DSP、`--bake/--dump/--export` 未改。
+
+## 33. 本轮增量（0031）— 预设文件夹 / 折叠目录 / music 点击
+
+目标：在统一 Library 上增加文件夹分组；新工程默认把预设写入分类目录；修复
+music 行点击不切换/不载入的问题。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0031-1 | 预设目录 | `Category::folder()` 定义 `impact/laser/ui/...`；`PresetBank::write_presets` / `install_missing` 按分类写入子目录 | `write_presets_uses_category_folders`、`--new` 手测 |
+| 0031-2 | 递归读取 | `PresetBank::load_project` 递归扫描 `presets/**/*.json`，跳过隐藏目录/.trash；`folder(index)` 返回相对目录；旧平铺文件仍可读 | `loads_nested_preset_folders_and_reports_them` |
+| 0031-3 | 删除/恢复 | 删除保留相对路径到 `presets/.trash/<folder>/...`；`restore_latest` 递归找最新 `.bak` 并恢复原目录 | `delete_and_restore_preserve_nested_folders` |
+| 0031-4 | 折叠目录 | `ViewState.folded_folders` + `LibraryListRow::{Folder,Entry}`；layout/paint/hit 使用同一行序列；点击文件夹标题折叠/展开 | `preset_folders_group_in_the_library_and_can_collapse` |
+| 0031-5 | music 点击 | `select_music` 直接切到 `Tab::Music`；点击 music 行立即激活（demo track 载入可撤销） | `clicking_a_music_row_switches_to_the_music_tab` |
+| 0031-6 | 兼容 | 旧平铺预设不迁移；`install_missing` 仍按名称/目标路径去重；schema 仍 v4 | `install_missing_never_overwrites_existing_names_or_files` |
+
+非目标：用户自定义任意文件夹层级 UI（可读取任意相对目录，但不提供新建/移动
+文件夹命令）；多 music 列表；独立 Clip 库。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-15）：
+
+- `cargo test` 170 passed；`--selfcheck` 通过。
+- `--new` 生成 `presets/{impact,laser,ui,movement,magic,environment,combat}` 共
+  22 个预设；旧平铺预设仍能加载。
+
+## 34. 本轮增量（0033）— MUSIC 文件库 / 新目录初始化 / 交互修复
+
+目标：修正 0030/0031 的 `PROJECT MUSIC` 伪条目，改为真实 `<project>/music/*.json`
+曲目；点击 music 必须更新右侧 MUSIC 检查器；新目录在 GUI 内即可初始化预设与
+music，不依赖 CLI。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0033-1 | Music 文件库 | 新增 `src/music_bank.rs`：扫描 `<project>/music/**/*.json`，每文件一个 `Music` JSON；库不再合成 `PROJECT MUSIC` | `writes_and_loads_music_files`、`nested_music_files_report_their_folder` |
+| 0033-2 | 点击 music | 点击 MUSIC 行载入 `Project.music`（可撤销）、切到 MUSIC tab 并 bump 视图；同一文件重复点击不产生空 undo | `music_rows_load_a_project_music_file`、`clicking_a_music_row_switches_to_the_music_tab` |
+| 0033-3 | 新工程初始化 | `create_project` 写 22 个预设 + 3 个 music JSON；`open_or_create` 让 GUI/启动器/`--project` 对空目录自动 bootstrap 新工程 | `opening_a_project_loads_its_internal_presets`、`opening_an_empty_folder_bootstraps_presets_and_music`、GUI 手测 |
+| 0033-4 | Music 校验 | `Music::validate()` 供工程与独立 music 文件共用；坏 JSON 只警告并跳过 | `malformed_music_is_reported_and_skipped` |
+| 0033-5 | 兼容 | `Project.music` 仍是当前唯一音乐；旧工程没有 `music/` 时 MUSIC 库为空，不报错 | `cargo test` |
+
+非目标：多 music 同时播放/排列；music 文件重命名/删除 GUI；外部 Finder 拖放。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-15）：
+
+- `cargo test` 174 passed；`--new` 生成 22 presets + 3 music + baked audio。
+- 左栏 MUSIC 只显示 `music/` 下的真实文件；点击后右侧进入 MUSIC 检查器。
+- 空目录在 GUI `OPEN` 下自动创建工程/预设/music；不再要求命令行初始化。

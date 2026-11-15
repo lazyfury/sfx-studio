@@ -9,8 +9,8 @@ pub fn body_height(viewport: Size) -> f32 {
 
 pub fn library_capacity(viewport: Size) -> usize {
     let list_top = theme::TOP_H + LIBRARY_TOP;
-    let music_top = theme::TOP_H + body_height(viewport) - MUSIC_ROW_OFFSET;
-    (((music_top - LIBRARY_END_GAP - list_top) / LIBRARY_ROW_H).max(1.0) as usize).max(1)
+    let list_bottom = theme::TOP_H + body_height(viewport) - LIBRARY_END_GAP;
+    (((list_bottom - list_top) / LIBRARY_ROW_H).max(1.0) as usize).max(1)
 }
 
 pub fn timeline_height(viewport: Size) -> f32 {
@@ -64,8 +64,8 @@ pub struct Layout {
     pub menu_sections: Vec<(&'static str, Rect)>,
     pub tab_buttons: Vec<Button>,
     pub header_buttons: Vec<Button>,
-    pub patch_rows: Vec<(usize, Rect)>,
-    pub music_row: Rect,
+    /// Unified sound/audio/preset/music rows.
+    pub library_rows: Vec<(LibraryListRow, Rect)>,
     pub timeline: Rect,
     pub automation: Rect,
     pub waveform: Rect,
@@ -82,8 +82,10 @@ pub struct Layout {
     pub category_items: Vec<(Option<Category>, Rect)>,
     pub favorite_rect: Rect,
     pub search_rect: Rect,
-    pub library_mode_buttons: Vec<(LibraryMode, Rect)>,
-    pub preset_rows: Vec<(usize, Rect)>,
+    pub kind_rect: Rect,
+    pub kind_menu: Option<Rect>,
+    pub kind_items: Vec<(Option<LibraryKind>, Rect)>,
+    pub clear_rect: Rect,
     /// One-click recovery when a project has no `presets/` files yet.
     pub install_presets: Option<Rect>,
     pub library_scrollbar: Rect,
@@ -114,23 +116,16 @@ impl Layout {
             Size::new((viewport.width - LEFT_W - RIGHT_W).max(1.0), body_h),
         );
 
-        // PROJECT / PRESETS live in the left title strip so they do not steal
-        // a list row from the compact library.
-        let mode_w = 54.0;
-        let mode_h = 20.0;
-        let mode_y = left.top() + 3.0;
-        let presets_mode = Rect::from_min_size(
-            Vec2::new(left.right() - 10.0 - mode_w, mode_y),
-            Size::new(mode_w, mode_h),
+        // The type filter and clear button live in the left title strip so
+        // they do not steal a list row from the compact library.
+        let kind_rect = Rect::from_min_size(
+            Vec2::new(left.right() - 10.0 - 92.0, left.top() + 3.0),
+            Size::new(92.0, 20.0),
         );
-        let project_mode = Rect::from_min_size(
-            Vec2::new(presets_mode.left() - 4.0 - mode_w, mode_y),
-            Size::new(mode_w, mode_h),
+        let clear_rect = Rect::from_min_size(
+            Vec2::new(kind_rect.left() - 24.0, left.top() + 3.0),
+            Size::new(20.0, 20.0),
         );
-        let library_mode_buttons = vec![
-            (LibraryMode::Project, project_mode),
-            (LibraryMode::Presets, presets_mode),
-        ];
 
         let pad = 8.0;
         let header = Rect::from_min_size(
@@ -230,11 +225,11 @@ impl Layout {
             menu_rect = Some(rect);
         }
 
-        // Left: category filter, patch rows + MUSIC row.
+        // Left: type/category filters + unified library rows.
         let list_top = left.top() + LIBRARY_TOP;
         let category_rect = Rect::from_min_size(
             Vec2::new(left.left() + 8.0, left.top() + 34.0),
-            Size::new(118.0, 20.0),
+            Size::new(104.0, 20.0),
         );
         let favorite_rect = Rect::from_min_size(
             Vec2::new(left.right() - 32.0, left.top() + 34.0),
@@ -266,33 +261,47 @@ impl Layout {
             }
             category_menu = Some(rect);
         }
-        let music_row = Rect::from_min_size(
-            Vec2::new(left.left(), left.bottom() - MUSIC_ROW_OFFSET),
-            Size::new(left.size.width, LIBRARY_ROW_H),
-        );
+        let mut kind_menu = None;
+        let mut kind_items = Vec::new();
+        if state.view.kind_menu_open {
+            let row_h = 22.0;
+            let choices = LibraryKind::ALL.len() + 1;
+            let rect = Rect::from_min_size(
+                Vec2::new(kind_rect.left(), kind_rect.bottom() + 4.0),
+                Size::new(kind_rect.size.width, choices as f32 * row_h + 8.0),
+            );
+            let mut y = rect.top() + 4.0;
+            for kind in std::iter::once(None).chain(LibraryKind::ALL.iter().copied().map(Some)) {
+                kind_items.push((
+                    kind,
+                    Rect::from_min_size(
+                        Vec2::new(rect.left() + 4.0, y),
+                        Size::new(rect.size.width - 8.0, row_h),
+                    ),
+                ));
+                y += row_h;
+            }
+            kind_menu = Some(rect);
+        }
         let row_h = LIBRARY_ROW_H;
         let capacity = library_capacity(viewport);
         let visible_rows = state.visible_library_rows();
-        let library_start = state
-            .library_scroll()
-            .min(visible_rows.len().saturating_sub(1));
-        let mut patch_rows = Vec::new();
-        let mut preset_rows = Vec::new();
+        let library_max_start = visible_rows.len().saturating_sub(capacity);
+        let library_start = state.library_scroll().min(library_max_start);
+        let mut library_rows = Vec::new();
         for visible in 0..capacity {
-            let Some(index) = visible_rows.get(library_start + visible).copied() else {
+            let Some(row) = visible_rows.get(library_start + visible) else {
                 break;
             };
             let rect = Rect::from_min_size(
                 Vec2::new(left.left(), list_top + visible as f32 * row_h),
                 Size::new(left.size.width - 8.0, row_h),
             );
-            match state.view.library_mode {
-                LibraryMode::Project => patch_rows.push((index, rect)),
-                LibraryMode::Presets => preset_rows.push((index, rect)),
-            }
+            library_rows.push((row.clone(), rect));
         }
 
-        let install_presets = (state.view.library_mode == LibraryMode::Presets
+        let install_presets = ((state.view.library_mode == LibraryMode::Presets
+            || state.view.kind_filter == Some(LibraryKind::Preset))
             && state.presets.presets.is_empty()
             && state.doc.root.is_some())
         .then(|| {
@@ -305,11 +314,10 @@ impl Layout {
         let layer_count = state.patch().map(|p| p.layers.len()).unwrap_or(0);
         let mut library_scrollbar = Rect::from_min_size(Vec2::ZERO, Size::ZERO);
         let mut library_thumb = Rect::from_min_size(Vec2::ZERO, Size::ZERO);
-        let library_max_start = visible_rows.len().saturating_sub(capacity);
         if library_max_start > 0 {
-            if let Some((_, first)) = patch_rows.first().or_else(|| preset_rows.first()) {
+            if let Some((_, first)) = library_rows.first() {
                 let track_top = first.top();
-                let track_bottom = music_row.top() - LIBRARY_END_GAP;
+                let track_bottom = left.bottom() - LIBRARY_END_GAP;
                 let track_h = (track_bottom - track_top).max(1.0);
                 let thumb_h =
                     ((capacity as f32 / visible_rows.len() as f32) * track_h).clamp(18.0, track_h);
@@ -557,8 +565,7 @@ impl Layout {
             menu_sections,
             tab_buttons,
             header_buttons,
-            patch_rows,
-            music_row,
+            library_rows,
             timeline,
             automation,
             waveform,
@@ -575,8 +582,10 @@ impl Layout {
             category_items,
             favorite_rect,
             search_rect,
-            library_mode_buttons,
-            preset_rows,
+            kind_rect,
+            kind_menu,
+            kind_items,
+            clear_rect,
             install_presets,
             library_scrollbar,
             library_thumb,

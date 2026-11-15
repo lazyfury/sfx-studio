@@ -1,5 +1,6 @@
 //! App state, input handling, audio bridging and the per-frame entry points.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -11,10 +12,12 @@ use igui_ui::{ApproxTextMeasurer, TextMeasurer};
 
 use crate::audio::AudioEngine;
 use crate::fx;
+use crate::library::{AudioBank, LibraryEntry, LibraryKey, LibraryKind, LibraryListRow};
 use crate::model::{
     AutomationKind, Category, Clip, ClipField, Layer, LayerField, MusicField, Patch, PatchField,
     Project, Wave,
 };
+use crate::music_bank::MusicBank;
 use crate::presets::PresetBank;
 use crate::project_io::{display_name, open_folder};
 use crate::synth::{self, Envelope};
@@ -38,15 +41,6 @@ pub enum LibraryMode {
     #[default]
     Project,
     Presets,
-}
-
-impl LibraryMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Project => "PROJECT",
-            Self::Presets => "PRESETS",
-        }
-    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -136,7 +130,7 @@ pub enum Drag {
     /// A project-local preset row is being dragged towards the timeline or
     /// the project library. `moved` only becomes true after the 4 px threshold.
     LibraryItem {
-        index: usize,
+        key: LibraryKey,
         start: Vec2,
         moved: bool,
     },
@@ -168,8 +162,15 @@ pub struct ViewState {
     pub automation_lane: AutomationKind,
     pub library_mode: LibraryMode,
     pub selected_preset: Option<usize>,
+    /// Unified row selection across sound/audio/preset/music.
+    pub selected_library: Option<LibraryKey>,
+    pub kind_filter: Option<LibraryKind>,
+    pub kind_menu_open: bool,
+    /// Folder keys (kind + relative path) collapsed by the user.
+    pub folded_folders: HashSet<String>,
     pub patch_scroll: usize,
     pub preset_scroll: usize,
+    pub library_scroll: usize,
     pub layer_scroll: usize,
     /// Pure view revision (selection/scroll/playhead); never renders audio.
     pub view_version: u64,
@@ -238,6 +239,10 @@ pub struct State {
     pub ui: UiState,
     /// Read-only project-local preset bank plus persisted favourites.
     pub presets: PresetBank,
+    /// WAV assets discovered under `<project>/audio/`.
+    pub audio_bank: AudioBank,
+    /// Music arrangement files discovered under `<project>/music/`.
+    pub music_bank: MusicBank,
 }
 
 impl State {
@@ -264,8 +269,13 @@ impl State {
                 automation_lane: AutomationKind::Gain,
                 library_mode: LibraryMode::Project,
                 selected_preset: None,
+                selected_library: None,
+                kind_filter: None,
+                kind_menu_open: false,
+                folded_folders: HashSet::new(),
                 patch_scroll: 0,
                 preset_scroll: 0,
+                library_scroll: 0,
                 layer_scroll: 0,
                 view_version: 1,
                 modifiers: Modifiers::NONE,
@@ -313,6 +323,8 @@ impl State {
                 toast: None,
             },
             presets: PresetBank::default(),
+            audio_bank: AudioBank::default(),
+            music_bank: MusicBank::default(),
         };
         state.clamp_selection();
         state
@@ -406,6 +418,13 @@ impl State {
     }
 
     pub fn patch_visible(&self, index: usize) -> bool {
+        if self
+            .view
+            .kind_filter
+            .is_some_and(|kind| kind != LibraryKind::Sound)
+        {
+            return false;
+        }
         let Some(patch) = self.doc.project.patches.get(index) else {
             return false;
         };
@@ -424,6 +443,13 @@ impl State {
     }
 
     pub fn preset_visible(&self, index: usize) -> bool {
+        if self
+            .view
+            .kind_filter
+            .is_some_and(|kind| kind != LibraryKind::Preset)
+        {
+            return false;
+        }
         let Some(patch) = self.presets.get(index) else {
             return false;
         };
@@ -436,32 +462,186 @@ impl State {
             .collect()
     }
 
-    /// Row indices of whichever library is active; layout, painting, input
-    /// and scrolling all use this so the two sources cannot drift apart.
-    pub fn visible_library_rows(&self) -> Vec<usize> {
-        match self.view.library_mode {
-            LibraryMode::Project => self.visible_patches(),
-            LibraryMode::Presets => self.visible_presets(),
+    /// Every entry from all four sources, before the library filters run.
+    /// Layout/paint consume `visible_library_rows`; this full list is useful
+    /// for tests and for the clear/reset path.
+    pub fn all_library_entries(&self) -> Vec<LibraryEntry> {
+        let mut entries = Vec::new();
+        for patch in &self.doc.project.patches {
+            let wave = patch
+                .layers
+                .first()
+                .map(|layer| layer.wave.label())
+                .unwrap_or("—");
+            entries.push(LibraryEntry {
+                key: LibraryKey::Sound(patch.id),
+                kind: LibraryKind::Sound,
+                name: patch.name.clone(),
+                detail: wave.to_string(),
+                category: Some(patch.category),
+                favorite: patch.favorite,
+                folder: None,
+            });
+        }
+        for (index, asset) in self.audio_bank.assets().iter().enumerate() {
+            entries.push(LibraryEntry {
+                key: LibraryKey::Audio(index),
+                kind: LibraryKind::Audio,
+                name: asset.name.clone(),
+                detail: format_size(asset.bytes),
+                category: None,
+                favorite: false,
+                folder: asset
+                    .path
+                    .strip_prefix("audio/")
+                    .and_then(|path| path.rsplit_once('/'))
+                    .map(|(folder, _)| folder.to_string())
+                    .filter(|folder| !folder.is_empty()),
+            });
+        }
+        for (index, preset) in self.presets.presets.iter().enumerate() {
+            let wave = preset
+                .layers
+                .first()
+                .map(|layer| layer.wave.label())
+                .unwrap_or("—");
+            entries.push(LibraryEntry {
+                key: LibraryKey::Preset(index),
+                kind: LibraryKind::Preset,
+                name: preset.name.clone(),
+                detail: wave.to_string(),
+                category: Some(preset.category),
+                favorite: self.presets.is_favorite(preset),
+                folder: self.presets.folder(index).map(str::to_string),
+            });
+        }
+        for (index, asset) in self.music_bank.assets().iter().enumerate() {
+            entries.push(LibraryEntry {
+                key: LibraryKey::Music(index),
+                kind: LibraryKind::Music,
+                name: asset.name.clone(),
+                detail: format!("{:.0} BPM · {} BARS", asset.music.bpm, asset.music.bars),
+                category: None,
+                favorite: false,
+                folder: asset.folder.clone(),
+            });
+        }
+        // Stable sort only by kind: source order inside each kind is already
+        // meaningful (project order, path order) and keeps folders contiguous.
+        entries.sort_by_key(|entry| entry.kind.order());
+        entries
+    }
+
+    fn library_entry_matches(&self, entry: &LibraryEntry) -> bool {
+        if self.view.kind_filter.is_some_and(|kind| entry.kind != kind) {
+            return false;
+        }
+        if let Some(category) = self.view.category_filter {
+            if entry.category != Some(category) {
+                return false;
+            }
+        }
+        if self.view.favorites_only && !entry.favorite {
+            return false;
+        }
+        let search = self.view.search.trim().to_lowercase();
+        search.is_empty() || entry.name.to_lowercase().contains(&search)
+    }
+
+    pub fn visible_library_entries(&self) -> Vec<LibraryEntry> {
+        self.all_library_entries()
+            .into_iter()
+            .filter(|entry| self.library_entry_matches(entry))
+            .collect()
+    }
+
+    pub fn library_entry(&self, key: LibraryKey) -> Option<LibraryEntry> {
+        self.all_library_entries()
+            .into_iter()
+            .find(|entry| entry.key == key)
+    }
+
+    /// Unified list including collapsible folder headers. Layout, paint, hit,
+    /// scrolling and keyboard navigation all consume this one order.
+    pub fn visible_library_rows(&self) -> Vec<LibraryListRow> {
+        let entries = self.visible_library_entries();
+        let mut folder_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for entry in &entries {
+            if let Some(key) = entry.folder_key() {
+                *folder_counts.entry(key).or_default() += 1;
+            }
+        }
+        let mut rows = Vec::new();
+        let mut last_folder: Option<String> = None;
+        for entry in entries {
+            let folder = entry.folder_key();
+            if folder != last_folder {
+                if let Some(key) = &folder {
+                    let label = entry.folder.clone().unwrap_or_else(|| "/".into());
+                    rows.push(LibraryListRow::Folder {
+                        key: key.clone(),
+                        label,
+                        count: folder_counts.get(key).copied().unwrap_or(0),
+                    });
+                }
+                last_folder = folder.clone();
+            }
+            if folder.is_some_and(|key| self.view.folded_folders.contains(&key)) {
+                continue;
+            }
+            rows.push(LibraryListRow::Entry(entry));
+        }
+        rows
+    }
+
+    pub fn toggle_library_folder(&mut self, key: &str) {
+        if !self.view.folded_folders.remove(key) {
+            self.view.folded_folders.insert(key.to_string());
+        }
+        // Do not auto-unfold the selected row here: folding the folder that
+        // contains the selection must actually collapse it.
+        let capacity = ui::library_capacity(self.view.viewport);
+        let len = self.visible_library_rows().len();
+        self.view.library_scroll = self.view.library_scroll.min(len.saturating_sub(capacity));
+        self.bump_view();
+    }
+
+    pub fn selected_library_entry(&self) -> Option<LibraryEntry> {
+        let key = self.view.selected_library?;
+        self.library_entry(key)
+    }
+
+    pub fn selected_library_kind(&self) -> Option<LibraryKind> {
+        self.view.selected_library.map(LibraryKey::kind)
+    }
+
+    pub fn selected_audio(&self) -> Option<&crate::library::AudioAsset> {
+        match self.view.selected_library {
+            Some(LibraryKey::Audio(index)) => self.audio_bank.get(index),
+            _ => None,
+        }
+    }
+
+    pub fn selected_music(&self) -> Option<usize> {
+        match self.view.selected_library {
+            Some(LibraryKey::Music(index)) => Some(index),
+            _ => None,
         }
     }
 
     pub fn library_scroll(&self) -> usize {
-        match self.view.library_mode {
-            LibraryMode::Project => self.view.patch_scroll,
-            LibraryMode::Presets => self.view.preset_scroll,
-        }
+        self.view.library_scroll
     }
 
     pub fn set_library_scroll(&mut self, value: usize) {
-        match self.view.library_mode {
-            LibraryMode::Project => self.view.patch_scroll = value,
-            LibraryMode::Presets => self.view.preset_scroll = value,
-        }
+        self.view.library_scroll = value;
     }
 
     pub fn set_library_mode(&mut self, mode: LibraryMode) {
         self.view.library_mode = mode;
         self.view.category_menu_open = false;
+        self.view.kind_menu_open = false;
         self.view.menu_open = false;
         if mode == LibraryMode::Presets
             && self
@@ -470,6 +650,14 @@ impl State {
                 .is_some_and(|index| !self.preset_visible(index))
         {
             self.view.selected_preset = None;
+        }
+        match mode {
+            LibraryMode::Project => {
+                self.view.selected_library = self.patch().map(|patch| LibraryKey::Sound(patch.id));
+            }
+            LibraryMode::Presets => {
+                self.view.selected_library = self.view.selected_preset.map(LibraryKey::Preset);
+            }
         }
         self.ui.status = match mode {
             LibraryMode::Project => "PROJECT library · edits save with the project".into(),
@@ -490,6 +678,11 @@ impl State {
     /// decides the target: PRESETS exports the selected preset without adding
     /// it to the project, PROJECT exports the current sound.
     pub fn export_patch(&self) -> Option<&Patch> {
+        match self.view.selected_library {
+            Some(LibraryKey::Preset(index)) => return self.presets.get(index),
+            Some(LibraryKey::Audio(_) | LibraryKey::Music(_)) => return None,
+            _ => {}
+        }
         match self.view.library_mode {
             LibraryMode::Project => self.patch(),
             LibraryMode::Presets => self
@@ -502,9 +695,68 @@ impl State {
     pub fn select_preset(&mut self, index: usize) {
         if self.presets.get(index).is_some() {
             self.view.selected_preset = Some(index);
+            self.view.selected_library = Some(LibraryKey::Preset(index));
+            self.view.library_mode = LibraryMode::Presets;
             self.ensure_preset_visible();
+            self.ensure_library_visible();
             self.bump_view();
         }
+    }
+
+    pub fn select_audio(&mut self, index: usize) {
+        if self.audio_bank.get(index).is_some() {
+            self.view.selected_library = Some(LibraryKey::Audio(index));
+            self.view.selected_preset = None;
+            self.view.library_mode = LibraryMode::Project;
+            self.ensure_library_visible();
+            self.bump_view();
+        }
+    }
+
+    pub fn select_music(&mut self, index: usize) {
+        if self.music_bank.get(index).is_none() {
+            return;
+        }
+        self.view.tab = Tab::Music;
+        self.view.selected_library = Some(LibraryKey::Music(index));
+        self.view.selected_preset = None;
+        self.view.library_mode = LibraryMode::Project;
+        self.playback.defer_render = true;
+        self.ensure_library_visible();
+        self.bump_view();
+    }
+
+    pub fn ensure_library_visible(&mut self) {
+        let Some(selected) = self.view.selected_library else {
+            return;
+        };
+        let capacity = ui::library_capacity(self.view.viewport);
+        let mut rows = self.visible_library_rows();
+        let mut position = rows
+            .iter()
+            .position(|row| matches!(row, LibraryListRow::Entry(entry) if entry.key == selected));
+        if position.is_none() {
+            if let Some(folder) = self
+                .library_entry(selected)
+                .and_then(|entry| entry.folder_key())
+            {
+                self.view.folded_folders.remove(&folder);
+                rows = self.visible_library_rows();
+                position = rows.iter().position(
+                    |row| matches!(row, LibraryListRow::Entry(entry) if entry.key == selected),
+                );
+            }
+        }
+        let position = position.unwrap_or(0);
+        if position < self.view.library_scroll {
+            self.view.library_scroll = position;
+        } else if position >= self.view.library_scroll + capacity {
+            self.view.library_scroll = position + 1 - capacity;
+        }
+        self.view.library_scroll = self
+            .view
+            .library_scroll
+            .min(rows.len().saturating_sub(capacity));
     }
 
     fn ensure_preset_visible(&mut self) {
@@ -554,6 +806,9 @@ impl State {
         let previous_layer = self.layer_index().unwrap_or(0);
         if let Some(patch) = self.doc.project.patches.get(index) {
             self.view.selected_patch = Some(patch.id);
+            self.view.selected_library = Some(LibraryKey::Sound(patch.id));
+            self.view.selected_preset = None;
+            self.view.library_mode = LibraryMode::Project;
             self.view.inspector_scroll = 0.0;
             let keep_layer = self
                 .view
@@ -631,6 +886,7 @@ impl State {
         if self.view.library_mode == LibraryMode::Presets {
             self.ensure_preset_visible();
         }
+        self.ensure_library_visible();
     }
 
     /// Capture the pre-edit state once per pointer gesture. The snapshot is
@@ -717,6 +973,18 @@ impl State {
             .selected_patch
             .filter(|id| self.doc.project.patches.iter().any(|patch| patch.id == *id))
             .or_else(|| self.doc.project.patches.first().map(|patch| patch.id));
+        let sound_key = self.view.selected_patch.map(LibraryKey::Sound);
+        self.view.selected_library = match self.view.selected_library {
+            None => sound_key,
+            Some(LibraryKey::Sound(id))
+                if !self.doc.project.patches.iter().any(|patch| patch.id == id) =>
+            {
+                sound_key
+            }
+            Some(LibraryKey::Preset(index)) if self.presets.get(index).is_none() => None,
+            Some(LibraryKey::Audio(index)) if self.audio_bank.get(index).is_none() => None,
+            other => other,
+        };
         self.view.selected_layer = self.patch().and_then(|patch| {
             self.view
                 .selected_layer
@@ -989,6 +1257,16 @@ fn toggle_pattern(music: &mut model::Music, row: ui::PatternRow, step: usize) {
     }
 }
 
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("WAV · {:.1} MB", bytes as f32 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("WAV · {:.0} KB", bytes as f32 / 1024.0)
+    } else {
+        "WAV".into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1028,6 +1306,8 @@ mod tests {
             .presets
             .iter()
             .any(|preset| preset.name == "laser"));
+        assert_eq!(state.music_bank.len(), crate::demo::tracks().len());
+        assert!(root.join("music/neon_drive.json").exists());
         assert_eq!(state.doc.root.as_deref(), Some(root.as_path()));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1590,5 +1870,320 @@ mod tests {
         assert!(state.layer().unwrap().clips.is_empty());
         let _ = state.redo();
         assert_eq!(state.layer().unwrap().clips.len(), 1);
+    }
+    #[test]
+    fn unified_library_lists_all_four_kinds_and_filters_them() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "sfx-studio-unified-library-{}-{stamp}",
+            std::process::id()
+        ));
+        let samples = root.join("audio/sfx/samples");
+        std::fs::create_dir_all(&samples).unwrap();
+        crate::synth::write_wav(&samples.join("click.wav"), &[0.0, 0.5, -0.5, 0.0], 48_000)
+            .unwrap();
+        let demo = crate::demo::tracks().remove(0);
+        MusicBank::write_tracks(&root, &[(demo.key, &demo.music)]).unwrap();
+
+        let mut state = State::demo();
+        state.doc.root = Some(root.clone());
+        state.audio_bank.load_project(&root);
+        state.music_bank.load_project(&root);
+        let entries = state.visible_library_entries();
+        for kind in LibraryKind::ALL {
+            assert!(
+                entries.iter().any(|entry| entry.kind == kind),
+                "missing {kind:?}"
+            );
+        }
+
+        state.view.kind_filter = Some(LibraryKind::Audio);
+        let audio = state.visible_library_entries();
+        assert_eq!(audio.len(), 1);
+        assert_eq!(audio[0].kind, LibraryKind::Audio);
+        assert!(audio[0].name.ends_with("click.wav"));
+
+        state.view.kind_filter = None;
+        state.view.category_filter = Some(Category::Combat);
+        let combat = state.visible_library_entries();
+        assert!(combat
+            .iter()
+            .all(|entry| entry.category == Some(Category::Combat)));
+        assert!(!combat.iter().any(|entry| entry.kind == LibraryKind::Audio));
+
+        state.view.category_filter = None;
+        state.view.search = "neon".into();
+        let neon = state.visible_library_entries();
+        assert_eq!(neon.len(), 1);
+        assert_eq!(neon[0].kind, LibraryKind::Music);
+
+        let mut logic = SfxLogic {
+            state,
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        logic.clear_filters();
+        assert_eq!(logic.state.view.kind_filter, None);
+        assert!(logic.state.view.search.is_empty());
+        assert!(logic
+            .state
+            .visible_library_entries()
+            .iter()
+            .any(|entry| entry.kind == LibraryKind::Audio));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dropping_audio_on_the_timeline_creates_a_sample_layer() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "sfx-studio-drop-audio-{}-{stamp}",
+            std::process::id()
+        ));
+        let samples = root.join("audio/sfx/samples");
+        std::fs::create_dir_all(&samples).unwrap();
+        let path = samples.join("hit.wav");
+        crate::synth::write_wav(&path, &[0.0, 0.4, -0.4, 0.0, 0.2], 48_000).unwrap();
+
+        let mut logic = SfxLogic {
+            state: State::demo(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        logic.state.doc.root = Some(root.clone());
+        logic.state.audio_bank.load_project(&root);
+        assert_eq!(logic.state.audio_bank.assets().len(), 1);
+        let before = logic.state.patch().unwrap().layers.len();
+        let layout = ui::Layout::new(&logic.state, logic.state.view.viewport);
+        let row = layout.layer_rows[0].1;
+        let position = Vec2::new(layout.time_x(0.2), row.center().y);
+        logic.drop_audio(0, position, &layout);
+
+        let patch = logic.state.patch().unwrap();
+        assert_eq!(patch.layers.len(), before + 1);
+        let layer = patch
+            .layers
+            .iter()
+            .find(|layer| layer.sample_path == "audio/sfx/samples/hit.wav")
+            .expect("sample layer inserted");
+        assert_eq!(layer.wave, Wave::Sample);
+        assert!(layer.sample_data.is_some());
+        assert!((layer.clips[0].start - 0.2).abs() < 0.001);
+        assert_eq!(logic.state.doc.undo.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn music_rows_load_a_project_music_file() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "sfx-studio-music-row-{}-{stamp}",
+            std::process::id()
+        ));
+        let demo = crate::demo::tracks().remove(1);
+        MusicBank::write_tracks(&root, &[(demo.key, &demo.music)]).unwrap();
+
+        let mut logic = SfxLogic {
+            state: State::demo(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        logic.state.doc.root = Some(root.clone());
+        logic.state.music_bank.load_project(&root);
+        assert_eq!(logic.state.music_bank.len(), 1);
+
+        logic.select_library_row(LibraryKey::Music(0));
+        assert_eq!(logic.state.view.tab, Tab::Music);
+        assert_eq!(
+            logic.state.selected_library_kind(),
+            Some(LibraryKind::Music)
+        );
+        assert_eq!(logic.state.selected_music(), Some(0));
+
+        let before = logic.state.doc.project.music.clone();
+        logic.activate_library_row(LibraryKey::Music(0));
+        assert_eq!(logic.state.doc.project.music, demo.music);
+        assert_ne!(logic.state.doc.project.music, before);
+        assert_eq!(logic.state.view.tab, Tab::Music);
+        assert!(logic.state.ui.status.contains(demo.key));
+        logic.state.undo();
+        assert_eq!(logic.state.doc.project.music, before);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn preset_folders_group_in_the_library_and_can_collapse() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "sfx-studio-library-folders-{}-{stamp}",
+            std::process::id()
+        ));
+        let impact = root.join("presets/impact");
+        let laser = root.join("presets/laser");
+        std::fs::create_dir_all(&impact).unwrap();
+        std::fs::create_dir_all(&laser).unwrap();
+        let a = Patch::new_layer("boom", Wave::Noise);
+        let b = Patch::new_layer("zap", Wave::Saw);
+        std::fs::write(impact.join("boom.json"), serde_json::to_string(&a).unwrap()).unwrap();
+        std::fs::write(laser.join("zap.json"), serde_json::to_string(&b).unwrap()).unwrap();
+
+        let mut state = State::demo();
+        state.doc.root = Some(root.clone());
+        state.presets.load_project(&root);
+        let rows = state.visible_library_rows();
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            LibraryListRow::Folder { key, .. } if key == "PRE:impact"
+        )));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            LibraryListRow::Entry(entry)
+                if entry.key == LibraryKey::Preset(0)
+                    && entry.folder.as_deref() == Some("impact")
+        )));
+        state.select_preset(0);
+        state.toggle_library_folder("PRE:impact");
+        let folded = state.visible_library_rows();
+        assert!(folded.iter().any(|row| matches!(
+            row,
+            LibraryListRow::Folder { key, .. } if key == "PRE:impact"
+        )));
+        assert!(!folded.iter().any(|row| matches!(
+            row,
+            LibraryListRow::Entry(entry) if entry.folder.as_deref() == Some("impact")
+        )));
+        state.toggle_library_folder("PRE:impact");
+        assert!(state.visible_library_rows().iter().any(|row| matches!(
+            row,
+            LibraryListRow::Entry(entry) if entry.folder.as_deref() == Some("impact")
+        )));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clicking_a_music_row_switches_to_the_music_tab() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "sfx-studio-music-hit-{}-{stamp}",
+            std::process::id()
+        ));
+        let demo = crate::demo::tracks().remove(0);
+        MusicBank::write_tracks(&root, &[(demo.key, &demo.music)]).unwrap();
+        let mut state = State::demo();
+        state.doc.root = Some(root.clone());
+        state.music_bank.load_project(&root);
+        let layout = ui::Layout::new(&state, state.view.viewport);
+        let (key, rect) = layout
+            .library_rows
+            .iter()
+            .find_map(|(row, rect)| match row {
+                LibraryListRow::Entry(entry) if matches!(entry.key, LibraryKey::Music(_)) => {
+                    Some((entry.key, *rect))
+                }
+                _ => None,
+            })
+            .expect("music row");
+        assert_eq!(
+            ui::hit(&state, &layout, rect.center()),
+            Some(ui::Hit::LibraryRow(key))
+        );
+        let mut logic = SfxLogic {
+            state: std::mem::replace(&mut state, State::empty()),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        logic.select_library_row(key);
+        assert_eq!(logic.state.view.tab, Tab::Music);
+        assert_eq!(
+            logic.state.selected_library_kind(),
+            Some(LibraryKind::Music)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn kind_filter_keeps_selection_and_export_target_in_sync() {
+        let mut logic = SfxLogic {
+            state: State::demo(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        logic.state.select_preset(0);
+        let preset_name = logic.state.presets.get(0).unwrap().name.clone();
+        assert_eq!(
+            logic.state.export_patch().map(|patch| patch.name.as_str()),
+            Some(preset_name.as_str())
+        );
+
+        logic.pick_kind(Some(LibraryKind::Sound));
+        assert_eq!(logic.state.view.library_mode, LibraryMode::Project);
+        assert_eq!(
+            logic.state.selected_library_kind(),
+            Some(LibraryKind::Sound)
+        );
+        let project_name = logic.state.patch().unwrap().name.clone();
+        assert_eq!(
+            logic.state.export_patch().map(|patch| patch.name.as_str()),
+            Some(project_name.as_str())
+        );
+
+        logic.pick_kind(Some(LibraryKind::Preset));
+        assert_eq!(logic.state.view.library_mode, LibraryMode::Presets);
+        assert_eq!(
+            logic.state.selected_library_kind(),
+            Some(LibraryKind::Preset)
+        );
+        assert_eq!(
+            logic.state.export_patch().map(|patch| patch.name.as_str()),
+            Some(preset_name.as_str())
+        );
+
+        logic.pick_kind(Some(LibraryKind::Audio));
+        assert_eq!(logic.state.selected_library_kind(), None);
+        assert_eq!(
+            logic.state.export_patch().map(|patch| patch.name.as_str()),
+            Some(project_name.as_str())
+        );
+    }
+    #[test]
+    fn opening_an_empty_folder_bootstraps_presets_and_music() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "sfx-studio-empty-open-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut state = State::empty();
+        let (warnings, created) =
+            crate::project_io::open_or_create(&mut state, root.clone()).expect("open or create");
+        assert!(created);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(root.join(crate::model::PROJECT_FILE).exists());
+        assert_eq!(state.presets.len(), 22);
+        assert_eq!(state.music_bank.len(), 3);
+        assert_eq!(state.doc.root.as_deref(), Some(root.as_path()));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -17,6 +17,16 @@ pub fn hit(state: &State, layout: &Layout, pos: Vec2) -> Option<Hit> {
             return Some(Hit::MenuPanel);
         }
     }
+    if let Some(menu) = layout.kind_menu {
+        if menu.contains(pos) {
+            for (kind, rect) in &layout.kind_items {
+                if rect.contains(pos) {
+                    return Some(Hit::KindPick(*kind));
+                }
+            }
+            return Some(Hit::KindMenu);
+        }
+    }
     if let Some(menu) = layout.category_menu {
         if menu.contains(pos) {
             for (category, rect) in &layout.category_items {
@@ -27,10 +37,11 @@ pub fn hit(state: &State, layout: &Layout, pos: Vec2) -> Option<Hit> {
             return Some(Hit::CategoryMenu);
         }
     }
-    for (mode, rect) in &layout.library_mode_buttons {
-        if rect.contains(pos) {
-            return Some(Hit::LibraryMode(*mode));
-        }
+    if layout.kind_rect.contains(pos) {
+        return Some(Hit::KindFilter);
+    }
+    if layout.clear_rect.contains(pos) {
+        return Some(Hit::ClearFilters);
     }
     if layout.category_rect.contains(pos) {
         return Some(Hit::CategoryFilter);
@@ -62,24 +73,18 @@ pub fn hit(state: &State, layout: &Layout, pos: Vec2) -> Option<Hit> {
             return Some(Hit::Action(button.action));
         }
     }
-    for (index, rect) in &layout.patch_rows {
+    for (index, (row, rect)) in layout.library_rows.iter().enumerate() {
         if rect.contains(pos) {
-            if patch_star_rect(*rect).contains(pos) {
-                return Some(Hit::PatchFavorite(*index));
+            match row {
+                LibraryListRow::Folder { .. } => return Some(Hit::LibraryFolder(index)),
+                LibraryListRow::Entry(entry) => {
+                    if entry.kind.is_sound_or_preset() && patch_star_rect(*rect).contains(pos) {
+                        return Some(Hit::LibraryFavorite(entry.key));
+                    }
+                    return Some(Hit::LibraryRow(entry.key));
+                }
             }
-            return Some(Hit::PatchRow(*index));
         }
-    }
-    for (index, rect) in &layout.preset_rows {
-        if rect.contains(pos) {
-            if patch_star_rect(*rect).contains(pos) {
-                return Some(Hit::PresetFavorite(*index));
-            }
-            return Some(Hit::PresetRow(*index));
-        }
-    }
-    if layout.music_row.contains(pos) {
-        return Some(Hit::Action(Action::TabMusic));
     }
 
     if layout.inspector.contains(pos) {

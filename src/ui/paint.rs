@@ -100,9 +100,33 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         TITLE,
         TEXT,
     );
-    for (mode, rect) in &layout.library_mode_buttons {
-        paint_mode_tab(state, measurer, ctx, *mode, *rect);
-    }
+    let kind_label = state
+        .view
+        .kind_filter
+        .map(LibraryKind::label)
+        .unwrap_or("ALL");
+    theme::button_icon(
+        ctx,
+        measurer,
+        layout.kind_rect,
+        kind_label,
+        icons::document(Icon::LayoutGrid),
+        state.view.hover_hit == Some(Hit::KindFilter),
+        state.view.kind_filter.is_some(),
+    );
+    let clear_active = state.view.kind_filter.is_some()
+        || state.view.category_filter.is_some()
+        || state.view.favorites_only
+        || !state.view.search.is_empty();
+    theme::button_icon(
+        ctx,
+        measurer,
+        layout.clear_rect,
+        "",
+        icons::document(Icon::X),
+        state.view.hover_hit == Some(Hit::ClearFilters),
+        clear_active,
+    );
     let category_label = state
         .view
         .category_filter
@@ -120,7 +144,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
     text_right(
         ctx,
         measurer,
-        &format!("{:02}", state.visible_library_rows().len()),
+        &format!("{:02}", state.visible_library_entries().len()),
         layout.favorite_rect.left() - 6.0,
         layout.category_rect.center().y,
         SMALL,
@@ -190,43 +214,28 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             ACCENT_DARK,
         );
     }
-    for (index, rect) in &layout.patch_rows {
-        let patch = &state.doc.project.patches[*index];
-        let selected =
-            Some(patch.id) == state.view.selected_patch && state.view.tab == Tab::Patches;
-        let wave = patch.layers.first().map(|l| l.wave).unwrap_or(Wave::Sine);
-        paint_library_row(
-            state,
-            measurer,
-            ctx,
-            *rect,
-            &patch.name,
-            wave.label(),
-            selected,
-            patch.favorite,
-            Hit::PatchFavorite(*index),
-            false,
-            false,
-        );
+    for (row_index, (row, rect)) in layout.library_rows.iter().enumerate() {
+        match row {
+            LibraryListRow::Folder { key, label, count } => {
+                paint_library_folder(state, measurer, ctx, *rect, key, label, *count, row_index)
+            }
+            LibraryListRow::Entry(entry) => {
+                let key = entry.key;
+                let selected = state.view.selected_library == Some(key);
+                let previewing = selected
+                    && state.playback.preset_playing
+                    && matches!(entry.kind, LibraryKind::Audio | LibraryKind::Preset);
+                let star_hit = entry
+                    .kind
+                    .is_sound_or_preset()
+                    .then_some(Hit::LibraryFavorite(key));
+                paint_library_row(
+                    state, measurer, ctx, *rect, entry, selected, star_hit, previewing,
+                );
+            }
+        }
     }
-    for (index, rect) in &layout.preset_rows {
-        let patch = &state.presets.presets[*index];
-        let selected = state.view.selected_preset == Some(*index);
-        let wave = patch.layers.first().map(|l| l.wave).unwrap_or(Wave::Sine);
-        paint_library_row(
-            state,
-            measurer,
-            ctx,
-            *rect,
-            &patch.name,
-            wave.label(),
-            selected,
-            state.presets.is_favorite(patch),
-            Hit::PresetFavorite(*index),
-            state.playback.preset_playing && selected,
-            true,
-        );
-    }
+
     if layout.library_scrollbar.size.height > 0.0 {
         ctx.fill_rounded_rect(layout.library_scrollbar, 2.0, RAISED);
         ctx.fill_rounded_rect(
@@ -239,15 +248,13 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             },
         );
     }
-    if state.visible_library_rows().is_empty() {
-        let empty = if state.view.library_mode == LibraryMode::Presets
+    if state.visible_library_entries().is_empty() {
+        let empty = if state.view.kind_filter == Some(LibraryKind::Preset)
             && state.presets.presets.is_empty()
         {
             "NO PRESETS"
-        } else if state.view.library_mode == LibraryMode::Project
-            && state.doc.project.patches.is_empty()
-        {
-            "NO SOUNDS"
+        } else if state.all_library_entries().is_empty() {
+            "NO ITEMS"
         } else {
             "NO MATCHES"
         };
@@ -272,37 +279,6 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             false,
         );
     }
-    let music_selected = state.view.tab == Tab::Music;
-    if music_selected {
-        fill(ctx, layout.music_row, ACTIVE);
-        fill(
-            ctx,
-            Rect::from_min_size(
-                layout.music_row.origin,
-                Size::new(2.0, layout.music_row.size.height),
-            ),
-            ACCENT,
-        );
-    }
-    text_top(
-        ctx,
-        measurer,
-        "MUSIC",
-        layout.music_row.left() + 12.0,
-        layout.music_row.top() + 4.0,
-        FONT,
-        if music_selected { TEXT } else { DIM },
-    );
-    text_right(
-        ctx,
-        measurer,
-        "16 STEP",
-        layout.music_row.right() - 8.0,
-        layout.music_row.center().y,
-        SMALL,
-        FAINT,
-    );
-
     // Center header
     paint_header(state, measurer, ctx, &layout);
 
@@ -428,7 +404,17 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             DIM
         },
     );
-    let info = if state.view.library_mode == LibraryMode::Presets {
+    let info = if let Some(entry) = state
+        .selected_library_entry()
+        .filter(|entry| matches!(entry.kind, LibraryKind::Audio | LibraryKind::Music))
+    {
+        format!(
+            "{}  ·  {}  ·  {}",
+            entry.kind.label(),
+            entry.name,
+            entry.detail
+        )
+    } else if state.view.library_mode == LibraryMode::Presets {
         format!(
             "PROJECT PRESETS  ·  {}  ·  drag to timeline  ·  ⌘E export WAV",
             state.visible_presets().len()
@@ -476,11 +462,12 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
 
     paint_menu(state, measurer, ctx, &layout);
     paint_category_menu(state, measurer, ctx, &layout);
+    paint_kind_menu(state, measurer, ctx, &layout);
     if let Drag::LibraryItem {
-        index, moved: true, ..
+        key, moved: true, ..
     } = &state.view.drag
     {
-        paint_library_drag(state, measurer, ctx, &layout, *index);
+        paint_library_drag(state, measurer, ctx, &layout, *key);
     }
 
     if state.view.modal.is_some() {
@@ -490,42 +477,56 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
     }
 }
 
-fn paint_mode_tab(
+#[allow(clippy::too_many_arguments)]
+fn paint_library_folder(
     state: &State,
     measurer: &dyn TextMeasurer,
     ctx: &mut PaintContext,
-    mode: LibraryMode,
     rect: Rect,
+    key: &str,
+    label: &str,
+    count: usize,
+    row_index: usize,
 ) {
-    let active = state.view.library_mode == mode;
-    let hovered = state.view.hover_hit == Some(Hit::LibraryMode(mode));
-    let bg = if active {
-        ACTIVE
-    } else if hovered {
-        HOVER
+    let folded = state.view.folded_folders.contains(key);
+    if rect.contains(state.view.cursor) {
+        fill(ctx, rect, HOVER);
+    }
+    let icon = if folded {
+        Icon::ChevronRight
     } else {
-        RAISED
+        Icon::ChevronDown
     };
-    ctx.fill_rounded_rect(rect, 5.0, bg);
-    ctx.stroke_rounded_rect(
-        rect,
-        5.0,
-        1.0,
-        if active {
-            ACCENT_LINE
-        } else if hovered {
-            BORDER_HI
+    icons::paint(
+        ctx,
+        icon,
+        Rect::from_min_size(
+            Vec2::new(rect.left() + 8.0, rect.center().y - 5.0),
+            Size::splat(10.0),
+        ),
+        if state.view.hover_hit == Some(Hit::LibraryFolder(row_index)) {
+            ACCENT
         } else {
-            BORDER
+            DIM
         },
     );
-    text_center(
+    text_top(
         ctx,
         measurer,
-        mode.label(),
-        rect,
+        label,
+        rect.left() + 24.0,
+        rect.top() + 5.0,
         SMALL,
-        if active { ACCENT } else { DIM },
+        if folded { DIM } else { TEXT },
+    );
+    text_right(
+        ctx,
+        measurer,
+        &format!("{count:02}"),
+        rect.right() - 8.0,
+        rect.center().y,
+        SMALL,
+        FAINT,
     );
 }
 
@@ -535,13 +536,10 @@ fn paint_library_row(
     measurer: &dyn TextMeasurer,
     ctx: &mut PaintContext,
     rect: Rect,
-    name: &str,
-    wave_label: &str,
+    entry: &crate::library::LibraryEntry,
     selected: bool,
-    favorite: bool,
-    star_hit: Hit,
+    star_hit: Option<Hit>,
     previewing: bool,
-    star_always: bool,
 ) {
     if selected {
         fill(ctx, rect, ACTIVE);
@@ -553,10 +551,30 @@ fn paint_library_row(
     } else if rect.contains(state.view.cursor) {
         fill(ctx, rect, HOVER);
     }
-    // The favorite star owns a fixed slot at the far right; the wave tag is
+    let tag = entry.kind.tag();
+    let tag_color = match entry.kind {
+        LibraryKind::Sound => ACCENT,
+        LibraryKind::Audio => ACCENT2,
+        LibraryKind::Preset => WARN,
+        LibraryKind::Music => DIM,
+    };
+    text_top(
+        ctx,
+        measurer,
+        tag,
+        rect.left() + 8.0,
+        rect.top() + 5.0,
+        SMALL,
+        if selected {
+            tag_color
+        } else {
+            tag_color.with_alpha(0.75)
+        },
+    );
+    // The favourite star owns a fixed slot at the far right; the detail tag is
     // right-aligned before it so the two never share pixels.
-    let label_right = rect.right() - 26.0;
-    if favorite || star_always {
+    let label_right = rect.right() - if star_hit.is_some() { 26.0 } else { 8.0 };
+    if let Some(star_hit) = star_hit {
         let star = patch_star_rect(rect);
         let hovered = state.view.hover_hit == Some(star_hit);
         icons::paint(
@@ -568,7 +586,7 @@ fn paint_library_row(
             ),
             if hovered {
                 ACCENT
-            } else if favorite {
+            } else if entry.favorite {
                 if selected {
                     ACCENT_DARK
                 } else {
@@ -579,14 +597,13 @@ fn paint_library_row(
             },
         );
     }
-    let name_width =
-        (label_right - measurer.measure_run(wave_label, SMALL) - 8.0 - (rect.left() + 12.0))
-            .max(24.0);
+    let detail_width = measurer.measure_run(&entry.detail, SMALL);
+    let name_width = (label_right - detail_width - 8.0 - (rect.left() + 34.0)).max(24.0);
     text_top(
         ctx,
         measurer,
-        &ellipsis(measurer, name, FONT, name_width),
-        rect.left() + 12.0,
+        &ellipsis(measurer, &entry.name, FONT, name_width),
+        rect.left() + 34.0,
         rect.top() + 4.0,
         FONT,
         if selected || previewing { TEXT } else { DIM },
@@ -594,7 +611,7 @@ fn paint_library_row(
     text_right(
         ctx,
         measurer,
-        wave_label,
+        &entry.detail,
         label_right,
         rect.center().y,
         SMALL,
@@ -625,6 +642,45 @@ fn paint_category_menu(
             ctx,
             measurer,
             category.map(Category::label).unwrap_or("ALL"),
+            item.left() + 6.0,
+            item.top() + 4.0,
+            SMALL,
+            if active { ACCENT } else { TEXT },
+        );
+        if active {
+            icons::paint(
+                ctx,
+                Icon::Check,
+                Rect::from_min_size(
+                    Vec2::new(item.right() - 16.0, item.center().y - 5.0),
+                    Size::splat(10.0),
+                ),
+                ACCENT,
+            );
+        }
+    }
+}
+
+fn paint_kind_menu(
+    state: &State,
+    measurer: &dyn TextMeasurer,
+    ctx: &mut PaintContext,
+    layout: &Layout,
+) {
+    let Some(rect) = layout.kind_menu else {
+        return;
+    };
+    fill(ctx, rect, RAISED);
+    stroke(ctx, rect, BORDER_HI);
+    for (kind, item) in &layout.kind_items {
+        let active = state.view.kind_filter == *kind;
+        if item.contains(state.view.cursor) {
+            fill(ctx, *item, ACTIVE);
+        }
+        text_top(
+            ctx,
+            measurer,
+            kind.map(LibraryKind::label).unwrap_or("ALL"),
             item.left() + 6.0,
             item.top() + 4.0,
             SMALL,
@@ -744,12 +800,14 @@ fn paint_hover_tip(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintCo
                 action_unavailable_message(state, action)
             }
         }
-        Some(Hit::Search) => "搜索音效 · Search（/）",
+        Some(Hit::Search) => "搜索音效/音频/预设/music · Search（/）",
         Some(Hit::CategoryFilter) => "切换分类过滤 · Category（C）",
+        Some(Hit::KindFilter) => "切换资源类型 · Type filter",
+        Some(Hit::ClearFilters) => "清除全部筛选 · Clear filters",
         Some(Hit::FavoriteFilter) => "只看收藏 · Favorites",
-        Some(Hit::LibraryMode(_)) => "切换工程库 / 内部预设库 · Library source",
-        Some(Hit::PresetRow(_)) => "单击试听 · 拖到时间线插入 / 左侧复制进工程 · ⌘E 导出 WAV",
-        Some(Hit::PresetFavorite(_)) => "收藏预设 · Favorite",
+        Some(Hit::LibraryRow(_)) => "单击选择/试听 · 音频或预设可拖到时间线",
+        Some(Hit::LibraryFavorite(_)) => "收藏 · Favorite",
+        Some(Hit::LibraryFolder(_)) => "展开/折叠文件夹 · Folder",
         Some(Hit::InstallPresets) => "把 11 个内置预设写入当前工程 · Install",
         Some(Hit::InspectorScrollbar) => "拖动滚动参数面板 · Scroll",
         _ => return,
@@ -1620,6 +1678,25 @@ fn paint_modal(
     );
 }
 
+fn audio_inspector_items(state: &State) -> Vec<RawItem> {
+    let mut items = vec![RawItem::Section("AUDIO ASSET".into())];
+    let Some(asset) = state.selected_audio() else {
+        items.push(RawItem::Note("SELECT AN AUDIO FILE".into()));
+        return items;
+    };
+    items.push(RawItem::Note(format!("NAME  {}", asset.name)));
+    items.push(RawItem::Note(format!("PATH  {}", asset.path)));
+    items.push(RawItem::Note(format!("SIZE  {}", asset.bytes)));
+    items.push(RawItem::Section("USAGE".into()));
+    items.push(RawItem::Note(
+        "click to audition · drag to the timeline to create a SAMPLE layer".into(),
+    ));
+    items.push(RawItem::Note(
+        "audio is read from <project>/audio/ (baked/ and demo/ are skipped)".into(),
+    ));
+    items
+}
+
 fn preset_inspector_items(state: &State) -> Vec<RawItem> {
     let mut items = vec![RawItem::Section("PRESET LIBRARY".into())];
     let Some(index) = state.view.selected_preset else {
@@ -1629,7 +1706,7 @@ fn preset_inspector_items(state: &State) -> Vec<RawItem> {
         ));
         return items;
     };
-    let Some(patch) = state.presets.get(index) else {
+    let Some(patch) = state.preset(index) else {
         items.push(RawItem::Note("SELECT A PRESET".into()));
         return items;
     };
@@ -1685,6 +1762,9 @@ fn preset_inspector_items(state: &State) -> Vec<RawItem> {
 }
 
 pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
+    if let Some(LibraryKey::Audio(_)) = state.view.selected_library {
+        return audio_inspector_items(state);
+    }
     if state.view.library_mode == LibraryMode::Presets {
         return preset_inspector_items(state);
     }
@@ -2218,13 +2298,13 @@ fn paint_library_drag(
     measurer: &dyn TextMeasurer,
     ctx: &mut PaintContext,
     layout: &Layout,
-    index: usize,
+    key: LibraryKey,
 ) {
-    let Some(patch) = state.preset(index) else {
+    let Some(entry) = state.library_entry(key) else {
         return;
     };
     let target = drop_target(state, layout, state.view.cursor);
-    let mut label = format!("{} · DROP ON TIMELINE", patch.name);
+    let mut label = format!("{} · DROP ON TIMELINE", entry.name);
     match target {
         Some(DropTarget::Timeline { layer, time }) => {
             let time = if state.view.modifiers.shift {
@@ -2232,7 +2312,7 @@ fn paint_library_drag(
             } else {
                 snap_time(time)
             };
-            label = format!("{} · INSERT {:.3}s", patch.name, time);
+            label = format!("{} · INSERT {:.3}s", entry.name, time);
             if let Some((_, row)) = layout.layer_rows.iter().find(|(index, _)| *index == layer) {
                 fill(ctx, *row, Color::new(ACCENT.r, ACCENT.g, ACCENT.b, 0.10));
             } else {
@@ -2274,8 +2354,12 @@ fn paint_library_drag(
             );
         }
         Some(DropTarget::ProjectLibrary) => {
-            label = format!("{} · COPY TO PROJECT", patch.name);
-            stroke(ctx, layout.left, ACCENT_LINE);
+            if key.kind() == LibraryKind::Preset {
+                label = format!("{} · COPY TO PROJECT", entry.name);
+                stroke(ctx, layout.left, ACCENT_LINE);
+            } else {
+                label = format!("{} · DROP ON TIMELINE", entry.name);
+            }
         }
         None => {}
     }
@@ -2318,12 +2402,11 @@ fn drag_info(state: &State) -> Option<String> {
         Drag::InspectorScroll { .. } => Some("PARAMETERS  scrolling".into()),
         Drag::LibraryScroll { .. } => Some("LIBRARY  scrolling".into()),
         Drag::Curve { kind } => Some(format!("DRAW {}  ·  drag to edit", kind.label())),
-        Drag::LibraryItem { index, moved, .. } => {
+        Drag::LibraryItem { key, moved, .. } => {
             let name = state
-                .presets
-                .get(*index)
-                .map(|patch| patch.name.as_str())
-                .unwrap_or("preset");
+                .library_entry(*key)
+                .map(|entry| entry.name)
+                .unwrap_or_else(|| "library item".into());
             if *moved {
                 Some(format!(
                     "DRAG {name}  ·  timeline inserts layers / left panel copies to project"
@@ -2423,21 +2506,17 @@ fn hover_info(state: &State) -> Option<String> {
                 Some(tip.to_string())
             }
         }
-        Some(Hit::Search) => Some("搜索音效 · Search（/）".into()),
+        Some(Hit::Search) => Some("搜索音效/音频/预设/music · Search（/）".into()),
         Some(Hit::CategoryFilter) => Some("切换分类过滤 · Category（C）".into()),
+        Some(Hit::KindFilter) => Some("切换资源类型 · Type filter".into()),
+        Some(Hit::ClearFilters) => Some("清除全部筛选 · Clear filters".into()),
         Some(Hit::FavoriteFilter) => Some("只看收藏 · Favorites".into()),
-        Some(Hit::LibraryMode(mode)) => Some(format!("切换到 {} 库", mode.label())),
-        Some(Hit::PresetRow(index)) => state.preset(index).map(|patch| {
-            format!(
-                "PRESET · {} · {}  ·  click to audition / drag to insert / ⌘E WAV",
-                patch.name,
-                patch.category.label()
-            )
-        }),
-        Some(Hit::PresetFavorite(index)) => state
-            .presets
-            .get(index)
-            .map(|patch| format!("收藏预设 · {}", patch.name)),
+        Some(Hit::LibraryRow(key)) => state
+            .library_entry(key)
+            .map(|entry| format!("{} · {} · {}", entry.kind.label(), entry.name, entry.detail)),
+        Some(Hit::LibraryFavorite(key)) => state
+            .library_entry(key)
+            .map(|entry| format!("收藏 · {}", entry.name)),
         Some(Hit::InstallPresets) => {
             Some("安装 11 个内置预设到当前工程 · Install builtin presets".into())
         }

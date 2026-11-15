@@ -6,6 +6,7 @@ use igui_ui::TextMeasurer;
 
 use crate::app::{Drag, LibraryMode, State, Tab, TimelineDrag};
 use crate::icons::{self, Icon};
+use crate::library::{LibraryKey, LibraryKind, LibraryListRow};
 use crate::model::{
     layer_sections, music_sections, AutomationKind, Category, ClipField, EnvShape, FilterMode,
     Layer, LayerField, LayerRowSpec, MusicField, MusicRowSpec, MusicWave, PatchField, ToneEnv,
@@ -31,7 +32,6 @@ pub const CLIP_SNAP: f32 = 0.005;
 pub const LIBRARY_TOP: f32 = 86.0;
 pub const LIBRARY_ROW_H: f32 = 24.0;
 pub const LIBRARY_END_GAP: f32 = 8.0;
-pub const MUSIC_ROW_OFFSET: f32 = 28.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
@@ -185,8 +185,10 @@ pub fn curve_point(kind: CurveKind, rect: Rect, value: f32, index: usize, len: u
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Hit {
     Action(Action),
-    PatchRow(usize),
-    PatchFavorite(usize),
+    LibraryRow(LibraryKey),
+    LibraryFavorite(LibraryKey),
+    /// Index into `Layout::library_rows`; toggles a folder header.
+    LibraryFolder(usize),
     LayerRow(usize),
     LayerField(LayerField),
     PatchField(PatchField),
@@ -211,10 +213,11 @@ pub enum Hit {
     CategoryFilter,
     CategoryPick(Option<Category>),
     CategoryMenu,
+    KindFilter,
+    KindPick(Option<LibraryKind>),
+    KindMenu,
+    ClearFilters,
     FavoriteFilter,
-    LibraryMode(LibraryMode),
-    PresetRow(usize),
-    PresetFavorite(usize),
     InstallPresets,
     Search,
     LibraryScrollbar,
@@ -431,11 +434,18 @@ pub fn action_available(state: &State, action: Action) -> bool {
     if action == Action::RestorePreset {
         return state.view.library_mode == LibraryMode::Presets;
     }
-    if state.view.library_mode != LibraryMode::Presets {
+    let focused_read_only = matches!(
+        state.selected_library_kind(),
+        Some(crate::library::LibraryKind::Audio | crate::library::LibraryKind::Music)
+    );
+    if state.view.library_mode != LibraryMode::Presets && !focused_read_only {
         return true;
     }
     if action == Action::ExportWav {
-        return selected_preset;
+        return matches!(
+            state.view.selected_library,
+            Some(crate::library::LibraryKey::Preset(_))
+        );
     }
     !matches!(
         action,
@@ -472,6 +482,13 @@ pub fn action_unavailable_message(state: &State, action: Action) -> &'static str
     {
         return "切到 PRESETS 后管理预设 · switch to PRESETS";
     }
+    if matches!(
+        state.selected_library_kind(),
+        Some(crate::library::LibraryKind::Audio | crate::library::LibraryKind::Music)
+    ) && state.view.library_mode != LibraryMode::Presets
+    {
+        return "AUDIO/MUSIC 只读 · 选 SOUND 编辑";
+    }
     if state.view.library_mode == LibraryMode::Presets {
         if matches!(
             action,
@@ -498,6 +515,17 @@ mod tests {
     use super::paint::inspector_items;
     use super::*;
     use crate::app::State;
+
+    fn first_entry_row(layout: &Layout) -> (LibraryKey, Rect) {
+        layout
+            .library_rows
+            .iter()
+            .find_map(|(row, rect)| match row {
+                LibraryListRow::Entry(entry) => Some((entry.key, *rect)),
+                LibraryListRow::Folder { .. } => None,
+            })
+            .expect("entry row")
+    }
 
     #[test]
     fn layout_exposes_library_filters_and_system_menu() {
@@ -731,7 +759,7 @@ mod tests {
         let layout = Layout::new(&state, state.view.viewport);
         assert!(layout.library_scrollbar.size.height > 0.0);
         assert!(layout.library_max_start > 0);
-        let (_, row) = layout.patch_rows[0];
+        let (_, row) = layout.library_rows[0];
         assert!(patch_star_rect(row).right() < layout.library_scrollbar.left());
         assert_eq!(
             hit(&state, &layout, layout.library_scrollbar.center()),
@@ -758,27 +786,23 @@ mod tests {
     }
 
     #[test]
-    fn preset_mode_swaps_rows_and_hit_targets() {
+    fn preset_filter_swaps_rows_and_hit_targets() {
         let mut state = State::demo();
         state.view.library_mode = LibraryMode::Presets;
+        state.view.kind_filter = Some(LibraryKind::Preset);
         let layout = Layout::new(&state, state.view.viewport);
-        assert!(layout.patch_rows.is_empty());
-        assert!(!layout.preset_rows.is_empty());
-        let (index, row) = layout.preset_rows[0];
+        assert!(!layout.library_rows.is_empty());
+        let (key, row) = first_entry_row(&layout);
+        assert_eq!(key.kind(), LibraryKind::Preset);
         let body = Vec2::new(row.left() + 40.0, row.center().y);
-        assert_eq!(hit(&state, &layout, body), Some(Hit::PresetRow(index)));
+        assert_eq!(hit(&state, &layout, body), Some(Hit::LibraryRow(key)));
         assert_eq!(
             hit(&state, &layout, patch_star_rect(row).center()),
-            Some(Hit::PresetFavorite(index))
+            Some(Hit::LibraryFavorite(key))
         );
-        let (_, project_tab) = layout
-            .library_mode_buttons
-            .iter()
-            .find(|(mode, _)| *mode == LibraryMode::Project)
-            .expect("project tab");
         assert_eq!(
-            hit(&state, &layout, project_tab.center()),
-            Some(Hit::LibraryMode(LibraryMode::Project))
+            hit(&state, &layout, layout.kind_rect.center()),
+            Some(Hit::KindFilter)
         );
     }
 
@@ -787,6 +811,7 @@ mod tests {
         let mut state = State::empty();
         state.doc.root = Some(std::path::PathBuf::from("/tmp/sfx-studio-install"));
         state.view.library_mode = LibraryMode::Presets;
+        state.view.kind_filter = Some(LibraryKind::Preset);
         let layout = Layout::new(&state, state.view.viewport);
         let button = layout.install_presets.expect("install button");
         assert_eq!(
@@ -875,7 +900,7 @@ mod tests {
         let row = layout.layer_rows[0].1;
         state.view.cursor = Vec2::new(layout.time_x(0.3), row.center().y);
         state.view.drag = Drag::LibraryItem {
-            index: 0,
+            key: LibraryKey::Preset(0),
             start: Vec2::ZERO,
             moved: true,
         };
@@ -890,8 +915,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(labels.contains(&"PROJECT"));
-        assert!(labels.contains(&"PRESETS"));
+        assert!(labels.contains(&"PRE"));
         assert!(labels.iter().any(|label| label.contains("INSERT")));
     }
 
@@ -1106,13 +1130,13 @@ mod tests {
     fn favorite_star_hit_is_split_from_the_row() {
         let state = State::demo();
         let layout = Layout::new(&state, state.view.viewport);
-        let (index, row) = layout.patch_rows[0];
+        let (key, row) = first_entry_row(&layout);
         assert_eq!(
             hit(&state, &layout, patch_star_rect(row).center()),
-            Some(Hit::PatchFavorite(index))
+            Some(Hit::LibraryFavorite(key))
         );
         let body = Vec2::new(row.left() + 40.0, row.center().y);
-        assert_eq!(hit(&state, &layout, body), Some(Hit::PatchRow(index)));
+        assert_eq!(hit(&state, &layout, body), Some(Hit::LibraryRow(key)));
     }
 
     #[test]
@@ -1232,5 +1256,71 @@ mod tests {
             .unwrap();
         let hit = hit(&state, &layout, Vec2::new(x, row.center().y));
         assert!(matches!(hit, Some(Hit::Timeline { clip: Some(0), .. })));
+    }
+    #[test]
+    fn kind_menu_lists_every_resource_and_clear_is_clickable() {
+        let mut state = State::demo();
+        state.view.kind_menu_open = true;
+        let layout = Layout::new(&state, state.view.viewport);
+        assert_eq!(layout.kind_items.len(), LibraryKind::ALL.len() + 1);
+        for (kind, rect) in &layout.kind_items {
+            assert_eq!(
+                hit(&state, &layout, rect.center()),
+                Some(Hit::KindPick(*kind))
+            );
+        }
+        assert_eq!(
+            hit(&state, &layout, layout.kind_rect.center()),
+            Some(Hit::KindFilter)
+        );
+        assert_eq!(
+            hit(&state, &layout, layout.clear_rect.center()),
+            Some(Hit::ClearFilters)
+        );
+    }
+    #[test]
+    fn folder_headers_are_hit_testable() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "sfx-studio-ui-folders-{}-{stamp}",
+            std::process::id()
+        ));
+        let dir = root.join("presets/impact");
+        std::fs::create_dir_all(&dir).unwrap();
+        let patch = crate::model::Patch::new_layer("boom", crate::model::Wave::Noise);
+        std::fs::write(
+            dir.join("boom.json"),
+            serde_json::to_string(&patch).unwrap(),
+        )
+        .unwrap();
+        let mut state = State::demo();
+        state.doc.root = Some(root.clone());
+        state.presets.load_project(&root);
+        let layout = Layout::new(&state, state.view.viewport);
+        let (index, rect) = layout
+            .library_rows
+            .iter()
+            .enumerate()
+            .find_map(|(index, (row, rect))| match row {
+                LibraryListRow::Folder { key, .. } if key == "PRE:impact" => Some((index, *rect)),
+                _ => None,
+            })
+            .expect("impact folder");
+        assert_eq!(
+            hit(&state, &layout, rect.center()),
+            Some(Hit::LibraryFolder(index))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn stale_library_scroll_cannot_hide_every_row() {
+        let mut state = State::demo();
+        state.view.library_scroll = 999;
+        let layout = Layout::new(&state, state.view.viewport);
+        assert!(!layout.library_rows.is_empty());
+        assert!(matches!(layout.library_rows[0].0, LibraryListRow::Entry(_)));
     }
 }

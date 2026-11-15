@@ -19,6 +19,7 @@ use crate::builtin;
 use crate::export;
 use crate::fx::{self, Stereo};
 use crate::model::{Music, MusicWave, Project};
+use crate::music_bank::MusicBank;
 use crate::presets::PresetBank;
 use crate::synth;
 
@@ -317,6 +318,11 @@ pub fn write_pack(root: &Path, seed: u32) -> Result<String, String> {
     project.validate();
     crate::model::save_project(root, &project).map_err(|error| error.to_string())?;
     PresetBank::write_presets(root, &project.patches).map_err(|error| error.to_string())?;
+    let music_tracks: Vec<(&str, &Music)> = tracks
+        .iter()
+        .map(|track| (track.key, &track.music))
+        .collect();
+    MusicBank::write_tracks(root, &music_tracks).map_err(|error| error.to_string())?;
     export::bake(&project, root)?;
 
     let demo_dir = root.join("audio").join("demo");
@@ -469,12 +475,9 @@ mod tests {
         assert!(root.join(model::PROJECT_FILE).exists());
         let project = model::load_project(&root).expect("load").expect("project");
         assert_eq!(project.patches.len(), builtin::PRESET_NAMES.len());
-        assert_eq!(
-            std::fs::read_dir(root.join("presets"))
-                .expect("presets")
-                .count(),
-            builtin::PRESET_NAMES.len()
-        );
+        let mut bank = PresetBank::default();
+        bank.load_project(&root);
+        assert_eq!(bank.len(), builtin::PRESET_NAMES.len());
         for track in tracks() {
             assert!(
                 root.join("audio")

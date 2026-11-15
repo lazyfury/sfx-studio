@@ -2,19 +2,60 @@
 
 ## 0. 工程内预设库（不属于 `sfx.project.json`）
 
-工程是一个目录。`PROJECT | PRESETS` 左栏的 PRESETS 读取当前工程目录下的
-`presets/*.json`（每个文件一个 `Patch` JSON）。预设随工程移动/复制，不写入
-`sfx.project.json`，也不影响 `--dump/--bake/--export`。
+工程是一个目录。左栏统一 Library 读取当前工程目录下的 `presets/*.json`
+（每个文件一个 `Patch` JSON）、`audio/**/*.wav` 与工程内 music。预设和
+音频随工程移动/复制，不写入 `sfx.project.json`，也不影响
+`--dump/--bake/--export`。
 
 ```text
 <project>/
 ├── sfx.project.json
 ├── presets/
-│   ├── laser.json
-│   ├── coin.json
+│   ├── impact/
+│   │   └── boom.json
+│   ├── laser/
+│   │   └── laser.json
+│   ├── ui/
+│   │   └── coin.json
 │   └── .favorites.json   # 可选，UI 收藏
-└── audio/...
+├── music/
+│   ├── neon_drive.json   # 每个文件一个 Music JSON
+│   ├── boss_theme.json
+│   └── star_menu.json
+├── audio/
+│   ├── sfx/samples/      # AUDIO 库扫描的 WAV 素材
+│   ├── baked/            # BAKE GODOT 生成，AUDIO 库跳过
+│   └── demo/             # demo pack 生成，AUDIO 库跳过
+└── ...
 ```
+
+### 左栏统一 Library（0030）
+
+工程打开时，左栏同时构建四类只读视图，**不写入** `sfx.project.json`：
+
+| 类型 | 来源 | 说明 |
+|---|---|---|
+| SOUND | `Project.patches` | 可编辑音效 |
+| AUDIO | `<project>/audio/**/*.wav` | 扫描所有 WAV；跳过隐藏文件、`audio/baked/`、`audio/demo/` |
+| PRESET | `<project>/presets/*.json` | 工程内预设 |
+| MUSIC | `<project>/music/**/*.json` | 每个文件一个 `Music` JSON；文件名作为库显示名 |
+
+- 类型下拉 `ALL/SOUND/AUDIO/PRESET/MUSIC`；`×` 清空类型、分类、搜索、收藏。
+- PRESET/AUDIO 的 `folder` 来自相对路径（如 `impact`、`sfx/samples`），左栏显示
+  可折叠文件夹标题；旧工程的平铺 `presets/*.json` 继续可读，`folder = None`。
+- 新建工程/`--new`/`--demo` 按 `Category::folder()` 写入预设目录：
+  `impact/laser/ui/movement/magic/environment/combat`。
+- 删除预设移到 `presets/.trash/<原相对路径>.<timestamp>.bak`，`RESTORE LAST`
+  按原文件夹恢复。
+- 分类/收藏筛选只对 SOUND/PRESET 生效；AUDIO/MUSIC 的 category 视为空。
+- AUDIO 行单击试听；拖到时间线插入一个 `Wave::Sample` 层，`sample_path`
+  使用工程相对路径，源文件仍保留在 `audio/` 下。
+- MUSIC 文件点击后载入 `Project.music`（可撤销），右侧切到 MUSIC 检查器；
+  `Project.music` 仍是当前编辑中的唯一音乐，文件本身是模板/曲目库。
+- 新工程/`--new` 默认写入 `music/{neon_drive,boss_theme,star_menu}.json`。
+- `music/*.json` 的内容就是 `Music` 对象（字段与 `sfx.project.json` 的
+  `music` 相同），文件名作为库显示名；加载时复用 `Music::validate()`，
+  坏 JSON 只记录 warning 并跳过。
 
 - GUI `NEW PROJECT`：写 1 个 starter patch 的工程文件 + `presets/`（从 demo 音色初始化）。
   `--new DIR` 额外 bake 音频。已存在 `sfx.project.json` 或非空 `presets/` 时拒绝覆盖。

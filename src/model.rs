@@ -230,6 +230,19 @@ impl Category {
         self.label()
     }
 
+    /// File-system folder used by the default preset bank.
+    pub fn folder(self) -> &'static str {
+        match self {
+            Category::Impact => "impact",
+            Category::Laser => "laser",
+            Category::Ui => "ui",
+            Category::Movement => "movement",
+            Category::Magic => "magic",
+            Category::Environment => "environment",
+            Category::Combat => "combat",
+        }
+    }
+
     /// Parse a `.tres` group back into an app category (case-insensitive).
     pub fn from_group(group: &str) -> Option<Self> {
         let group = group.trim();
@@ -1561,6 +1574,17 @@ fn sanitize_points(points: &mut Vec<AutomationPoint>, low: f32, high: f32, max_t
 }
 
 impl Music {
+    /// Clamp untrusted values and report missing musical content. Used by both
+    /// `Project::validate` and standalone `<project>/music/*.json` files.
+    pub fn validate(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if self.bass_notes.is_empty() || self.chords.is_empty() {
+            warnings.push("music has no notes/chords".into());
+        }
+        self.sanitize();
+        warnings
+    }
+
     fn sanitize(&mut self) {
         self.bpm = finite(self.bpm, 132.0).clamp(40.0, 240.0);
         self.bars = self.bars.clamp(1, 32);
@@ -1634,10 +1658,7 @@ impl Project {
         if self.name.trim().is_empty() {
             self.name = "untitled".into();
         }
-        if self.music.bass_notes.is_empty() || self.music.chords.is_empty() {
-            warnings.push("music has no notes/chords".into());
-        }
-        self.music.sanitize();
+        warnings.extend(self.music.validate());
 
         if self.patches.len() > 512 {
             warnings.push("library truncated to 512 patches".into());

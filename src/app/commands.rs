@@ -335,10 +335,15 @@ impl SfxLogic {
                 match open_folder(&mut self.state, folder) {
                     Ok(load_warnings) => {
                         warnings.extend(load_warnings);
+                        let summary = format!(
+                            "project created · {} presets · {} music",
+                            self.state.presets.len(),
+                            self.state.music_bank.len()
+                        );
                         self.state.toast(if warnings.is_empty() {
-                            "project created".to_string()
+                            summary
                         } else {
-                            format!("project created · {}", warnings.join("; "))
+                            format!("{summary} · {}", warnings.join("; "))
                         });
                     }
                     Err(error) => self
@@ -375,14 +380,22 @@ impl SfxLogic {
         }
         self.state.view.timeline_zoom = 1.0;
         self.state.view.timeline_offset = 0.0;
-        match open_folder(&mut self.state, folder) {
-            Ok(warnings) => {
-                let message = if warnings.is_empty() {
-                    "project loaded".to_string()
+        match crate::project_io::open_or_create(&mut self.state, folder) {
+            Ok((warnings, created)) => {
+                let summary = if created {
+                    format!(
+                        "project created · {} presets · {} music",
+                        self.state.presets.len(),
+                        self.state.music_bank.len()
+                    )
                 } else {
-                    format!("project loaded · {}", warnings.join("; "))
+                    "project loaded".to_string()
                 };
-                self.state.toast(message);
+                self.state.toast(if warnings.is_empty() {
+                    summary
+                } else {
+                    format!("{summary} · {}", warnings.join("; "))
+                });
             }
             Err(error) => self.state.toast(format!("open failed: {error}")),
         }
@@ -443,6 +456,7 @@ impl SfxLogic {
             Ok(written) => {
                 let warnings = self.state.presets.load_project(&root);
                 self.state.view.selected_preset = None;
+                self.state.view.selected_library = None;
                 self.state.view.preset_scroll = 0;
                 self.state.bump_view();
                 self.state.toast(if warnings.is_empty() {
@@ -578,10 +592,8 @@ impl SfxLogic {
 
     pub(super) fn export_wav(&mut self) {
         let mut sample_warnings = Vec::new();
-        if self.state.view.library_mode == LibraryMode::Presets {
-            if let Some(index) = self.state.view.selected_preset {
-                sample_warnings = self.state.presets.hydrate(index);
-            }
+        if let Some(LibraryKey::Preset(index)) = self.state.view.selected_library {
+            sample_warnings = self.state.presets.hydrate(index);
         }
         let Some(patch) = self.state.export_patch().cloned() else {
             self.state.toast("select a sound or preset to export");
@@ -673,6 +685,21 @@ impl SfxLogic {
             layer.duration = (data.samples.len() as f32 / data.rate as f32).clamp(0.005, 3.0);
             layer.sample_path = stored;
             layer.sample_data = Some(std::sync::Arc::new(data));
+        }
+        if let Some(root) = self.state.doc.root.clone() {
+            let selected = self.state.selected_audio().map(|asset| asset.path.clone());
+            self.state.audio_bank.load_project(&root);
+            if let Some(path) = selected {
+                if let Some(index) = self
+                    .state
+                    .audio_bank
+                    .assets()
+                    .iter()
+                    .position(|asset| asset.path == path)
+                {
+                    self.state.view.selected_library = Some(LibraryKey::Audio(index));
+                }
+            }
         }
         self.state.mark_dirty();
         self.state.bump_view();
@@ -827,6 +854,227 @@ impl SfxLogic {
         ));
     }
 
+    /// Select a row on pointer-down. Preset/audio rows also arm a drag; music
+    /// rows only switch the editor until the click completes.
+    pub(super) fn select_library_row(&mut self, key: LibraryKey) {
+        match key {
+            LibraryKey::Sound(id) => {
+                if let Some(index) = self
+                    .state
+                    .doc
+                    .project
+                    .patches
+                    .iter()
+                    .position(|patch| patch.id == id)
+                {
+                    self.state.view.tab = Tab::Patches;
+                    self.state.select_patch(index);
+                }
+            }
+            LibraryKey::Audio(index) => {
+                self.state.view.tab = Tab::Patches;
+                self.state.playback.defer_render = true;
+                self.state.select_audio(index);
+            }
+            LibraryKey::Preset(index) => {
+                self.state.select_preset(index);
+            }
+            LibraryKey::Music(key) => {
+                self.state.view.tab = Tab::Music;
+                self.state.select_music(key);
+                self.state.playback.defer_render = true;
+            }
+        }
+    }
+
+    /// Complete a click on a library row: sound selects, audio/preset auditions,
+    /// music loads the project bed or a demo arrangement.
+    pub(super) fn activate_library_row(&mut self, key: LibraryKey) {
+        match key {
+            LibraryKey::Sound(id) => {
+                if let Some(index) = self
+                    .state
+                    .doc
+                    .project
+                    .patches
+                    .iter()
+                    .position(|patch| patch.id == id)
+                {
+                    self.state.view.tab = Tab::Patches;
+                    self.state.select_patch(index);
+                }
+            }
+            LibraryKey::Audio(index) => {
+                self.state.view.tab = Tab::Patches;
+                self.state.playback.defer_render = true;
+                self.audition_audio(index);
+            }
+            LibraryKey::Preset(index) => self.audition_preset(index),
+            LibraryKey::Music(index) => self.load_music(index),
+        }
+    }
+
+    /// Load a `<project>/music/*.json` arrangement into the current project.
+    /// This is an undoable document edit, not a preview.
+    pub(super) fn load_music(&mut self, index: usize) {
+        let Some(asset) = self.state.music_bank.get(index) else {
+            return;
+        };
+        let name = asset.name.clone();
+        let music = asset.music.clone();
+        self.state.select_music(index);
+        let changed = self.state.doc.project.music != music;
+        if changed {
+            self.state.push_undo_label("load music");
+            self.state.doc.project.music = music;
+            self.state.mark_music_dirty();
+            self.state.playback.playhead = 0.0;
+        }
+        self.state.view.tab = Tab::Music;
+        self.state.view.inspector_scroll = 0.0;
+        self.state.playback.defer_render = true;
+        self.state.bump_view();
+        self.state.toast(if changed {
+            format!("music · {name}")
+        } else {
+            format!("music · {name} · already loaded")
+        });
+    }
+
+    /// Audition a WAV asset from the project audio folder. The audio callback
+    /// expects 48 kHz source frames, so native-rate files are resampled here.
+    pub(super) fn audition_audio(&mut self, index: usize) {
+        let Some(asset) = self.state.audio_bank.get(index).cloned() else {
+            return;
+        };
+        let Some(root) = self.state.doc.root.clone() else {
+            self.state.toast("open a project first");
+            return;
+        };
+        let path = asset.absolute(&root);
+        let data = match crate::wav::load(&path) {
+            Ok(data) => data,
+            Err(error) => {
+                self.state.toast(format!("audio load failed: {error}"));
+                return;
+            }
+        };
+        let mut samples = data.samples;
+        if data.rate != synth::PREVIEW_RATE {
+            samples = resample_linear(&samples, data.rate, synth::PREVIEW_RATE);
+        }
+        let Some(audio) = &self.audio else {
+            self.state.toast("no audio device");
+            return;
+        };
+        if audio.is_playing() {
+            audio.stop();
+        }
+        if samples.is_empty() {
+            self.state.toast("nothing to play");
+            return;
+        }
+        audio.play(samples, 1, 0, false);
+        self.state.playback.preset_playing = true;
+        self.state.playback.was_playing = true;
+        self.state.playback.seeked = false;
+        self.state
+            .toast(format!("audio · {} · drag to timeline", asset.name));
+    }
+
+    /// Insert a WAV asset as a `Wave::Sample` layer at the drop time.
+    pub(super) fn drop_audio(&mut self, index: usize, position: Vec2, layout: &ui::Layout) {
+        let Some(asset) = self.state.audio_bank.get(index).cloned() else {
+            return;
+        };
+        let Some(root) = self.state.doc.root.clone() else {
+            self.state.toast("open a project first");
+            return;
+        };
+        let Some(target) = ui::drop_target(&self.state, layout, position) else {
+            self.state.toast("drop audio on the timeline");
+            return;
+        };
+        let (layer, time) = match target {
+            ui::DropTarget::Timeline { layer, time } => (layer, time),
+            ui::DropTarget::ProjectLibrary => {
+                self.state.toast("drop audio on the timeline");
+                return;
+            }
+        };
+        if self.state.view.tab != Tab::Patches {
+            self.state.toast("switch to the SOUND tab to drop audio");
+            return;
+        }
+        let Some(patch_index) = self.state.patch_index() else {
+            self.state.toast("select a project patch first");
+            return;
+        };
+        let current_layers = self
+            .state
+            .patch()
+            .map(|patch| patch.layers.len())
+            .unwrap_or(0);
+        if current_layers >= 32 {
+            self.state.toast("layer limit is 32 · delete a layer first");
+            return;
+        }
+        let path = asset.absolute(&root);
+        let data = match crate::wav::load(&path) {
+            Ok(data) => data,
+            Err(error) => {
+                self.state.toast(format!("audio load failed: {error}"));
+                return;
+            }
+        };
+        let time = if self.state.view.modifiers.shift {
+            time
+        } else {
+            ui::snap_time(time)
+        };
+        let duration = (data.samples.len() as f32 / data.rate as f32).clamp(0.005, 3.0);
+        let mut new_layer = Layer::new(Wave::Sample);
+        new_layer.sample_path = asset.path.clone();
+        new_layer.sample_data = Some(std::sync::Arc::new(data));
+        new_layer.duration = duration;
+        new_layer.clips = vec![Clip {
+            start: time,
+            duration,
+            ..Clip::default()
+        }];
+        self.state.begin_edit();
+        let at = self
+            .state
+            .patch()
+            .map(|patch| patch.layers.len())
+            .unwrap_or(0)
+            .min(layer);
+        if let Some(patch) = self.state.doc.project.patches.get_mut(patch_index) {
+            patch.layers.insert(at, new_layer);
+        }
+        self.state.mark_dirty();
+        self.state.select_layer(at);
+        self.state.select_clip(0);
+        self.state.commit_edit();
+        self.state
+            .toast(format!("inserted {} at {time:.3}s", asset.name));
+    }
+
+    pub(super) fn drop_library_item(
+        &mut self,
+        key: LibraryKey,
+        position: Vec2,
+        layout: &ui::Layout,
+    ) {
+        match key {
+            LibraryKey::Preset(index) => self.drop_preset(index, position, layout),
+            LibraryKey::Audio(index) => self.drop_audio(index, position, layout),
+            LibraryKey::Sound(_) | LibraryKey::Music(_) => {
+                self.state.toast("only audio and presets can be dragged");
+            }
+        }
+    }
+
     /// Complete a library drag. Timeline drops copy the preset's layers into
     /// the current patch; left-panel drops copy the preset into the project.
     pub(super) fn drop_preset(&mut self, index: usize, position: Vec2, layout: &ui::Layout) {
@@ -954,6 +1202,12 @@ impl SfxLogic {
     }
 
     fn cycle_category(&mut self) {
+        if matches!(
+            self.state.view.kind_filter,
+            Some(LibraryKind::Audio | LibraryKind::Music)
+        ) {
+            self.state.view.kind_filter = None;
+        }
         let next = match self.state.view.category_filter {
             None => Some(Category::ALL[0]),
             Some(category) => {
@@ -979,6 +1233,68 @@ impl SfxLogic {
         self.refresh_filter();
     }
 
+    pub(super) fn pick_kind(&mut self, kind: Option<LibraryKind>) {
+        self.state.view.kind_filter = kind;
+        self.state.view.kind_menu_open = false;
+        self.state.view.category_menu_open = false;
+        match kind {
+            Some(LibraryKind::Preset) => {
+                self.state.view.library_mode = LibraryMode::Presets;
+                self.state.view.selected_library =
+                    self.state.view.selected_preset.map(LibraryKey::Preset);
+            }
+            Some(LibraryKind::Sound) => {
+                self.state.view.library_mode = LibraryMode::Project;
+                self.state.view.selected_library =
+                    self.state.patch().map(|patch| LibraryKey::Sound(patch.id));
+            }
+            Some(LibraryKind::Audio | LibraryKind::Music) => {
+                self.state.view.library_mode = LibraryMode::Project;
+            }
+            None => {}
+        }
+        self.refresh_filter();
+        let selected_visible = self.state.view.selected_library.is_some_and(|key| {
+            self.state
+                .visible_library_entries()
+                .iter()
+                .any(|entry| entry.key == key)
+        });
+        if !selected_visible {
+            if let Some(key) = self
+                .state
+                .visible_library_entries()
+                .first()
+                .map(|entry| entry.key)
+            {
+                if matches!(key, LibraryKey::Music(_)) {
+                    self.activate_library_row(key);
+                } else {
+                    self.select_library_row(key);
+                }
+            } else {
+                self.state.view.selected_library = None;
+                self.state.view.selected_preset = None;
+            }
+        }
+        self.state.toast(match kind {
+            Some(kind) => format!("type: {}", kind.label()),
+            None => "type: all resources".into(),
+        });
+    }
+
+    pub(super) fn clear_filters(&mut self) {
+        self.state.view.kind_filter = None;
+        self.state.view.category_filter = None;
+        self.state.view.favorites_only = false;
+        self.state.view.search.clear();
+        self.state.view.search_focus = false;
+        self.state.view.kind_menu_open = false;
+        self.state.view.category_menu_open = false;
+        self.refresh_filter();
+        self.state.toast("cleared library filters");
+    }
+
     fn toggle_favorite_filter(&mut self) {
         self.state.view.favorites_only = !self.state.view.favorites_only;
         self.refresh_filter();
@@ -990,24 +1306,22 @@ impl SfxLogic {
     }
 
     pub(super) fn refresh_filter(&mut self) {
-        match self.state.view.library_mode {
-            LibraryMode::Project => {
-                self.state.view.patch_scroll = 0;
-                self.keep_selection_visible();
-            }
-            LibraryMode::Presets => {
-                self.state.view.preset_scroll = 0;
-                if self
-                    .state
-                    .view
-                    .selected_preset
-                    .is_some_and(|index| !self.state.preset_visible(index))
-                {
-                    self.state.view.selected_preset = None;
-                }
-                self.state.ensure_preset_visible();
-            }
+        self.state.view.patch_scroll = 0;
+        self.state.view.preset_scroll = 0;
+        self.state.view.library_scroll = 0;
+        let selected = self.state.view.selected_library;
+        let visible = self.state.visible_library_entries();
+        if selected.is_some_and(|key| !visible.iter().any(|entry| entry.key == key)) {
+            self.state.view.selected_library = None;
+            self.state.view.selected_preset = None;
         }
+        if self.state.view.library_mode != LibraryMode::Presets
+            && (self.state.view.kind_filter.is_none()
+                || self.state.view.kind_filter == Some(LibraryKind::Sound))
+        {
+            self.keep_selection_visible();
+        }
+        self.state.ensure_library_visible();
         self.state.bump_view();
     }
 
@@ -1032,9 +1346,11 @@ impl SfxLogic {
             self.state.set_library_mode(LibraryMode::Project);
         }
         if !self.state.patch_visible(index) {
+            self.state.view.kind_filter = None;
             self.state.view.category_filter = None;
             self.state.view.favorites_only = false;
             self.state.view.patch_scroll = 0;
+            self.state.view.library_scroll = 0;
         }
         self.state.view.tab = Tab::Patches;
         self.state.select_patch(index);
@@ -1131,6 +1447,7 @@ impl SfxLogic {
                             .map(|root| self.state.presets.load_project(root))
                             .unwrap_or_default();
                         self.state.view.selected_preset = None;
+                        self.state.view.selected_library = None;
                         self.state.view.preset_scroll = 0;
                         self.state.bump_view();
                         self.state.toast(if warnings.is_empty() {
@@ -1185,4 +1502,22 @@ impl SfxLogic {
             _ => true,
         }
     }
+}
+
+fn resample_linear(samples: &[f32], from: u32, to: u32) -> Vec<f32> {
+    if samples.is_empty() || from == 0 || to == 0 || from == to {
+        return samples.to_vec();
+    }
+    let ratio = from as f64 / to as f64;
+    let out_len = ((samples.len() as f64) / ratio).ceil() as usize;
+    let mut out = Vec::with_capacity(out_len.max(1));
+    for index in 0..out_len {
+        let pos = index as f64 * ratio;
+        let base = pos.floor() as usize;
+        let frac = (pos - base as f64) as f32;
+        let a = samples.get(base).copied().unwrap_or(0.0);
+        let b = samples.get(base + 1).copied().unwrap_or(a);
+        out.push(a + (b - a) * frac);
+    }
+    out
 }

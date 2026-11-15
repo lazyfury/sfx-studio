@@ -75,6 +75,9 @@ impl AppLogic for SfxLogic {
                         if matches!(self.state.view.drag, Drag::LibraryItem { .. }) {
                             self.state.view.drag = Drag::None;
                             self.state.bump_view();
+                        } else if self.state.view.kind_menu_open {
+                            self.state.view.kind_menu_open = false;
+                            self.state.bump_view();
                         } else if self.state.view.category_menu_open {
                             self.state.view.category_menu_open = false;
                             self.state.bump_view();
@@ -147,12 +150,14 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::Character('f') if !cmd => {
-                        if self.state.view.library_mode == LibraryMode::Presets {
-                            if let Some(index) = self.state.view.selected_preset {
-                                self.toggle_preset_favorite(index);
+                        match self.state.view.selected_library {
+                            Some(crate::library::LibraryKey::Preset(index)) => {
+                                self.toggle_preset_favorite(index)
                             }
-                        } else {
-                            self.activate(ui::Action::Favorite);
+                            Some(crate::library::LibraryKey::Sound(_)) | None => {
+                                self.activate(ui::Action::Favorite)
+                            }
+                            _ => {}
                         }
                         return EventResult::Handled;
                     }
@@ -228,8 +233,26 @@ impl AppLogic for SfxLogic {
                 if pointer_hit == Some(ui::Hit::MenuToggle) {
                     self.state.view.menu_open = true;
                     self.state.view.category_menu_open = false;
+                    self.state.view.kind_menu_open = false;
                     self.state.bump_view();
                     return EventResult::Handled;
+                }
+                if self.state.view.kind_menu_open {
+                    match pointer_hit {
+                        Some(ui::Hit::KindPick(kind)) => {
+                            self.pick_kind(kind);
+                            return EventResult::Handled;
+                        }
+                        Some(ui::Hit::KindMenu | ui::Hit::KindFilter) => {
+                            self.state.view.kind_menu_open = false;
+                            self.state.bump_view();
+                            return EventResult::Handled;
+                        }
+                        _ => {
+                            self.state.view.kind_menu_open = false;
+                            self.state.bump_view();
+                        }
+                    }
                 }
                 if self.state.view.category_menu_open {
                     match pointer_hit {
@@ -268,8 +291,27 @@ impl AppLogic for SfxLogic {
                         self.activate(action);
                         return EventResult::Handled;
                     }
+                    Some(ui::Hit::KindFilter) => {
+                        self.state.view.kind_menu_open = !self.state.view.kind_menu_open;
+                        self.state.view.category_menu_open = false;
+                        self.state.view.menu_open = false;
+                        self.state.bump_view();
+                        return EventResult::Handled;
+                    }
+                    Some(ui::Hit::KindPick(kind)) => {
+                        self.pick_kind(kind);
+                        return EventResult::Handled;
+                    }
+                    Some(ui::Hit::KindMenu) => {
+                        return EventResult::Handled;
+                    }
+                    Some(ui::Hit::ClearFilters) => {
+                        self.clear_filters();
+                        return EventResult::Handled;
+                    }
                     Some(ui::Hit::CategoryFilter) => {
                         self.state.view.category_menu_open = !self.state.view.category_menu_open;
+                        self.state.view.kind_menu_open = false;
                         self.state.view.menu_open = false;
                         self.state.bump_view();
                         return EventResult::Handled;
@@ -281,24 +323,50 @@ impl AppLogic for SfxLogic {
                     Some(ui::Hit::CategoryMenu) => {
                         return EventResult::Handled;
                     }
-                    Some(ui::Hit::LibraryMode(mode)) => {
-                        if self.state.playback.preset_playing {
-                            self.stop();
+                    Some(ui::Hit::LibraryRow(key)) => {
+                        self.select_library_row(key);
+                        if matches!(key, crate::library::LibraryKey::Music(_)) {
+                            self.activate_library_row(key);
+                        } else if matches!(
+                            key,
+                            crate::library::LibraryKey::Audio(_)
+                                | crate::library::LibraryKey::Preset(_)
+                        ) {
+                            self.state.view.drag = Drag::LibraryItem {
+                                key,
+                                start: *position,
+                                moved: false,
+                            };
                         }
-                        self.state.set_library_mode(mode);
                         return EventResult::Handled;
                     }
-                    Some(ui::Hit::PresetRow(index)) => {
-                        self.state.select_preset(index);
-                        self.state.view.drag = Drag::LibraryItem {
-                            index,
-                            start: *position,
-                            moved: false,
-                        };
+                    Some(ui::Hit::LibraryFolder(row)) => {
+                        if let Some((LibraryListRow::Folder { key, .. }, _)) =
+                            layout.library_rows.get(row)
+                        {
+                            self.state.toggle_library_folder(key);
+                        }
                         return EventResult::Handled;
                     }
-                    Some(ui::Hit::PresetFavorite(index)) => {
-                        self.toggle_preset_favorite(index);
+                    Some(ui::Hit::LibraryFavorite(key)) => {
+                        match key {
+                            crate::library::LibraryKey::Preset(index) => {
+                                self.toggle_preset_favorite(index)
+                            }
+                            crate::library::LibraryKey::Sound(id) => {
+                                if let Some(index) = self
+                                    .state
+                                    .doc
+                                    .project
+                                    .patches
+                                    .iter()
+                                    .position(|patch| patch.id == id)
+                                {
+                                    self.toggle_patch_favorite(index);
+                                }
+                            }
+                            _ => {}
+                        }
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::FavoriteFilter) => {
@@ -345,14 +413,6 @@ impl AppLogic for SfxLogic {
                                 last_x: position.x,
                             };
                         }
-                        return EventResult::Handled;
-                    }
-                    Some(ui::Hit::PatchFavorite(index)) => {
-                        self.toggle_patch_favorite(index);
-                        return EventResult::Handled;
-                    }
-                    Some(ui::Hit::PatchRow(index)) => {
-                        self.state.select_patch(index);
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::LayerRow(index)) => {
@@ -496,14 +556,23 @@ impl AppLogic for SfxLogic {
             InputEvent::DoubleClick { position } => {
                 let hit = ui::hit(&self.state, &layout, *position);
                 match hit {
-                    Some(ui::Hit::PatchRow(index)) => {
-                        self.state.select_patch(index);
-                        if let Some(patch) = self.state.patch() {
-                            self.state.view.modal = Some(Modal {
-                                title: "RENAME SOUND".into(),
-                                text: patch.name.clone(),
-                                action: ModalAction::RenamePatch,
-                            });
+                    Some(ui::Hit::LibraryRow(LibraryKey::Sound(id))) => {
+                        if let Some(index) = self
+                            .state
+                            .doc
+                            .project
+                            .patches
+                            .iter()
+                            .position(|patch| patch.id == id)
+                        {
+                            self.state.select_patch(index);
+                            if let Some(patch) = self.state.patch() {
+                                self.state.view.modal = Some(Modal {
+                                    title: "RENAME SOUND".into(),
+                                    text: patch.name.clone(),
+                                    action: ModalAction::RenamePatch,
+                                });
+                            }
                         }
                     }
                     Some(ui::Hit::LayerField(field)) => {
@@ -561,11 +630,11 @@ impl AppLogic for SfxLogic {
             InputEvent::PointerUp { position, .. } => {
                 let drag = std::mem::replace(&mut self.state.view.drag, Drag::None);
                 self.state.view.timeline_pin = None;
-                if let Drag::LibraryItem { index, moved, .. } = drag {
+                if let Drag::LibraryItem { key, moved, .. } = drag {
                     if moved {
-                        self.drop_preset(index, *position, &layout);
+                        self.drop_library_item(key, *position, &layout);
                     } else {
-                        self.audition_preset(index);
+                        self.activate_library_row(key);
                     }
                 }
                 self.state.commit_edit();
@@ -752,15 +821,17 @@ impl AppLogic for SfxLogic {
                 | ui::Hit::MenuToggle
                 | ui::Hit::MenuItem(_)
                 | ui::Hit::MenuPanel
-                | ui::Hit::PatchRow(_)
-                | ui::Hit::PatchFavorite(_)
-                | ui::Hit::PresetRow(_)
-                | ui::Hit::PresetFavorite(_)
+                | ui::Hit::LibraryRow(_)
+                | ui::Hit::LibraryFavorite(_)
+                | ui::Hit::LibraryFolder(_)
                 | ui::Hit::InstallPresets
                 | ui::Hit::Curve(_)
-                | ui::Hit::LibraryMode(_)
                 | ui::Hit::LayerRow(_)
                 | ui::Hit::Pattern(_, _)
+                | ui::Hit::KindFilter
+                | ui::Hit::KindPick(_)
+                | ui::Hit::KindMenu
+                | ui::Hit::ClearFilters
                 | ui::Hit::CategoryFilter
                 | ui::Hit::CategoryPick(_)
                 | ui::Hit::CategoryMenu
@@ -792,51 +863,34 @@ impl SfxLogic {
     /// Arrow keys walk whichever library source is active, without changing
     /// the project or starting playback.
     fn navigate_library(&mut self, direction: isize) {
-        match self.state.view.library_mode {
-            LibraryMode::Project => {
-                let visible = self.state.visible_patches();
-                if visible.is_empty() {
-                    return;
-                }
-                let position = self
-                    .state
-                    .view
-                    .selected_patch
-                    .and_then(|id| {
-                        visible
-                            .iter()
-                            .position(|index| self.state.doc.project.patches[*index].id == id)
-                    })
-                    .unwrap_or(0);
-                let target = if direction < 0 {
-                    position.saturating_sub(1)
-                } else {
-                    (position + 1).min(visible.len() - 1)
-                };
-                if let Some(index) = visible.get(target) {
-                    self.state.select_patch(*index);
-                }
-            }
-            LibraryMode::Presets => {
-                let visible = self.state.visible_presets();
-                if visible.is_empty() {
-                    return;
-                }
-                let position = self
-                    .state
-                    .view
-                    .selected_preset
-                    .and_then(|index| visible.iter().position(|candidate| *candidate == index))
-                    .unwrap_or(0);
-                let target = if direction < 0 {
-                    position.saturating_sub(1)
-                } else {
-                    (position + 1).min(visible.len() - 1)
-                };
-                if let Some(index) = visible.get(target) {
-                    self.state.select_preset(*index);
-                }
-            }
+        let visible: Vec<LibraryEntry> = self
+            .state
+            .visible_library_rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                LibraryListRow::Entry(entry) => Some(entry),
+                LibraryListRow::Folder { .. } => None,
+            })
+            .collect();
+        if visible.is_empty() {
+            return;
+        }
+        let position = self
+            .state
+            .view
+            .selected_library
+            .and_then(|key| visible.iter().position(|entry| entry.key == key))
+            .unwrap_or(0);
+        let target = if direction < 0 {
+            position.saturating_sub(1)
+        } else {
+            (position + 1).min(visible.len() - 1)
+        };
+        if let Some(entry) = visible.get(target) {
+            let key = entry.key;
+            // Arrow keys only move the selection; click/Enter auditions or
+            // loads. Otherwise browsing would start playback on every key.
+            self.select_library_row(key);
         }
     }
 
@@ -929,17 +983,9 @@ impl SfxLogic {
         let snap = !self.state.view.modifiers.shift;
         match drag {
             Drag::None => {}
-            Drag::LibraryItem {
-                index,
-                start,
-                moved,
-            } => {
+            Drag::LibraryItem { key, start, moved } => {
                 let moved = moved || (position - start).length() > 4.0;
-                self.state.view.drag = Drag::LibraryItem {
-                    index,
-                    start,
-                    moved,
-                };
+                self.state.view.drag = Drag::LibraryItem { key, start, moved };
             }
             Drag::Curve { kind } => {
                 self.set_curve_from_pos(kind, position, layout);
@@ -1048,10 +1094,7 @@ impl SfxLogic {
                 let value = (start_scroll as f32 + delta)
                     .round()
                     .clamp(0.0, max_start as f32) as usize;
-                match mode {
-                    LibraryMode::Project => self.state.view.patch_scroll = value,
-                    LibraryMode::Presets => self.state.view.preset_scroll = value,
-                }
+                self.state.set_library_scroll(value);
                 self.state.view.drag = Drag::LibraryScroll {
                     mode,
                     start_y,

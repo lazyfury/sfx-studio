@@ -14,7 +14,7 @@ use igui_winit::{
 };
 
 use crate::app::{SfxLogic, State};
-use crate::project_io::{create_project, load_folder, open_folder, print_warnings};
+use crate::project_io::{create_project, load_folder, open_or_create, print_warnings};
 use crate::{builtin, demo, export, fx, presets::PresetBank, synth, theme};
 
 pub fn run() {
@@ -258,8 +258,14 @@ pub fn run() {
     let mut state = State::empty();
     if let Some(index) = args.iter().position(|arg| arg == "--project") {
         match args.get(index + 1) {
-            Some(path) => match open_folder(&mut state, PathBuf::from(path)) {
-                Ok(warnings) => state.toast(if warnings.is_empty() {
+            Some(path) => match open_or_create(&mut state, PathBuf::from(path)) {
+                Ok((warnings, created)) => state.toast(if created {
+                    format!(
+                        "project created · {} presets · {} music",
+                        state.presets.len(),
+                        state.music_bank.len()
+                    )
+                } else if warnings.is_empty() {
                     "project loaded".to_string()
                 } else {
                     format!("project loaded · {}", warnings.join("; "))
@@ -281,8 +287,14 @@ pub fn run() {
             .set_title("Open a SFX project folder")
             .pick_folder()
         {
-            match open_folder(&mut state, folder) {
-                Ok(warnings) => state.toast(if warnings.is_empty() {
+            match open_or_create(&mut state, folder) {
+                Ok((warnings, created)) => state.toast(if created {
+                    format!(
+                        "project created · {} presets · {} music",
+                        state.presets.len(),
+                        state.music_bank.len()
+                    )
+                } else if warnings.is_empty() {
                     "project loaded".to_string()
                 } else {
                     format!("project loaded · {}", warnings.join("; "))
@@ -380,25 +392,17 @@ fn new_demo(folder: &std::path::Path) -> Result<(), String> {
     let (project, warnings) = create_project(folder)?;
     print_warnings(&warnings);
     let baked = export::bake(&project, folder)?;
-    let presets = std::fs::read_dir(folder.join(crate::presets::PRESETS_DIR))
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|entry| {
-                    entry.path().extension().is_some_and(|ext| ext == "json")
-                        && entry
-                            .file_name()
-                            .to_str()
-                            .is_some_and(|name| !name.starts_with('.'))
-                })
-                .count()
-        })
-        .unwrap_or(0);
+    let mut preset_bank = PresetBank::default();
+    preset_bank.load_project(folder);
+    let presets = preset_bank.len();
+    let mut music_bank = crate::music_bank::MusicBank::default();
+    music_bank.load_project(folder);
     println!(
-        "created {} · {} sounds · {} presets · {baked}",
+        "created {} · {} sounds · {} presets · {} music · {baked}",
         folder.display(),
         project.patches.len(),
-        presets
+        presets,
+        music_bank.len()
     );
     Ok(())
 }
@@ -484,8 +488,8 @@ fn selfcheck() {
         "SFX LAB",
         "MENU",
         "LIBRARY",
-        "PROJECT",
-        "PRESETS",
+        "ALL",
+        "SND",
         "PARAMETERS",
         "SOUND",
         "MUSIC",

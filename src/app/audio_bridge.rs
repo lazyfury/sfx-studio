@@ -8,6 +8,23 @@ impl SfxLogic {
     /// PRESETS mode.
     pub(super) fn toggle_play(&mut self) {
         let audio_playing = self.audio.as_ref().is_some_and(|audio| audio.is_playing());
+        if let Some(LibraryKey::Audio(index)) = self.state.view.selected_library {
+            if self.state.playback.preset_playing || audio_playing {
+                self.stop();
+            } else {
+                self.audition_audio(index);
+            }
+            return;
+        }
+        if self.state.selected_music().is_some() {
+            if self.state.playback.was_playing || audio_playing {
+                self.stop();
+            } else {
+                self.state.view.tab = Tab::Music;
+                self.play();
+            }
+            return;
+        }
         if self.state.view.library_mode == LibraryMode::Presets {
             if self.state.playback.preset_playing || audio_playing {
                 self.stop();
