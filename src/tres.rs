@@ -76,7 +76,12 @@ struct Sections {
 
 pub fn parse_patch(text: &str) -> Option<Patch> {
     let sections = parse_sections(text);
-    let mut patch = Patch::default();
+    // A `.tres` can only express the live v2 layer graph; imported patches
+    // must keep that sound instead of adopting the app's v3 master chain.
+    let mut patch = Patch {
+        dsp_version: 2,
+        ..Patch::default()
+    };
     patch.layers.clear();
 
     if let Some(ids) = sections.resource.get("layers") {

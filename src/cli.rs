@@ -14,7 +14,7 @@ use igui_winit::{
 };
 
 use crate::app::{SfxLogic, State};
-use crate::project_io::{load_folder, open_folder, print_warnings};
+use crate::project_io::{create_project, load_folder, open_folder, print_warnings};
 use crate::{export, theme};
 
 pub fn run() {
@@ -23,7 +23,8 @@ pub fn run() {
         println!(
             "sfx-studio [--project DIR] [--bake DIR] [--export DIR] [--dump DIR] [--selfcheck]\n\
              \n\
-             --project DIR  open a project folder\n\
+             --project DIR  open a project folder (otherwise a picker appears)\n\
+             --new DIR      create project + presets/ + baked audio\n\
              --bake DIR     write audio/baked + manifest\n\
              --export DIR   write audio/sfx/*.tres + music.tres\n\
              --dump DIR     print a short project summary\n\
@@ -75,6 +76,17 @@ pub fn run() {
     }
     if args.iter().any(|arg| arg == "--selfcheck") {
         selfcheck();
+        return;
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "--new") {
+        let Some(path) = args.get(index + 1).map(PathBuf::from) else {
+            eprintln!("--new needs a folder");
+            std::process::exit(2);
+        };
+        if let Err(error) = new_demo(&path) {
+            eprintln!("new project failed: {error}");
+            std::process::exit(1);
+        }
         return;
     }
     if let Some(index) = args.iter().position(|arg| arg == "--bake") {
@@ -139,33 +151,87 @@ pub fn run() {
         for patch in &project.patches {
             let layer = patch.layers.first();
             println!(
-                "  {:<14} layers={} wave={} duration={:.3}s gain={:.2} category={}",
+                "  {:<14} layers={} wave={} duration={:.3}s gain={:.2} category={} dsp=v{} space={:.2} room={:.2}",
                 patch.name,
                 patch.layers.len(),
                 layer.map(|l| l.wave.label()).unwrap_or("—"),
                 patch.end(),
                 layer.map(|l| l.gain).unwrap_or(0.0),
-                patch.category.label()
+                patch.category.label(),
+                patch.dsp_version,
+                patch.space,
+                patch.room
             );
         }
         return;
     }
-    let mut state = State::new();
+    let mut state = State::empty();
     if let Some(index) = args.iter().position(|arg| arg == "--project") {
         match args.get(index + 1) {
-            Some(path) => {
-                if let Err(error) = open_folder(&mut state, PathBuf::from(path)) {
+            Some(path) => match open_folder(&mut state, PathBuf::from(path)) {
+                Ok(warnings) => state.toast(if warnings.is_empty() {
+                    "project loaded".to_string()
+                } else {
+                    format!("project loaded · {}", warnings.join("; "))
+                }),
+                Err(error) => {
                     eprintln!("project failed: {error}");
                     std::process::exit(1);
                 }
-            }
+            },
             None => {
                 eprintln!("--project needs a folder");
                 std::process::exit(2);
             }
         }
+    } else if std::env::var_os("SFX_STUDIO_NO_PICKER").is_none() {
+        // A project is a folder: select it before showing the editor. Cancel
+        // leaves an empty shell with OPEN / NEW PROJECT affordances.
+        if let Some(folder) = rfd::FileDialog::new()
+            .set_title("Open a SFX project folder")
+            .pick_folder()
+        {
+            match open_folder(&mut state, folder) {
+                Ok(warnings) => state.toast(if warnings.is_empty() {
+                    "project loaded".to_string()
+                } else {
+                    format!("project loaded · {}", warnings.join("; "))
+                }),
+                Err(error) => {
+                    eprintln!("project failed: {error}");
+                    state.ui.status = format!("open failed: {error} · OPEN a project folder");
+                }
+            }
+        }
     }
     build_app(state, false).run();
+}
+
+fn new_demo(folder: &std::path::Path) -> Result<(), String> {
+    let (project, warnings) = create_project(folder)?;
+    print_warnings(&warnings);
+    let baked = export::bake(&project, folder)?;
+    let presets = std::fs::read_dir(folder.join(crate::presets::PRESETS_DIR))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    entry.path().extension().is_some_and(|ext| ext == "json")
+                        && entry
+                            .file_name()
+                            .to_str()
+                            .is_some_and(|name| !name.starts_with('.'))
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    println!(
+        "created {} · {} sounds · {} presets · {baked}",
+        folder.display(),
+        project.patches.len(),
+        presets
+    );
+    Ok(())
 }
 
 fn build_app(state: State, headless: bool) -> App {
@@ -203,7 +269,7 @@ fn build_app(state: State, headless: bool) -> App {
 }
 
 fn selfcheck() {
-    let mut app = build_app(State::new(), true);
+    let mut app = build_app(State::demo(), true);
     let recording = app
         .services()
         .get::<RecordingHandle>()
@@ -245,7 +311,16 @@ fn selfcheck() {
             )
         })
         .unwrap_or((0, 0, Vec::new(), false, false));
-    let required = ["SFX LAB", "MENU", "LIBRARY", "PARAMETERS", "SOUND", "MUSIC"];
+    let required = [
+        "SFX LAB",
+        "MENU",
+        "LIBRARY",
+        "PROJECT",
+        "PRESETS",
+        "PARAMETERS",
+        "SOUND",
+        "MUSIC",
+    ];
     let labels_ok = required
         .iter()
         .all(|needle| labels.iter().any(|text| text == needle));

@@ -10,9 +10,12 @@ use igui_render::PaintContext;
 use igui_ui::{ApproxTextMeasurer, TextMeasurer};
 
 use crate::audio::AudioEngine;
+use crate::fx;
 use crate::model::{
-    AutomationKind, Category, Clip, ClipField, Layer, LayerField, MusicField, Patch, Project, Wave,
+    AutomationKind, Category, Clip, ClipField, Layer, LayerField, MusicField, Patch, PatchField,
+    Project, Wave,
 };
+use crate::presets::PresetBank;
 use crate::project_io::{display_name, open_folder};
 use crate::synth::{self, Envelope};
 use crate::{export, model, theme, ui};
@@ -28,12 +31,32 @@ pub enum Tab {
     Music,
 }
 
+/// Source shown in the left library. The project document and timeline stay
+/// in place while this switches, so both are valid drop targets.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LibraryMode {
+    #[default]
+    Project,
+    Presets,
+}
+
+impl LibraryMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Project => "PROJECT",
+            Self::Presets => "PRESETS",
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ModalAction {
     NewPatch,
     RenamePatch,
     /// Discard the current dirty project and open this folder.
     ConfirmOpen(PathBuf),
+    /// Discard the current dirty project and create a new one here.
+    ConfirmNewProject(PathBuf),
 }
 
 pub struct Modal {
@@ -62,6 +85,10 @@ pub enum Drag {
     None,
     Layer {
         field: LayerField,
+        last_x: f32,
+    },
+    PatchField {
+        field: PatchField,
         last_x: f32,
     },
     Music {
@@ -95,10 +122,18 @@ pub enum Drag {
         start_scroll: f32,
     },
     LibraryScroll {
+        mode: LibraryMode,
         start_y: f32,
         start_scroll: usize,
         travel: f32,
         max_start: usize,
+    },
+    /// A project-local preset row is being dragged towards the timeline or
+    /// the project library. `moved` only becomes true after the 4 px threshold.
+    LibraryItem {
+        index: usize,
+        start: Vec2,
+        moved: bool,
     },
 }
 
@@ -126,7 +161,10 @@ pub struct ViewState {
     pub selected_clip: Option<u32>,
     pub selected_env_point: Option<usize>,
     pub automation_lane: AutomationKind,
+    pub library_mode: LibraryMode,
+    pub selected_preset: Option<usize>,
     pub patch_scroll: usize,
+    pub preset_scroll: usize,
     pub layer_scroll: usize,
     /// Pure view revision (selection/scroll/playhead); never renders audio.
     pub view_version: u64,
@@ -159,7 +197,9 @@ pub struct PlaybackState {
     pub music_cache_version: u64,
     pub cache_rate: u32,
     pub music_cache_rate: u32,
+    /// Interleaved preview frames: `L, R, L, R, …` for patches, mono for music.
     pub cache: Vec<f32>,
+    pub cache_channels: usize,
     pub cache_peak: f32,
     pub cache_envelope: Envelope,
     pub music_cache: Vec<f32>,
@@ -169,6 +209,9 @@ pub struct PlaybackState {
     pub playhead: f32,
     pub seeked: bool,
     pub was_playing: bool,
+    /// True while the audio callback is playing an audition from the project
+    /// preset library. The project playhead must not follow that audition.
+    pub preset_playing: bool,
     pub audio_ok: bool,
     pub audio_rate: u32,
     /// Time of the last actual preview render; throttles drag-time renders.
@@ -188,13 +231,17 @@ pub struct State {
     pub view: ViewState,
     pub playback: PlaybackState,
     pub ui: UiState,
+    /// Read-only project-local preset bank plus persisted favourites.
+    pub presets: PresetBank,
 }
 
 impl State {
-    pub fn new() -> Self {
+    /// No project selected: the UI shows an empty shell until OPEN / NEW
+    /// PROJECT picks a directory.
+    pub fn empty() -> Self {
         let mut state = Self {
             doc: DocState {
-                project: Project::demo("untitled"),
+                project: Project::default(),
                 root: None,
                 dirty: false,
                 version: 1,
@@ -210,7 +257,10 @@ impl State {
                 selected_clip: None,
                 selected_env_point: None,
                 automation_lane: AutomationKind::Gain,
+                library_mode: LibraryMode::Project,
+                selected_preset: None,
                 patch_scroll: 0,
+                preset_scroll: 0,
                 layer_scroll: 0,
                 view_version: 1,
                 modifiers: Modifiers::NONE,
@@ -237,6 +287,7 @@ impl State {
                 cache_rate: 22050,
                 music_cache_rate: 11025,
                 cache: Vec::new(),
+                cache_channels: 2,
                 cache_peak: 0.0,
                 cache_envelope: Envelope::default(),
                 music_cache: Vec::new(),
@@ -246,16 +297,29 @@ impl State {
                 playhead: 0.0,
                 seeked: false,
                 was_playing: false,
+                preset_playing: false,
                 audio_ok: false,
                 audio_rate: 22050,
                 last_render: Instant::now(),
                 defer_render: true,
             },
             ui: UiState {
-                status: "OPEN a Godot project folder · demo loaded".into(),
+                status: "OPEN a project folder (⌘O) · MENU → NEW PROJECT".into(),
                 toast: None,
             },
+            presets: PresetBank::default(),
         };
+        state.clamp_selection();
+        state
+    }
+
+    /// Populated demo used by tests and headless selfcheck. The interactive
+    /// app starts from [`State::empty`] and must open a real project folder.
+    pub fn demo() -> Self {
+        let mut state = Self::empty();
+        state.doc.project = Project::demo("untitled");
+        state.presets = PresetBank::from_patches(Project::demo("demo presets").patches);
+        state.ui.status = "OPEN a project folder · demo loaded".into();
         state.clamp_selection();
         state
     }
@@ -274,11 +338,13 @@ impl State {
             .and_then(|index| self.doc.project.patches.get(index))
     }
 
-    /// Seconds represented by the timeline. Pinned during clip drags.
+    /// Seconds represented by the timeline, including the reverb tail so the
+    /// playhead and waveform cover the whole audible render. Pinned during
+    /// clip drags.
     pub fn timeline_span(&self) -> f32 {
         self.view.timeline_pin.unwrap_or_else(|| {
             self.patch()
-                .map(|patch| patch.end().max(0.05))
+                .map(|patch| fx::render_duration(patch).max(0.05))
                 .unwrap_or(0.2)
         })
     }
@@ -322,19 +388,23 @@ impl State {
             .and_then(|layer| layer.clips.get_mut(index))
     }
 
-    pub fn patch_visible(&self, index: usize) -> bool {
-        let Some(patch) = self.doc.project.patches.get(index) else {
-            return false;
-        };
+    fn matches_filters(&self, patch: &Patch, favorite: bool) -> bool {
         let category_ok = self
             .view
             .category_filter
             .map(|category| patch.category == category)
             .unwrap_or(true);
-        let favorite_ok = !self.view.favorites_only || patch.favorite;
+        let favorite_ok = !self.view.favorites_only || favorite;
         let search = self.view.search.trim().to_lowercase();
         let search_ok = search.is_empty() || patch.name.to_lowercase().contains(&search);
         category_ok && favorite_ok && search_ok
+    }
+
+    pub fn patch_visible(&self, index: usize) -> bool {
+        let Some(patch) = self.doc.project.patches.get(index) else {
+            return false;
+        };
+        self.matches_filters(patch, patch.favorite)
     }
 
     pub fn visible_patches(&self) -> Vec<usize> {
@@ -346,6 +416,98 @@ impl State {
             .filter(|(index, _)| self.patch_visible(*index))
             .map(|(index, _)| index)
             .collect()
+    }
+
+    pub fn preset_visible(&self, index: usize) -> bool {
+        let Some(patch) = self.presets.get(index) else {
+            return false;
+        };
+        self.matches_filters(patch, self.presets.is_favorite(patch))
+    }
+
+    pub fn visible_presets(&self) -> Vec<usize> {
+        (0..self.presets.len())
+            .filter(|index| self.preset_visible(*index))
+            .collect()
+    }
+
+    /// Row indices of whichever library is active; layout, painting, input
+    /// and scrolling all use this so the two sources cannot drift apart.
+    pub fn visible_library_rows(&self) -> Vec<usize> {
+        match self.view.library_mode {
+            LibraryMode::Project => self.visible_patches(),
+            LibraryMode::Presets => self.visible_presets(),
+        }
+    }
+
+    pub fn library_scroll(&self) -> usize {
+        match self.view.library_mode {
+            LibraryMode::Project => self.view.patch_scroll,
+            LibraryMode::Presets => self.view.preset_scroll,
+        }
+    }
+
+    pub fn set_library_scroll(&mut self, value: usize) {
+        match self.view.library_mode {
+            LibraryMode::Project => self.view.patch_scroll = value,
+            LibraryMode::Presets => self.view.preset_scroll = value,
+        }
+    }
+
+    pub fn set_library_mode(&mut self, mode: LibraryMode) {
+        self.view.library_mode = mode;
+        self.view.category_menu_open = false;
+        self.view.menu_open = false;
+        if mode == LibraryMode::Presets
+            && self
+                .view
+                .selected_preset
+                .is_some_and(|index| !self.preset_visible(index))
+        {
+            self.view.selected_preset = None;
+        }
+        self.ui.status = match mode {
+            LibraryMode::Project => "PROJECT library · edits save with the project".into(),
+            LibraryMode::Presets => {
+                "PRESETS library · bundled with this project · click to audition · drag to timeline"
+                    .into()
+            }
+        };
+        self.ensure_visible();
+        self.bump_view();
+    }
+
+    pub fn preset(&self, index: usize) -> Option<&Patch> {
+        self.presets.get(index)
+    }
+
+    pub fn select_preset(&mut self, index: usize) {
+        if self.presets.get(index).is_some() {
+            self.view.selected_preset = Some(index);
+            self.ensure_preset_visible();
+            self.bump_view();
+        }
+    }
+
+    fn ensure_preset_visible(&mut self) {
+        let Some(selected) = self.view.selected_preset else {
+            return;
+        };
+        let capacity = ui::library_capacity(self.view.viewport);
+        let visible = self.visible_presets();
+        let position = visible
+            .iter()
+            .position(|candidate| *candidate == selected)
+            .unwrap_or(0);
+        if position < self.view.preset_scroll {
+            self.view.preset_scroll = position;
+        } else if position >= self.view.preset_scroll + capacity {
+            self.view.preset_scroll = position + 1 - capacity;
+        }
+        self.view.preset_scroll = self
+            .view
+            .preset_scroll
+            .min(visible.len().saturating_sub(capacity));
     }
 
     pub fn mark_dirty(&mut self) {
@@ -446,6 +608,10 @@ impl State {
             self.view.layer_scroll = layer_index;
         } else if layer_index >= self.view.layer_scroll + layer_capacity {
             self.view.layer_scroll = layer_index + 1 - layer_capacity;
+        }
+
+        if self.view.library_mode == LibraryMode::Presets {
+            self.ensure_preset_visible();
         }
     }
 
@@ -572,13 +738,20 @@ impl State {
             return;
         }
         if patch_dirty {
-            self.playback.cache = self
-                .patch()
-                .map(|patch| synth::render_patch(patch, rate))
-                .unwrap_or_default();
-            self.playback.cache_peak = synth::peak(&self.playback.cache);
-            self.playback.cache_envelope =
-                synth::envelope(&self.playback.cache, synth::ENVELOPE_BINS);
+            if let Some(patch) = self.patch() {
+                let stereo = fx::render_patch(patch, rate);
+                let mono = stereo.mono();
+                self.playback.cache_peak =
+                    synth::peak(&stereo.left).max(synth::peak(&stereo.right));
+                self.playback.cache_envelope = synth::envelope(&mono, synth::ENVELOPE_BINS);
+                self.playback.cache = stereo.interleave();
+                self.playback.cache_channels = 2;
+            } else {
+                self.playback.cache.clear();
+                self.playback.cache_channels = 2;
+                self.playback.cache_peak = 0.0;
+                self.playback.cache_envelope = Envelope::default();
+            }
             self.playback.cache_version = self.doc.version;
             self.playback.cache_rate = rate;
         }
@@ -610,7 +783,9 @@ impl State {
         let rate = self.preview_rate();
         match self.view.tab {
             Tab::Patches => {
-                self.playback.cache_version != self.doc.version || self.playback.cache_rate != rate
+                self.patch().is_some()
+                    && (self.playback.cache_version != self.doc.version
+                        || self.playback.cache_rate != rate)
             }
             Tab::Music => {
                 self.playback.music_cache_version != self.doc.music_version
@@ -791,9 +966,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn empty_state_has_no_project_or_presets() {
+        let mut state = State::empty();
+        assert!(state.doc.root.is_none());
+        assert!(state.doc.project.patches.is_empty());
+        assert!(state.presets.presets.is_empty());
+        assert!(state.patch().is_none());
+        assert!(state.layer().is_none());
+        assert!(!state.preview_pending());
+        state.ensure_cache(8000);
+        assert!(state.playback.cache.is_empty());
+        assert_eq!(state.playback.cache_peak, 0.0);
+    }
+
+    #[test]
+    fn opening_a_project_loads_its_internal_presets() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "sfx-studio-open-presets-{}-{stamp}",
+            std::process::id()
+        ));
+        let (project, _) = crate::project_io::create_project(&root).expect("create project");
+        assert_eq!(project.patches.len(), 1);
+        let mut state = State::empty();
+        let warnings = crate::project_io::open_folder(&mut state, root.clone()).expect("open");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(state.presets.len() >= 8);
+        assert!(state
+            .presets
+            .presets
+            .iter()
+            .any(|preset| preset.name == "laser"));
+        assert_eq!(state.doc.root.as_deref(), Some(root.as_path()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn cursor_reflects_timeline_edges_and_drag() {
         let mut logic = SfxLogic {
-            state: State::new(),
+            state: State::demo(),
             measurer: None,
             audio: None,
             render: None,
@@ -823,7 +1037,7 @@ mod tests {
 
     #[test]
     fn search_and_filters_narrow_the_library() {
-        let mut state = State::new();
+        let mut state = State::demo();
         state.view.search = "wind".into();
         assert_eq!(state.visible_patches().len(), 1);
         state.view.search.clear();
@@ -844,7 +1058,7 @@ mod tests {
     #[test]
     fn clicking_a_parameter_track_sets_its_value() {
         let mut logic = SfxLogic {
-            state: State::new(),
+            state: State::demo(),
             measurer: None,
             audio: None,
             render: None,
@@ -863,9 +1077,64 @@ mod tests {
     }
 
     #[test]
+    fn clicking_the_space_track_sets_patch_space() {
+        let mut logic = SfxLogic {
+            state: State::demo(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        let layout = ui::Layout::new(&logic.state, logic.state.view.viewport);
+        let hit = ui::Hit::PatchField(PatchField::Space);
+        let rect = param_row_rect(&layout, hit).expect("space row");
+        let track = ui::param_track(rect);
+        let position = Vec2::new(track.right(), track.center().y);
+        logic.set_param_from_x(position, hit, &layout);
+        assert!(logic.state.patch().unwrap().space > 0.95);
+    }
+
+    #[test]
+    fn upgrading_a_patch_switches_it_to_the_hd_chain() {
+        let mut logic = SfxLogic {
+            state: State::demo(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        logic.state.patch_mut().unwrap().dsp_version = 2;
+        logic.activate(ui::Action::UpgradeDsp);
+        assert_eq!(logic.state.patch().unwrap().dsp_version, model::DSP_VERSION);
+        assert!(logic.state.doc.dirty);
+        assert_eq!(logic.state.doc.undo.len(), 1);
+    }
+
+    #[test]
+    fn variations_are_inserted_and_kept_in_order() {
+        let mut logic = SfxLogic {
+            state: State::demo(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        let base = logic.state.patch_index().expect("patch");
+        let base_name = logic.state.patch().unwrap().name.clone();
+        let original = logic.state.doc.project.patches.len();
+        logic.activate(ui::Action::Vary);
+        assert_eq!(logic.state.doc.project.patches.len(), original + 3);
+        for (offset, suffix) in [" A", " B", " C"].iter().enumerate() {
+            let patch = &logic.state.doc.project.patches[base + 1 + offset];
+            assert_eq!(patch.name, format!("{base_name}{suffix}"));
+            assert_ne!(patch.id, logic.state.doc.project.patches[base].id);
+        }
+        assert_eq!(logic.state.patch_index(), Some(base + 1));
+        logic.state.undo();
+        assert_eq!(logic.state.doc.project.patches.len(), original);
+    }
+
+    #[test]
     fn star_click_toggles_favorite_without_changing_selection() {
         let mut logic = SfxLogic {
-            state: State::new(),
+            state: State::demo(),
             measurer: None,
             audio: None,
             render: None,
@@ -883,7 +1152,7 @@ mod tests {
     #[test]
     fn picking_a_category_closes_the_menu_and_filters() {
         let mut logic = SfxLogic {
-            state: State::new(),
+            state: State::demo(),
             measurer: None,
             audio: None,
             render: None,
@@ -910,7 +1179,7 @@ mod tests {
     #[test]
     fn selection_uses_stable_ids_across_reorders() {
         let mut logic = SfxLogic {
-            state: State::new(),
+            state: State::demo(),
             measurer: None,
             audio: None,
             render: None,
@@ -935,7 +1204,7 @@ mod tests {
     #[test]
     fn deleting_the_selected_patch_selects_its_neighbour_by_id() {
         let mut logic = SfxLogic {
-            state: State::new(),
+            state: State::demo(),
             measurer: None,
             audio: None,
             render: None,
@@ -948,6 +1217,86 @@ mod tests {
     }
 
     #[test]
+    fn dropping_a_preset_inserts_layers_and_is_one_undo_step() {
+        let mut logic = SfxLogic {
+            state: State::demo(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        let before = logic.state.patch().unwrap().layers.len();
+        let preset_layers = logic.state.preset(0).unwrap().layers.len();
+        let layout = ui::Layout::new(&logic.state, logic.state.view.viewport);
+        let row = layout.layer_rows[0].1;
+        let pos = Vec2::new(layout.time_x(0.4), row.center().y);
+        logic.drop_preset(0, pos, &layout);
+        assert_eq!(
+            logic.state.patch().unwrap().layers.len(),
+            before + preset_layers
+        );
+        assert_eq!(logic.state.doc.undo.len(), 1);
+        let selected = logic.state.layer().expect("new layer selected");
+        assert_eq!(selected.clips.len(), 1);
+        assert!((selected.clips[0].start - 0.4).abs() < 0.001);
+        assert!(logic.state.view.selected_clip.is_some());
+        assert!(logic.state.doc.dirty);
+
+        let _ = logic.state.undo();
+        assert_eq!(logic.state.patch().unwrap().layers.len(), before);
+    }
+
+    #[test]
+    fn dropping_a_preset_on_the_left_copies_it_into_the_project() {
+        let mut logic = SfxLogic {
+            state: State::demo(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        logic.state.set_library_mode(LibraryMode::Presets);
+        let before = logic.state.doc.project.patches.len();
+        let source = logic.state.preset(1).unwrap().clone();
+        let layout = ui::Layout::new(&logic.state, logic.state.view.viewport);
+        logic.drop_preset(1, layout.left.center(), &layout);
+        assert_eq!(logic.state.doc.project.patches.len(), before + 1);
+        assert_eq!(logic.state.view.library_mode, LibraryMode::Project);
+        let selected = logic.state.patch().expect("copied patch selected");
+        assert_ne!(selected.name, source.name);
+        assert!(selected.name.starts_with(&source.name));
+        assert_eq!(logic.state.doc.undo.len(), 1);
+    }
+
+    #[test]
+    fn preset_filters_and_selection_stay_out_of_the_project() {
+        let mut logic = SfxLogic {
+            state: State::demo(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        let project_id = logic.state.view.selected_patch;
+        logic.state.set_library_mode(LibraryMode::Presets);
+        logic.state.view.search = "laser".into();
+        logic.refresh_filter();
+        let visible = logic.state.visible_presets();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(logic.state.preset(visible[0]).unwrap().name, "laser");
+        assert_eq!(logic.state.view.selected_patch, project_id);
+
+        logic.state.view.search.clear();
+        let favorite = logic.state.preset(2).unwrap().clone();
+        logic.state.presets.toggle_favorite(&favorite);
+        logic.state.view.favorites_only = true;
+        logic.refresh_filter();
+        let favorites = logic.state.visible_presets();
+        assert!(favorites.iter().all(|index| logic
+            .state
+            .preset(*index)
+            .is_some_and(|p| p.name == favorite.name)));
+        assert!(!favorites.is_empty());
+    }
+
+    #[test]
     fn display_names_keep_unicode() {
         assert_eq!(display_name("  Laser 01 "), "Laser 01");
         assert_eq!(display_name("金币 01"), "金币 01");
@@ -957,7 +1306,7 @@ mod tests {
 
     #[test]
     fn startup_render_is_deferred_and_then_resolved() {
-        let mut state = State::new();
+        let mut state = State::demo();
         assert!(state.playback.defer_render);
         assert!(state.preview_pending());
         state.ensure_cache(state.preview_rate());
@@ -969,7 +1318,7 @@ mod tests {
 
     #[test]
     fn view_changes_do_not_rerender_audio() {
-        let mut state = State::new();
+        let mut state = State::demo();
         state.ensure_cache(8000);
         let rendered = state.playback.cache_version;
         let samples = state.playback.cache.len();
@@ -985,7 +1334,7 @@ mod tests {
     #[test]
     fn clicking_the_cutoff_track_midpoint_uses_a_log_curve() {
         let mut logic = SfxLogic {
-            state: State::new(),
+            state: State::demo(),
             measurer: None,
             audio: None,
             render: None,
@@ -1006,7 +1355,7 @@ mod tests {
 
     #[test]
     fn undo_transactions_ignore_noop_gestures() {
-        let mut state = State::new();
+        let mut state = State::demo();
         state.begin_edit();
         state.commit_edit();
         assert!(state.doc.undo.is_empty());
@@ -1022,7 +1371,7 @@ mod tests {
 
     #[test]
     fn undo_redo_restores_clips() {
-        let mut state = State::new();
+        let mut state = State::demo();
         state.view.viewport = Size::new(crate::theme::VIEW_W, crate::theme::VIEW_H);
         state.push_undo();
         state.layer_mut().unwrap().ensure_clips();

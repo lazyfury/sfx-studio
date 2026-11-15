@@ -100,15 +100,9 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         TITLE,
         TEXT,
     );
-    text_right(
-        ctx,
-        measurer,
-        &format!("{:02}", state.visible_patches().len()),
-        layout.left.right() - 10.0,
-        layout.left.top() + 13.0,
-        SMALL,
-        FAINT,
-    );
+    for (mode, rect) in &layout.library_mode_buttons {
+        paint_mode_tab(state, measurer, ctx, *mode, *rect);
+    }
     let category_label = state
         .view
         .category_filter
@@ -122,6 +116,15 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         icons::document(Icon::Tag),
         state.view.hover_hit == Some(Hit::CategoryFilter),
         state.view.category_filter.is_some(),
+    );
+    text_right(
+        ctx,
+        measurer,
+        &format!("{:02}", state.visible_library_rows().len()),
+        layout.favorite_rect.left() - 6.0,
+        layout.category_rect.center().y,
+        SMALL,
+        FAINT,
     );
     theme::button_icon(
         ctx,
@@ -191,60 +194,37 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         let patch = &state.doc.project.patches[*index];
         let selected =
             Some(patch.id) == state.view.selected_patch && state.view.tab == Tab::Patches;
-        if selected {
-            fill(ctx, *rect, ACTIVE);
-            fill(
-                ctx,
-                Rect::from_min_size(rect.origin, Size::new(2.0, rect.size.height)),
-                ACCENT,
-            );
-        } else if rect.contains(state.view.cursor) {
-            fill(ctx, *rect, HOVER);
-        }
         let wave = patch.layers.first().map(|l| l.wave).unwrap_or(Wave::Sine);
-        let wave_label = wave.label();
-        // The favorite star owns a fixed slot at the far right; the wave tag is
-        // right-aligned before it so the two never share pixels.
-        let label_right = rect.right() - 26.0;
-        if patch.favorite {
-            let star = patch_star_rect(*rect);
-            let hovered = state.view.hover_hit == Some(Hit::PatchFavorite(*index));
-            icons::paint(
-                ctx,
-                Icon::Star,
-                Rect::from_min_size(
-                    Vec2::new(star.center().x - 5.0, star.center().y - 5.0),
-                    Size::splat(10.0),
-                ),
-                if hovered {
-                    ACCENT
-                } else if selected {
-                    ACCENT_DARK
-                } else {
-                    WARN
-                },
-            );
-        }
-        let name_width =
-            (label_right - measurer.measure_run(wave_label, SMALL) - 8.0 - (rect.left() + 12.0))
-                .max(24.0);
-        text_top(
-            ctx,
+        paint_library_row(
+            state,
             measurer,
-            &ellipsis(measurer, &patch.name, FONT, name_width),
-            rect.left() + 12.0,
-            rect.top() + 4.0,
-            FONT,
-            if selected { TEXT } else { DIM },
+            ctx,
+            *rect,
+            &patch.name,
+            wave.label(),
+            selected,
+            patch.favorite,
+            Hit::PatchFavorite(*index),
+            false,
+            false,
         );
-        text_right(
-            ctx,
+    }
+    for (index, rect) in &layout.preset_rows {
+        let patch = &state.presets.presets[*index];
+        let selected = state.view.selected_preset == Some(*index);
+        let wave = patch.layers.first().map(|l| l.wave).unwrap_or(Wave::Sine);
+        paint_library_row(
+            state,
             measurer,
-            wave_label,
-            label_right,
-            rect.center().y,
-            SMALL,
-            if selected { DIM } else { FAINT },
+            ctx,
+            *rect,
+            &patch.name,
+            wave.label(),
+            selected,
+            state.presets.is_favorite(patch),
+            Hit::PresetFavorite(*index),
+            state.playback.preset_playing && selected,
+            true,
         );
     }
     if layout.library_scrollbar.size.height > 0.0 {
@@ -259,11 +239,22 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             },
         );
     }
-    if state.visible_patches().is_empty() {
+    if state.visible_library_rows().is_empty() {
+        let empty = if state.view.library_mode == LibraryMode::Presets
+            && state.presets.presets.is_empty()
+        {
+            "NO PRESETS"
+        } else if state.view.library_mode == LibraryMode::Project
+            && state.doc.project.patches.is_empty()
+        {
+            "NO SOUNDS"
+        } else {
+            "NO MATCHES"
+        };
         text_top(
             ctx,
             measurer,
-            "NO MATCHES",
+            empty,
             layout.left.left() + 12.0,
             layout.left.top() + 96.0,
             SMALL,
@@ -314,6 +305,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             layout.waveform,
             WaveformData {
                 samples: &state.playback.cache,
+                channels: state.playback.cache_channels,
                 envelope: &state.playback.cache_envelope,
                 peak: state.playback.cache_peak,
                 rate: state.playback.cache_rate,
@@ -328,9 +320,10 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             layout.waveform,
             WaveformData {
                 samples: &state.playback.music_cache,
+                channels: 1,
                 envelope: &state.playback.music_envelope,
                 peak: state.playback.music_cache_peak,
-                rate: state.playback.cache_rate,
+                rate: state.playback.music_cache_rate,
             },
         );
     }
@@ -424,7 +417,20 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             DIM
         },
     );
-    let info = if state.view.tab == Tab::Patches {
+    let info = if state.view.library_mode == LibraryMode::Presets {
+        format!(
+            "PROJECT PRESETS  ·  {}  ·  drag to timeline",
+            state.visible_presets().len()
+        )
+    } else if state.doc.root.is_none() {
+        if state.doc.project.patches.is_empty() {
+            "NO PROJECT  ·  OPEN (⌘O) or NEW PROJECT".into()
+        } else {
+            "UNSAVED PROJECT  ·  ⌘S to choose a folder".into()
+        }
+    } else if state.doc.project.patches.is_empty() {
+        "EMPTY PROJECT  ·  MENU → NEW SOUND".into()
+    } else if state.view.tab == Tab::Patches {
         let patch = state.patch();
         format!(
             "{} Hz  ·  {:.3}s  ·  {} LAYERS  ·  peak {:.1} dB{}",
@@ -459,11 +465,132 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
 
     paint_menu(state, measurer, ctx, &layout);
     paint_category_menu(state, measurer, ctx, &layout);
+    if let Drag::LibraryItem {
+        index, moved: true, ..
+    } = &state.view.drag
+    {
+        paint_library_drag(state, measurer, ctx, &layout, *index);
+    }
 
     if state.view.modal.is_some() {
         paint_modal(state, measurer, ctx, &layout);
     } else if matches!(state.view.drag, Drag::None) && !state.view.menu_open {
         paint_hover_tip(state, measurer, ctx);
+    }
+}
+
+fn paint_mode_tab(
+    state: &State,
+    measurer: &dyn TextMeasurer,
+    ctx: &mut PaintContext,
+    mode: LibraryMode,
+    rect: Rect,
+) {
+    let active = state.view.library_mode == mode;
+    let hovered = state.view.hover_hit == Some(Hit::LibraryMode(mode));
+    let bg = if active {
+        ACTIVE
+    } else if hovered {
+        HOVER
+    } else {
+        RAISED
+    };
+    ctx.fill_rounded_rect(rect, 5.0, bg);
+    ctx.stroke_rounded_rect(
+        rect,
+        5.0,
+        1.0,
+        if active {
+            ACCENT_LINE
+        } else if hovered {
+            BORDER_HI
+        } else {
+            BORDER
+        },
+    );
+    text_center(
+        ctx,
+        measurer,
+        mode.label(),
+        rect,
+        SMALL,
+        if active { ACCENT } else { DIM },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_library_row(
+    state: &State,
+    measurer: &dyn TextMeasurer,
+    ctx: &mut PaintContext,
+    rect: Rect,
+    name: &str,
+    wave_label: &str,
+    selected: bool,
+    favorite: bool,
+    star_hit: Hit,
+    previewing: bool,
+    star_always: bool,
+) {
+    if selected {
+        fill(ctx, rect, ACTIVE);
+        fill(
+            ctx,
+            Rect::from_min_size(rect.origin, Size::new(2.0, rect.size.height)),
+            ACCENT,
+        );
+    } else if rect.contains(state.view.cursor) {
+        fill(ctx, rect, HOVER);
+    }
+    // The favorite star owns a fixed slot at the far right; the wave tag is
+    // right-aligned before it so the two never share pixels.
+    let label_right = rect.right() - 26.0;
+    if favorite || star_always {
+        let star = patch_star_rect(rect);
+        let hovered = state.view.hover_hit == Some(star_hit);
+        icons::paint(
+            ctx,
+            Icon::Star,
+            Rect::from_min_size(
+                Vec2::new(star.center().x - 5.0, star.center().y - 5.0),
+                Size::splat(10.0),
+            ),
+            if hovered {
+                ACCENT
+            } else if favorite {
+                if selected {
+                    ACCENT_DARK
+                } else {
+                    WARN
+                }
+            } else {
+                FAINT
+            },
+        );
+    }
+    let name_width =
+        (label_right - measurer.measure_run(wave_label, SMALL) - 8.0 - (rect.left() + 12.0))
+            .max(24.0);
+    text_top(
+        ctx,
+        measurer,
+        &ellipsis(measurer, name, FONT, name_width),
+        rect.left() + 12.0,
+        rect.top() + 4.0,
+        FONT,
+        if selected || previewing { TEXT } else { DIM },
+    );
+    text_right(
+        ctx,
+        measurer,
+        wave_label,
+        label_right,
+        rect.center().y,
+        SMALL,
+        if selected { DIM } else { FAINT },
+    );
+    if previewing {
+        stroke(ctx, rect, ACCENT_LINE);
     }
 }
 
@@ -545,8 +672,10 @@ fn paint_menu(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext
         if item.contains(state.view.cursor) {
             fill(ctx, *item, ACTIVE);
         }
-        let active =
-            *action == Action::Favorite && state.patch().is_some_and(|patch| patch.favorite);
+        let available = action_available(state, *action);
+        let active = available
+            && *action == Action::Favorite
+            && state.patch().is_some_and(|patch| patch.favorite);
         let mut text_x = item.left() + 10.0;
         if let Some(icon) = action_icon(*action) {
             icons::paint(
@@ -556,7 +685,13 @@ fn paint_menu(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext
                     Vec2::new(item.left() + 9.0, item.center().y - 6.5),
                     Size::splat(13.0),
                 ),
-                if active { ACCENT } else { DIM },
+                if !available {
+                    FAINT
+                } else if active {
+                    ACCENT
+                } else {
+                    DIM
+                },
             );
             text_x = item.left() + 30.0;
         }
@@ -567,7 +702,13 @@ fn paint_menu(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext
             text_x,
             item.top() + 5.0,
             FONT,
-            if active { ACCENT } else { TEXT },
+            if !available {
+                FAINT
+            } else if active {
+                ACCENT
+            } else {
+                TEXT
+            },
         );
         if active {
             text_right(
@@ -585,10 +726,19 @@ fn paint_menu(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext
 
 fn paint_hover_tip(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext) {
     let tip = match state.view.hover_hit {
-        Some(Hit::Action(action)) => action_tip(action),
+        Some(Hit::Action(action)) => {
+            if action_available(state, action) {
+                action_tip(action)
+            } else {
+                "PRESETS 只读 · 切回 PROJECT 编辑"
+            }
+        }
         Some(Hit::Search) => "搜索音效 · Search（/）",
         Some(Hit::CategoryFilter) => "切换分类过滤 · Category（C）",
         Some(Hit::FavoriteFilter) => "只看收藏 · Favorites",
+        Some(Hit::LibraryMode(_)) => "切换工程库 / 内部预设库 · Library source",
+        Some(Hit::PresetRow(_)) => "单击试听 · 拖到时间线插入 / 左侧复制进工程",
+        Some(Hit::PresetFavorite(_)) => "收藏预设 · Favorite",
         Some(Hit::InspectorScrollbar) => "拖动滚动参数面板 · Scroll",
         _ => return,
     };
@@ -662,6 +812,30 @@ fn paint_header(
                 ctx,
                 measurer,
                 &ellipsis(measurer, &meta, SMALL, title_width),
+                header.left() + 10.0,
+                header.top() + 18.0,
+                SMALL,
+                FAINT,
+            );
+        } else {
+            let (title, hint) = if state.doc.root.is_some() {
+                ("EMPTY PROJECT", "MENU → NEW SOUND")
+            } else {
+                ("NO PROJECT", "OPEN (⌘O)  ·  MENU → NEW PROJECT")
+            };
+            text_top(
+                ctx,
+                measurer,
+                title,
+                header.left() + 10.0,
+                header.top() + 4.0,
+                TITLE,
+                FAINT,
+            );
+            text_top(
+                ctx,
+                measurer,
+                &ellipsis(measurer, hint, SMALL, title_width),
                 header.left() + 10.0,
                 header.top() + 18.0,
                 SMALL,
@@ -813,6 +987,14 @@ fn paint_timeline(
                 }
             }
         }
+    }
+    if state.patch().is_none() {
+        let message = if state.doc.root.is_some() {
+            "EMPTY PROJECT  ·  MENU → NEW SOUND"
+        } else {
+            "OPEN A PROJECT  ·  ⌘O   /   MENU → NEW PROJECT"
+        };
+        text_center(ctx, measurer, message, rect, SMALL, FAINT);
     }
     if let Some(Hit::Ruler(time)) = state.view.hover_hit {
         let hx = layout.time_x(time);
@@ -969,7 +1151,9 @@ fn paint_automation(
 }
 
 struct WaveformData<'a> {
+    /// Interleaved frames.
     samples: &'a [f32],
+    channels: usize,
     envelope: &'a synth::Envelope,
     peak: f32,
     rate: u32,
@@ -984,10 +1168,13 @@ fn paint_waveform(
 ) {
     let WaveformData {
         samples,
+        channels,
         envelope,
         peak,
         rate,
     } = data;
+    let channels = channels.max(1);
+    let frames = samples.len() / channels;
     fill(ctx, rect, DARK);
     stroke(ctx, rect, Color::new(1.0, 1.0, 1.0, 0.10));
     hline(
@@ -997,7 +1184,7 @@ fn paint_waveform(
         rect.center().y,
         Color::new(1.0, 1.0, 1.0, 0.10),
     );
-    if samples.is_empty() {
+    if frames == 0 {
         text_center(ctx, measurer, "NO SIGNAL", rect, SMALL, DARK_DIM);
         return;
     }
@@ -1009,15 +1196,18 @@ fn paint_waveform(
         // Defensive fallback for a cache that was populated before the
         // envelope existed (e.g. a freshly loaded session).
         for x in 0..width {
-            let first = (x * samples.len() / width).min(samples.len() - 1);
-            let last = (((x + 1) * samples.len()) / width)
-                .max(first + 1)
-                .min(samples.len());
+            let first = (x * frames / width).min(frames - 1);
+            let last = (((x + 1) * frames) / width).max(first + 1).min(frames);
             let mut lo = 0.0f32;
             let mut hi = 0.0f32;
-            for value in &samples[first..last] {
-                lo = lo.min(*value);
-                hi = hi.max(*value);
+            for frame in first..last {
+                let mut value = 0.0f32;
+                for channel in 0..channels {
+                    value += samples[frame * channels + channel];
+                }
+                value /= channels as f32;
+                lo = lo.min(value);
+                hi = hi.max(value);
             }
             ctx.draw_line(
                 Vec2::new(rect.left() + x as f32, mid - hi * half),
@@ -1047,7 +1237,7 @@ fn paint_waveform(
             );
         }
     }
-    let duration = samples.len() as f32 / rate.max(1) as f32;
+    let duration = frames as f32 / rate.max(1) as f32;
     let px = rect.left()
         + (state.playback.playhead / duration.max(0.001)).clamp(0.0, 1.0) * rect.size.width;
     vline(ctx, px, rect.top(), rect.bottom(), WARN);
@@ -1330,14 +1520,17 @@ fn paint_modal(
             DIM,
         );
     }
+    let hint = if modal.is_input() {
+        "ENTER CONFIRM   ESC CANCEL"
+    } else if matches!(modal.action, crate::app::ModalAction::ConfirmNewProject(_)) {
+        "ENTER DISCARD & CREATE   ESC CANCEL"
+    } else {
+        "ENTER DISCARD & OPEN   ESC CANCEL"
+    };
     text_top(
         ctx,
         measurer,
-        if modal.is_input() {
-            "ENTER CONFIRM   ESC CANCEL"
-        } else {
-            "ENTER DISCARD & OPEN   ESC CANCEL"
-        },
+        hint,
         rect.left() + 12.0,
         rect.top() + 78.0,
         SMALL,
@@ -1384,6 +1577,8 @@ pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
         for field in [LayerField::Delay, LayerField::Duration, LayerField::Gain] {
             items.push(layer_param(field, layer));
         }
+        items.push(RawItem::Section("MIX".into()));
+        items.push(layer_param(LayerField::Pan, layer));
         if let Some(index) = state.clip_index() {
             if let Some(clip) = layer.clips.get(index) {
                 items.push(RawItem::Section(format!("CLIP {:02}", index + 1)));
@@ -1471,6 +1666,11 @@ pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
                         value: layer.sample_loop,
                         action: Action::ToggleSampleLoop,
                     }),
+                    LayerRowSpec::SampleReverse => items.push(RawItem::Toggle {
+                        label: "REVERSE".into(),
+                        value: layer.sample_reverse,
+                        action: Action::ToggleSampleReverse,
+                    }),
                 }
             }
         }
@@ -1478,8 +1678,32 @@ pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
             "{} · {:.1} dB · bake {} Hz",
             layer.wave.label(),
             synth::db(layer.gain.max(0.0001)),
-            state.patch().map(|patch| patch.rate).unwrap_or(22050)
+            state
+                .patch()
+                .map(|patch| patch.bake_rate())
+                .unwrap_or(22050)
         )));
+        items.push(RawItem::Section("SPACE".into()));
+        if let Some(patch) = state.patch() {
+            for field in PatchField::ALL {
+                items.push(patch_param(field, patch));
+            }
+            if patch.dsp_version < crate::model::DSP_VERSION {
+                items.push(RawItem::Options {
+                    label: "DSP".into(),
+                    columns: 1,
+                    options: vec![("UPGRADE TO HD".into(), Action::UpgradeDsp, false)],
+                });
+                items.push(RawItem::Note(format!(
+                    "legacy v{} · mono dry · upgrade for pan/space/limiter",
+                    patch.dsp_version
+                )));
+            } else {
+                items.push(RawItem::Note(
+                    "HD v3 · early reflections + reverb + limiter".into(),
+                ));
+            }
+        }
     } else {
         let music = &state.doc.project.music;
         for section in music_sections() {
@@ -1567,6 +1791,16 @@ fn layer_param(field: LayerField, layer: &crate::model::Layer) -> RawItem {
         label: field.label().into(),
         value: field.format(value),
         hit: Hit::LayerField(field),
+        norm: field.norm(value),
+    }
+}
+
+fn patch_param(field: PatchField, patch: &crate::model::Patch) -> RawItem {
+    let value = field.get(patch);
+    RawItem::Param {
+        label: field.label().into(),
+        value: field.format(value),
+        hit: Hit::PatchField(field),
         norm: field.norm(value),
     }
 }
@@ -1780,6 +2014,102 @@ fn paint_clip_block(
     }
 }
 
+fn paint_library_drag(
+    state: &State,
+    measurer: &dyn TextMeasurer,
+    ctx: &mut PaintContext,
+    layout: &Layout,
+    index: usize,
+) {
+    let Some(patch) = state.preset(index) else {
+        return;
+    };
+    let target = drop_target(state, layout, state.view.cursor);
+    let mut label = format!("{} · DROP ON TIMELINE", patch.name);
+    match target {
+        Some(DropTarget::Timeline { layer, time }) => {
+            let time = if state.view.modifiers.shift {
+                time
+            } else {
+                snap_time(time)
+            };
+            label = format!("{} · INSERT {:.3}s", patch.name, time);
+            if let Some((_, row)) = layout.layer_rows.iter().find(|(index, _)| *index == layer) {
+                fill(ctx, *row, Color::new(ACCENT.r, ACCENT.g, ACCENT.b, 0.10));
+            } else {
+                let y = layout
+                    .layer_rows
+                    .last()
+                    .map(|(_, row)| row.bottom())
+                    .unwrap_or(layout.timeline.top() + RULER_H);
+                let height = (layout.timeline.bottom() - y).clamp(0.0, TRACK_H);
+                if height > 0.0 {
+                    fill(
+                        ctx,
+                        Rect::from_min_size(
+                            Vec2::new(layout.timeline.left(), y),
+                            Size::new(layout.timeline.size.width, height),
+                        ),
+                        Color::new(ACCENT.r, ACCENT.g, ACCENT.b, 0.06),
+                    );
+                }
+            }
+            let x = layout
+                .time_x(time)
+                .clamp(layout.timeline.left(), layout.timeline.right());
+            vline(
+                ctx,
+                x,
+                layout.timeline.top() + RULER_H,
+                layout.timeline.bottom(),
+                ACCENT,
+            );
+            text_top(
+                ctx,
+                measurer,
+                &format!("{time:.3}"),
+                (x + 3.0).min(layout.timeline.right() - 32.0),
+                layout.timeline.top() + 2.0,
+                SMALL,
+                ACCENT,
+            );
+        }
+        Some(DropTarget::ProjectLibrary) => {
+            label = format!("{} · COPY TO PROJECT", patch.name);
+            stroke(ctx, layout.left, ACCENT_LINE);
+        }
+        None => {}
+    }
+    let width = measurer.measure_run(&label, SMALL) + 16.0;
+    let height = 22.0;
+    let mut origin = state.view.cursor + Vec2::new(14.0, 18.0);
+    origin.x = origin
+        .x
+        .min(state.view.viewport.width - width - 6.0)
+        .max(6.0);
+    origin.y = origin
+        .y
+        .min(state.view.viewport.height - height - 6.0)
+        .max(6.0);
+    let rect = Rect::from_min_size(origin, Size::new(width, height));
+    ctx.fill_rounded_rect(rect, 5.0, PANEL);
+    ctx.stroke_rounded_rect(
+        rect,
+        5.0,
+        1.0,
+        if target.is_some() { ACCENT } else { FAINT },
+    );
+    text_top(
+        ctx,
+        measurer,
+        &label,
+        rect.left() + 8.0,
+        rect.top() + 3.0,
+        SMALL,
+        TEXT,
+    );
+}
+
 fn drag_info(state: &State) -> Option<String> {
     match &state.view.drag {
         Drag::Seek { .. } => Some(format!(
@@ -1788,6 +2118,20 @@ fn drag_info(state: &State) -> Option<String> {
         )),
         Drag::InspectorScroll { .. } => Some("PARAMETERS  scrolling".into()),
         Drag::LibraryScroll { .. } => Some("LIBRARY  scrolling".into()),
+        Drag::LibraryItem { index, moved, .. } => {
+            let name = state
+                .presets
+                .get(*index)
+                .map(|patch| patch.name.as_str())
+                .unwrap_or("preset");
+            if *moved {
+                Some(format!(
+                    "DRAG {name}  ·  timeline inserts layers / left panel copies to project"
+                ))
+            } else {
+                Some(format!("PRESET {name}  ·  click to audition"))
+            }
+        }
         Drag::AutomationPoint { layer, clip, index } => {
             let data = state
                 .patch()
@@ -1854,6 +2198,14 @@ fn drag_info(state: &State) -> Option<String> {
             field.label(),
             field.format(field.get(&state.doc.project.music))
         )),
+        Drag::PatchField { field, .. } => {
+            let patch = state.patch()?;
+            Some(format!(
+                "SPACE  {}  {}",
+                field.label(),
+                field.format(field.get(patch))
+            ))
+        }
         Drag::None => None,
     }
 }
@@ -1861,6 +2213,9 @@ fn drag_info(state: &State) -> Option<String> {
 fn hover_info(state: &State) -> Option<String> {
     match state.view.hover_hit {
         Some(Hit::Action(action)) => {
+            if !action_available(state, action) {
+                return Some("PRESETS 只读 · 切回 PROJECT 编辑".into());
+            }
             let tip = action_tip(action);
             if tip.is_empty() {
                 None
@@ -1871,8 +2226,23 @@ fn hover_info(state: &State) -> Option<String> {
         Some(Hit::Search) => Some("搜索音效 · Search（/）".into()),
         Some(Hit::CategoryFilter) => Some("切换分类过滤 · Category（C）".into()),
         Some(Hit::FavoriteFilter) => Some("只看收藏 · Favorites".into()),
+        Some(Hit::LibraryMode(mode)) => Some(format!("切换到 {} 库", mode.label())),
+        Some(Hit::PresetRow(index)) => state.preset(index).map(|patch| {
+            format!(
+                "PRESET · {} · {}  ·  click to audition / drag to insert",
+                patch.name,
+                patch.category.label()
+            )
+        }),
+        Some(Hit::PresetFavorite(index)) => state
+            .presets
+            .get(index)
+            .map(|patch| format!("收藏预设 · {}", patch.name)),
         Some(Hit::InspectorScrollbar) => Some("拖动滚动参数面板 · Scroll".into()),
         Some(Hit::MenuItem(action)) => {
+            if !action_available(state, action) {
+                return Some("PRESETS 只读 · 切回 PROJECT 编辑".into());
+            }
             let tip = action_tip(action);
             if tip.is_empty() {
                 None

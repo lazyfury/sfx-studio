@@ -27,6 +27,11 @@ pub fn hit(state: &State, layout: &Layout, pos: Vec2) -> Option<Hit> {
             return Some(Hit::CategoryMenu);
         }
     }
+    for (mode, rect) in &layout.library_mode_buttons {
+        if rect.contains(pos) {
+            return Some(Hit::LibraryMode(*mode));
+        }
+    }
     if layout.category_rect.contains(pos) {
         return Some(Hit::CategoryFilter);
     }
@@ -57,6 +62,14 @@ pub fn hit(state: &State, layout: &Layout, pos: Vec2) -> Option<Hit> {
                 return Some(Hit::PatchFavorite(*index));
             }
             return Some(Hit::PatchRow(*index));
+        }
+    }
+    for (index, rect) in &layout.preset_rows {
+        if rect.contains(pos) {
+            if patch_star_rect(*rect).contains(pos) {
+                return Some(Hit::PresetFavorite(*index));
+            }
+            return Some(Hit::PresetRow(*index));
         }
     }
     if layout.music_row.contains(pos) {

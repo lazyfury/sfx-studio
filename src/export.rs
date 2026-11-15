@@ -6,7 +6,8 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::model::{self, Layer, Music, Patch, Project, Wave};
+use crate::fx;
+use crate::model::{self, Layer, Music, Patch, Project};
 use crate::synth;
 
 /// Deterministic, collision-free file stems for the whole project. Two patches
@@ -35,17 +36,22 @@ pub fn bake(project: &Project, root: &Path) -> Result<String, String> {
 
     let mut entries = Vec::new();
     for (patch, name) in project.patches.iter().zip(names.iter()) {
-        let samples = synth::render_patch(patch, patch.rate);
-        write_baked_wav(&baked.join(format!("{name}.wav")), &samples, patch.rate)?;
+        let rate = patch.bake_rate();
+        let stereo = fx::render_patch(patch, rate);
+        write_baked_wav(&baked.join(format!("{name}.wav")), &stereo, rate)?;
         entries.push(serde_json::json!({
             "name": name,
             "patch": patch.name,
             "category": patch.category.group(),
             "favorite": patch.favorite,
             "dsp_version": patch.dsp_version,
+            "space": patch.space,
+            "room": patch.room,
             "wav": format!("res://audio/baked/{name}.wav"),
-            "rate": patch.rate,
-            "duration": samples.len() as f32 / patch.rate as f32,
+            "rate": rate,
+            "channels": 2,
+            "bits": 16,
+            "duration": stereo.frames() as f32 / patch.rate as f32,
             "loop": false
         }));
     }
@@ -87,13 +93,14 @@ pub fn export_tres(project: &Project, root: &Path) -> Result<String, String> {
     let names = unique_names(project);
     let mut baked_count = 0;
     for (patch, name) in project.patches.iter().zip(names.iter()) {
-        let needs_bake =
-            patch.has_automation() || patch.layers.iter().any(|layer| layer.wave == Wave::Sample);
+        let needs_bake = patch.needs_baked_tres();
         let text = if needs_bake {
-            // Automation cannot be flattened to SfxLayer. Bake the exact result
-            // and point `baked` at it; the layer parameters stay in the file.
-            let samples = synth::render_patch(patch, patch.rate);
-            write_baked_wav(&baked_dir.join(format!("{name}.wav")), &samples, patch.rate)?;
+            // Automation / HD-only routing cannot be flattened to SfxLayer.
+            // Bake the exact result and point `baked` at it; the layer
+            // parameters stay in the file.
+            let rate = patch.bake_rate();
+            let stereo = fx::render_patch(patch, rate);
+            write_baked_wav(&baked_dir.join(format!("{name}.wav")), &stereo, rate)?;
             baked_count += 1;
             patch_tres_baked(patch, &format!("res://audio/baked/{name}.wav"))
         } else {
@@ -108,13 +115,15 @@ pub fn export_tres(project: &Project, root: &Path) -> Result<String, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(format!(
-        "exported {} .tres patch(es) + music.tres ({baked_count} baked with automation)",
+        "exported {} .tres patch(es) + music.tres ({baked_count} baked: v3/automation/sample)",
         project.patches.len()
     ))
 }
 
-fn write_baked_wav(path: &Path, samples: &[f32], rate: u32) -> Result<(), String> {
-    synth::write_wav(path, samples, rate).map_err(|e| e.to_string())?;
+fn write_baked_wav(path: &Path, stereo: &fx::Stereo, rate: u32) -> Result<(), String> {
+    // 16-bit stereo is accepted by every Godot 4 WAV import path.
+    synth::write_wav_stereo(path, &stereo.left, &stereo.right, rate, 16)
+        .map_err(|e| e.to_string())?;
     // Force PCM import. Godot 4.7's default WAV import is QOA (lossy); a minimal
     // sidecar with `compress/mode=0` makes the editor fill the rest and keep PCM.
     let sidecar = path.with_extension("wav.import");
@@ -416,6 +425,28 @@ mod tests {
     }
 
     #[test]
+    fn v3_patch_bakes_for_tres_export() {
+        use crate::model::{Layer, Patch, Wave};
+        let root = temp_project_root("v3-export");
+        let mut layer = Layer::new(Wave::Sine);
+        layer.duration = 0.05;
+        layer.pan = 0.4;
+        let mut patch = Patch {
+            name: "hd".into(),
+            layers: vec![layer],
+            ..Patch::default()
+        };
+        patch.space = 0.3;
+        let mut project = crate::model::Project::demo("v3-export");
+        project.patches = vec![patch];
+        export_tres(&project, &root).expect("tres");
+        let text = std::fs::read_to_string(root.join("audio/sfx/hd.tres")).unwrap();
+        assert!(text.contains("baked = ExtResource"), "{text}");
+        assert!(root.join("audio/baked/hd.wav").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn automated_patch_uses_baked_wav_reference() {
         use crate::model::{AutomationPoint, Clip, Layer, Patch, Wave};
         let mut layer = Layer::new(Wave::Sine);
@@ -483,6 +514,8 @@ mod tests {
         assert_eq!(back.name, "Laser Beam");
         assert_eq!(back.category, Category::Magic);
         assert!(!back.normalize);
+        // `.tres` can only express the live v2 graph.
+        assert_eq!(back.dsp_version, 2);
         assert_eq!(back.layers[0].tone_env, ToneEnv::Exp);
         assert!((back.layers[0].exp_decay - 7.5).abs() < 0.001);
     }
@@ -517,11 +550,24 @@ mod tests {
         assert!(root.join("audio/baked/music.wav.import").exists());
         assert!(root.join("audio/baked/laser_beam.wav").exists());
         assert!(root.join("audio/sfx_manifest.json").exists());
+        let baked = std::fs::read(root.join("audio/baked/laser_beam.wav")).unwrap();
+        assert_eq!(&baked[0..4], b"RIFF");
+        assert_eq!(u16::from_le_bytes(baked[22..24].try_into().unwrap()), 2);
+        assert_eq!(u16::from_le_bytes(baked[34..36].try_into().unwrap()), 16);
         let manifest: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(root.join("audio/sfx_manifest.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(manifest["schema_version"], crate::model::PROJECT_VERSION);
+        let coin = manifest["sounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|sound| sound["name"] == "coin")
+            .expect("coin entry");
+        assert_eq!(coin["channels"], 2);
+        assert_eq!(coin["bits"], 16);
+        assert!(coin["dsp_version"].as_u64().unwrap() >= 3);
         let names: Vec<_> = manifest["sounds"]
             .as_array()
             .unwrap()

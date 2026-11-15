@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::fx;
 use crate::model::{Music, Patch};
 use crate::synth::{self, Envelope};
 
@@ -42,7 +43,9 @@ struct RenderJob {
 pub(super) struct RenderOutcome {
     pub seq: u64,
     pub key: RenderKey,
+    /// Interleaved frames (stereo for patches, mono for music).
     pub samples: Vec<f32>,
+    pub channels: usize,
     pub envelope: Envelope,
     pub peak: f32,
 }
@@ -132,20 +135,40 @@ fn worker_loop(jobs: Receiver<RenderJob>, results: Sender<RenderOutcome>, latest
         if latest.load(Ordering::Acquire) != job.seq {
             continue;
         }
-        let samples = match job.payload {
-            RenderPayload::Patch(patch) => synth::render_patch(&patch, job.key.rate),
-            RenderPayload::Music(music) => synth::render_music(&music, job.key.rate),
+        let (samples, channels) = match job.payload {
+            RenderPayload::Patch(patch) => {
+                let stereo = fx::render_patch(&patch, job.key.rate);
+                (stereo.interleave(), 2)
+            }
+            RenderPayload::Music(music) => (synth::render_music(&music, job.key.rate), 1),
         };
         if latest.load(Ordering::Acquire) != job.seq {
             continue;
         }
-        let envelope = synth::envelope(&samples, synth::ENVELOPE_BINS);
-        let peak = synth::peak(&samples);
+        let mono = if channels == 2 {
+            downmix(&samples)
+        } else {
+            samples.clone()
+        };
+        let envelope = synth::envelope(&mono, synth::ENVELOPE_BINS);
+        let peak = if channels == 2 {
+            let left = samples.iter().step_by(2).copied().collect::<Vec<_>>();
+            let right = samples
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .copied()
+                .collect::<Vec<_>>();
+            synth::peak(&left).max(synth::peak(&right))
+        } else {
+            synth::peak(&mono)
+        };
         if results
             .send(RenderOutcome {
                 seq: job.seq,
                 key: job.key,
                 samples,
+                channels,
                 envelope,
                 peak,
             })
@@ -154,6 +177,13 @@ fn worker_loop(jobs: Receiver<RenderJob>, results: Sender<RenderOutcome>, latest
             break;
         }
     }
+}
+
+fn downmix(samples: &[f32]) -> Vec<f32> {
+    samples
+        .chunks_exact(2)
+        .map(|frame| (frame[0] + frame[1]) * 0.5)
+        .collect()
 }
 
 impl SfxLogic {
@@ -227,6 +257,7 @@ impl SfxLogic {
         match outcome.key.tab {
             Tab::Patches => {
                 self.state.playback.cache = outcome.samples;
+                self.state.playback.cache_channels = outcome.channels;
                 self.state.playback.cache_peak = outcome.peak;
                 self.state.playback.cache_envelope = outcome.envelope;
                 self.state.playback.cache_version = outcome.key.version;
@@ -301,6 +332,7 @@ mod tests {
                 assert_eq!(outcome.seq, seq);
                 assert_eq!(outcome.key, request);
                 assert!(!outcome.samples.is_empty());
+                assert_eq!(outcome.channels, 2);
                 assert_eq!(outcome.envelope.min.len(), synth::ENVELOPE_BINS);
                 assert!(outcome.peak > 0.0);
                 return;

@@ -78,7 +78,10 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::Escape => {
-                        if self.state.view.category_menu_open {
+                        if matches!(self.state.view.drag, Drag::LibraryItem { .. }) {
+                            self.state.view.drag = Drag::None;
+                            self.state.bump_view();
+                        } else if self.state.view.category_menu_open {
                             self.state.view.category_menu_open = false;
                             self.state.bump_view();
                         } else if self.state.view.menu_open {
@@ -90,6 +93,11 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::Delete => {
+                        if self.state.view.library_mode == LibraryMode::Presets {
+                            self.state
+                                .toast("PRESETS library is read-only · switch to PROJECT to edit");
+                            return EventResult::Handled;
+                        }
                         if self.state.view.tab == Tab::Patches {
                             if let Some(index) = self
                                 .state
@@ -114,37 +122,11 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::ArrowUp => {
-                        let visible = self.state.visible_patches();
-                        let position = self
-                            .state
-                            .view
-                            .selected_patch
-                            .and_then(|id| {
-                                visible.iter().position(|index| {
-                                    self.state.doc.project.patches[*index].id == id
-                                })
-                            })
-                            .unwrap_or(0);
-                        if let Some(index) = visible.get(position.saturating_sub(1)) {
-                            self.state.select_patch(*index);
-                        }
+                        self.navigate_library(-1);
                         return EventResult::Handled;
                     }
                     Key::ArrowDown => {
-                        let visible = self.state.visible_patches();
-                        let position = self
-                            .state
-                            .view
-                            .selected_patch
-                            .and_then(|id| {
-                                visible.iter().position(|index| {
-                                    self.state.doc.project.patches[*index].id == id
-                                })
-                            })
-                            .unwrap_or(0);
-                        if let Some(index) = visible.get(position + 1) {
-                            self.state.select_patch(*index);
-                        }
+                        self.navigate_library(1);
                         return EventResult::Handled;
                     }
                     Key::ArrowLeft => {
@@ -171,7 +153,13 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::Character('f') if !cmd => {
-                        self.activate(ui::Action::Favorite);
+                        if self.state.view.library_mode == LibraryMode::Presets {
+                            if let Some(index) = self.state.view.selected_preset {
+                                self.toggle_preset_favorite(index);
+                            }
+                        } else {
+                            self.activate(ui::Action::Favorite);
+                        }
                         return EventResult::Handled;
                     }
                     Key::Character('v') if !cmd => {
@@ -207,11 +195,11 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::Character('b') if cmd => {
-                        self.bake();
+                        self.activate(ui::Action::Bake);
                         return EventResult::Handled;
                     }
                     Key::Character('e') if cmd => {
-                        self.export_wav();
+                        self.activate(ui::Action::ExportWav);
                         return EventResult::Handled;
                     }
                     _ => {}
@@ -289,6 +277,26 @@ impl AppLogic for SfxLogic {
                     Some(ui::Hit::CategoryMenu) => {
                         return EventResult::Handled;
                     }
+                    Some(ui::Hit::LibraryMode(mode)) => {
+                        if self.state.playback.preset_playing {
+                            self.stop();
+                        }
+                        self.state.set_library_mode(mode);
+                        return EventResult::Handled;
+                    }
+                    Some(ui::Hit::PresetRow(index)) => {
+                        self.state.select_preset(index);
+                        self.state.view.drag = Drag::LibraryItem {
+                            index,
+                            start: *position,
+                            moved: false,
+                        };
+                        return EventResult::Handled;
+                    }
+                    Some(ui::Hit::PresetFavorite(index)) => {
+                        self.toggle_preset_favorite(index);
+                        return EventResult::Handled;
+                    }
                     Some(ui::Hit::FavoriteFilter) => {
                         self.activate(ui::Action::FavoriteFilter);
                         return EventResult::Handled;
@@ -297,6 +305,15 @@ impl AppLogic for SfxLogic {
                         self.state.begin_edit();
                         self.set_param_from_x(*position, ui::Hit::LayerField(field), &layout);
                         self.state.view.drag = Drag::Layer {
+                            field,
+                            last_x: position.x,
+                        };
+                        return EventResult::Handled;
+                    }
+                    Some(ui::Hit::PatchField(field)) => {
+                        self.state.begin_edit();
+                        self.set_param_from_x(*position, ui::Hit::PatchField(field), &layout);
+                        self.state.view.drag = Drag::PatchField {
                             field,
                             last_x: position.x,
                         };
@@ -388,8 +405,9 @@ impl AppLogic for SfxLogic {
                     }
                     Some(ui::Hit::LibraryScrollbar) => {
                         self.state.view.drag = Drag::LibraryScroll {
+                            mode: self.state.view.library_mode,
                             start_y: position.y,
-                            start_scroll: self.state.view.patch_scroll,
+                            start_scroll: self.state.library_scroll(),
                             travel: (layout.library_scrollbar.size.height
                                 - layout.library_thumb.size.height)
                                 .max(1.0),
@@ -462,7 +480,11 @@ impl AppLogic for SfxLogic {
                 return EventResult::Handled;
             }
             InputEvent::PointerLeave => {
-                self.state.commit_edit();
+                if matches!(self.state.view.drag, Drag::LibraryItem { .. }) {
+                    self.state.view.drag = Drag::None;
+                } else {
+                    self.state.commit_edit();
+                }
                 self.state.view.hover = None;
                 self.state.view.hover_hit = None;
                 return EventResult::Handled;
@@ -485,6 +507,14 @@ impl AppLogic for SfxLogic {
                         let default = Layer::default();
                         if let Some(layer) = self.state.layer_mut() {
                             field.set(layer, field.get(&default));
+                            self.state.mark_dirty();
+                        }
+                    }
+                    Some(ui::Hit::PatchField(field)) => {
+                        self.push_undo();
+                        let default = Patch::default();
+                        if let Some(patch) = self.state.patch_mut() {
+                            field.set(patch, field.get(&default));
                             self.state.mark_dirty();
                         }
                     }
@@ -515,9 +545,16 @@ impl AppLogic for SfxLogic {
                 return EventResult::Handled;
             }
             InputEvent::PointerUp { position, .. } => {
-                self.state.commit_edit();
-                self.state.view.drag = Drag::None;
+                let drag = std::mem::replace(&mut self.state.view.drag, Drag::None);
                 self.state.view.timeline_pin = None;
+                if let Drag::LibraryItem { index, moved, .. } = drag {
+                    if moved {
+                        self.drop_preset(index, *position, &layout);
+                    } else {
+                        self.audition_preset(index);
+                    }
+                }
+                self.state.commit_edit();
                 self.state.view.hover_hit = ui::hit(&self.state, &layout, *position);
                 return EventResult::Handled;
             }
@@ -528,10 +565,14 @@ impl AppLogic for SfxLogic {
                 let step = if delta.y > 0.0 { -rows } else { rows };
                 if layout.left.contains(*position) {
                     let capacity = ui::library_capacity(self.state.view.viewport);
-                    let max_start = self.state.visible_patches().len().saturating_sub(capacity);
-                    self.state.view.patch_scroll = (self.state.view.patch_scroll as i32 + step)
-                        .clamp(0, max_start as i32)
-                        as usize;
+                    let max_start = self
+                        .state
+                        .visible_library_rows()
+                        .len()
+                        .saturating_sub(capacity);
+                    let next = (self.state.library_scroll() as i32 + step)
+                        .clamp(0, max_start as i32) as usize;
+                    self.state.set_library_scroll(next);
                     return EventResult::Handled;
                 }
                 if layout.right.contains(*position) {
@@ -619,17 +660,22 @@ impl AppLogic for SfxLogic {
             }
             let playing = audio.is_playing();
             if playing {
-                let mut time = audio.position();
-                if self.state.view.tab == Tab::Music {
-                    let length = self.state.doc.project.music.length_seconds();
-                    if length > 0.0 {
-                        time %= length;
+                if !self.state.playback.preset_playing {
+                    let mut time = audio.position();
+                    if self.state.view.tab == Tab::Music {
+                        let length = self.state.doc.project.music.length_seconds();
+                        if length > 0.0 {
+                            time %= length;
+                        }
                     }
+                    self.state.playback.playhead = time;
                 }
-                self.state.playback.playhead = time;
             } else if self.state.playback.was_playing {
-                self.state.playback.playhead = 0.0;
-                self.state.playback.seeked = false;
+                if !self.state.playback.preset_playing {
+                    self.state.playback.playhead = 0.0;
+                    self.state.playback.seeked = false;
+                }
+                self.state.playback.preset_playing = false;
             }
             self.state.playback.was_playing = playing;
         }
@@ -659,10 +705,12 @@ impl AppLogic for SfxLogic {
                 ..
             } => return Some(Cursor::ColResize),
             Drag::Clip { .. } => return Some(Cursor::Grabbing),
-            Drag::Layer { .. } | Drag::Music { .. } | Drag::ClipField { .. } => {
-                return Some(Cursor::ColResize)
-            }
+            Drag::Layer { .. }
+            | Drag::PatchField { .. }
+            | Drag::Music { .. }
+            | Drag::ClipField { .. } => return Some(Cursor::ColResize),
             Drag::AutomationPoint { .. } => return Some(Cursor::Grabbing),
+            Drag::LibraryItem { .. } => return Some(Cursor::Grabbing),
             Drag::Seek { .. } => return Some(Cursor::Grab),
             Drag::InspectorScroll { .. } | Drag::LibraryScroll { .. } => {
                 return Some(Cursor::RowResize)
@@ -682,9 +730,12 @@ impl AppLogic for SfxLogic {
             }
             Some(ui::Hit::AutomationPoint(_)) => Some(Cursor::Grab),
             Some(ui::Hit::AutomationLane { .. }) => Some(Cursor::Pointer),
-            Some(ui::Hit::LayerField(_) | ui::Hit::ClipField(_) | ui::Hit::MusicField(_)) => {
-                Some(Cursor::ColResize)
-            }
+            Some(
+                ui::Hit::LayerField(_)
+                | ui::Hit::PatchField(_)
+                | ui::Hit::ClipField(_)
+                | ui::Hit::MusicField(_),
+            ) => Some(Cursor::ColResize),
             Some(
                 ui::Hit::Action(_)
                 | ui::Hit::MenuToggle
@@ -692,6 +743,9 @@ impl AppLogic for SfxLogic {
                 | ui::Hit::MenuPanel
                 | ui::Hit::PatchRow(_)
                 | ui::Hit::PatchFavorite(_)
+                | ui::Hit::PresetRow(_)
+                | ui::Hit::PresetFavorite(_)
+                | ui::Hit::LibraryMode(_)
                 | ui::Hit::LayerRow(_)
                 | ui::Hit::Pattern(_, _)
                 | ui::Hit::CategoryFilter
@@ -705,6 +759,57 @@ impl AppLogic for SfxLogic {
 }
 
 impl SfxLogic {
+    /// Arrow keys walk whichever library source is active, without changing
+    /// the project or starting playback.
+    fn navigate_library(&mut self, direction: isize) {
+        match self.state.view.library_mode {
+            LibraryMode::Project => {
+                let visible = self.state.visible_patches();
+                if visible.is_empty() {
+                    return;
+                }
+                let position = self
+                    .state
+                    .view
+                    .selected_patch
+                    .and_then(|id| {
+                        visible
+                            .iter()
+                            .position(|index| self.state.doc.project.patches[*index].id == id)
+                    })
+                    .unwrap_or(0);
+                let target = if direction < 0 {
+                    position.saturating_sub(1)
+                } else {
+                    (position + 1).min(visible.len() - 1)
+                };
+                if let Some(index) = visible.get(target) {
+                    self.state.select_patch(*index);
+                }
+            }
+            LibraryMode::Presets => {
+                let visible = self.state.visible_presets();
+                if visible.is_empty() {
+                    return;
+                }
+                let position = self
+                    .state
+                    .view
+                    .selected_preset
+                    .and_then(|index| visible.iter().position(|candidate| *candidate == index))
+                    .unwrap_or(0);
+                let target = if direction < 0 {
+                    position.saturating_sub(1)
+                } else {
+                    (position + 1).min(visible.len() - 1)
+                };
+                if let Some(index) = visible.get(target) {
+                    self.state.select_preset(*index);
+                }
+            }
+        }
+    }
+
     pub(super) fn set_param_from_x(
         &mut self,
         position: Vec2,
@@ -722,6 +827,14 @@ impl SfxLogic {
                 let value = spec.snap(field.denorm(t)).clamp(spec.min, spec.max);
                 if let Some(layer) = self.state.layer_mut() {
                     field.set(layer, value);
+                    self.state.mark_dirty();
+                }
+            }
+            ui::Hit::PatchField(field) => {
+                let spec = field.spec();
+                let value = spec.snap(field.denorm(t)).clamp(spec.min, spec.max);
+                if let Some(patch) = self.state.patch_mut() {
+                    field.set(patch, value);
                     self.state.mark_dirty();
                 }
             }
@@ -764,6 +877,18 @@ impl SfxLogic {
         let snap = !self.state.view.modifiers.shift;
         match drag {
             Drag::None => {}
+            Drag::LibraryItem {
+                index,
+                start,
+                moved,
+            } => {
+                let moved = moved || (position - start).length() > 4.0;
+                self.state.view.drag = Drag::LibraryItem {
+                    index,
+                    start,
+                    moved,
+                };
+            }
             Drag::Layer { field, last_x } => {
                 if self.state.view.modifiers.shift || self.state.view.modifiers.alt {
                     let (_, _, step) = field.range();
@@ -776,6 +901,22 @@ impl SfxLogic {
                     self.set_param_from_x(position, ui::Hit::LayerField(field), layout);
                 }
                 self.state.view.drag = Drag::Layer {
+                    field,
+                    last_x: position.x,
+                };
+            }
+            Drag::PatchField { field, last_x } => {
+                if self.state.view.modifiers.shift || self.state.view.modifiers.alt {
+                    let (_, _, step) = field.range();
+                    let delta = (position.x - last_x) * step * fine;
+                    if let Some(patch) = self.state.patch_mut() {
+                        field.set(patch, field.get(patch) + delta);
+                        self.state.mark_dirty();
+                    }
+                } else {
+                    self.set_param_from_x(position, ui::Hit::PatchField(field), layout);
+                }
+                self.state.view.drag = Drag::PatchField {
                     field,
                     last_x: position.x,
                 };
@@ -841,17 +982,22 @@ impl SfxLogic {
                 self.state.view.drag = Drag::Seek { waveform };
             }
             Drag::LibraryScroll {
+                mode,
                 start_y,
                 start_scroll,
                 travel,
                 max_start,
             } => {
                 let delta = (position.y - start_y) / travel.max(1.0) * max_start as f32;
-                self.state.view.patch_scroll = (start_scroll as f32 + delta)
+                let value = (start_scroll as f32 + delta)
                     .round()
-                    .clamp(0.0, max_start as f32)
-                    as usize;
+                    .clamp(0.0, max_start as f32) as usize;
+                match mode {
+                    LibraryMode::Project => self.state.view.patch_scroll = value,
+                    LibraryMode::Presets => self.state.view.preset_scroll = value,
+                }
                 self.state.view.drag = Drag::LibraryScroll {
+                    mode,
                     start_y,
                     start_scroll,
                     travel,

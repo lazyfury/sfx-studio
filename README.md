@@ -21,8 +21,10 @@ crate, no symlinked Rust sources.
 │   ├── ui.rs              # shared actions/hit types + widget contracts
 │   ├── ui/                # layout, paint and hit-testing modules
 │   ├── model.rs           # Project / Patch / Layer / Clip / categories
-│   ├── synth.rs           # oscillators, noise, FM, pluck, drums, music
-│   ├── audio.rs           # cpal playback
+│   ├── presets.rs         # project-local presets/<name>.json loader
+│   ├── synth.rs           # v2 + v3 voices: oscillators, drums, noise, music
+│   ├── fx.rs              # DSP v3: pan, de-click, ER, reverb, master
+│   ├── audio.rs           # cpal stereo playback
 │   ├── export.rs          # WAV + Godot .tres / baked assets
 │   ├── tres.rs            # Godot .tres import
 │   ├── theme.rs           # dark Minimal Studio tokens
@@ -34,7 +36,7 @@ crate, no symlinked Rust sources.
 
 ```bash
 cd ~/Documents/sfx-studio
-./run.sh                   # cargo run --release
+./run.sh                   # cargo run --release (prompts for a project folder)
 # or
 cargo run --release
 
@@ -53,6 +55,7 @@ The release binary is `target/release/sfx-studio`.
 CLI helpers (also used by the asset pipeline):
 
 ```bash
+cargo run -- --new   <project-dir>   # project + presets/ + baked audio
 cargo run -- --dump  <project-dir>
 cargo run -- --bake  <project-dir>   # audio/baked + sfx_manifest.json
 cargo run -- --export <project-dir>  # audio/sfx/*.tres + music.tres
@@ -62,18 +65,35 @@ cargo run -- --help
 
 ## Workflow
 
-- **Library** — search (`/`), category filter (`ALL` dropdown / `C`), favorites
-  filter (star), selectable sound list; each row's star toggles its favourite
-  and a thin scrollbar appears when the list overflows.
+- **Library** — `PROJECT | PRESETS` segmented control in the left title strip.
+  PROJECT lists the sounds stored in `sfx.project.json`; PRESETS is the
+  project-local library at `<project>/presets/*.json`. Search (`/`), category
+  filter (`ALL` dropdown / `C`), favorites filter (star) and the scrollbar work
+  in both modes. Clicking a preset auditions it without touching the project;
+  the star (or `F`) keeps a preset favourite in
+  `<project>/presets/.favorites.json`.
+- **Preset drag-in** — drag a preset row onto the timeline to copy its layers
+  into the current patch at the drop time (5 ms snap, Shift for free
+  placement); drop it on the left panel to copy it into the project library.
+  A 4 px threshold keeps click-to-audition separate from dragging. Project
+  patches stay click-to-open; only PRESETS rows start a drag.
 - **Sound** — waveform, play/stop/loop, randomize, A/B/C variations, favorite;
-  `SAMPLE` layers load a WAV with pitch/loop controls (see `docs/FORMAT.md`).
+  `SAMPLE` layers load a WAV with pitch, start, reverse and crossfaded loop
+  controls (see `docs/FORMAT.md`). v3 voices are band-limited (2× oversampled
+  PolyBLEP) and the drum models are rebuilt; existing projects stay on v2 until
+  `UPGRADE TO HD`.
 - **Timeline** — drag clips to move/trim (5 ms snap, hold Shift for free
   placement); ⌘/Ctrl+wheel zooms around the cursor and Shift+wheel pans.
 - **Parameters** — scrollable panel; click a slider to jump, drag to adjust,
-  Shift/Alt for fine control, double-click to reset. Waveform/ruler can be
-  dragged to scrub the playhead.
+  Shift/Alt for fine control, double-click to reset. `PAN` sits in the MIX
+  block; the `SPACE` block holds the per-sound reverb amount/size and the
+  legacy `UPGRADE TO HD` button. Waveform/ruler can be dragged to scrub the
+  playhead.
 - **Menu** — `MENU` holds Open/Save/New/Rename/Duplicate/Delete, Randomize/Vary/Favorite, Export WAV/Bake/TRES.
-- **Export** — menu entries write a 48 kHz WAV, or Godot baked assets / `.tres`.
+- **Export** — `EXPORT WAV` writes 48 kHz · 24-bit stereo (TPDF dither);
+  `BAKE GODOT` writes 48 kHz · 16-bit stereo WAVs + manifest (v3; legacy
+  patches keep `Patch.rate`); `.tres` export bakes any v3 / automated / sampled
+  patch so the resource plays exactly as previewed.
 - **Hover tips** — abbreviated buttons explain themselves in Chinese in the
   status line and a small tooltip; labels keep the English key terms.
 
@@ -86,17 +106,43 @@ cargo run -- --help
 | 1–8 | Trigger patch 1–8 |
 | R | Randomize current sound |
 | V | Create A/B/C variations |
-| F | Toggle favorite |
+| F | Favorite patch (PROJECT) / selected preset (PRESETS) |
+| ↑ / ↓ | Move through the active library |
+| ← / → | Select previous / next layer |
 | C | Cycle category filter |
 | L | Toggle loop |
 | ⌘/Ctrl+Z / ⇧⌘Z | Undo / redo |
 | ⌘/Ctrl+S | Save project |
 | ⌘/Ctrl+O | Open project folder |
-| ⌘/Ctrl+E | Export 48 kHz WAV |
+| ⌘/Ctrl+E | Export 48 kHz · 24-bit stereo WAV |
 | ⌘/Ctrl+B | Bake Godot assets |
 | ⌘/Ctrl + wheel (timeline) | Zoom timeline |
 | Shift + wheel (timeline) | Pan timeline |
 | Shift + drag clip | Free placement (no 5 ms snap) |
+
+## Project folder and internal presets
+
+A project is a directory containing `sfx.project.json`. On launch the app asks
+for that directory (or use `--project DIR`); cancelling leaves an empty shell
+with `OPEN` / `MENU → NEW PROJECT`. `NEW PROJECT`/`--new` writes a starter
+project plus an internal preset library:
+
+```text
+<project>/
+├── sfx.project.json
+├── presets/              # project-local presets, one Patch JSON per file
+│   ├── laser.json
+│   ├── coin.json
+│   └── .favorites.json   # optional UI favourites
+└── audio/...
+```
+
+The PRESETS tab is read-only and always reflects the currently open project, so
+switching projects switches the library. Dropping a preset on the timeline
+copies its layers (with fresh IDs) into the current patch and anchors its clip
+arrangement at the drop time. The current patch's DSP version, space and room
+are kept, so a v2 project still renders the inserted layers with the legacy
+chain until `UPGRADE TO HD`.
 
 ## Godot side
 
@@ -143,7 +189,7 @@ an old approval.
 | `docs/PLAN.md` | prioritized plan, status, acceptance evidence, backlog |
 | `docs/DEV_WORKFLOW.md` | mandatory two-stage review process |
 | `docs/REVIEW_CHECKLIST.md` | review checklist |
-| `docs/FORMAT.md` | project schema, export layout, migrations |
+| `docs/FORMAT.md` | project schema, export layout, migrations (incl. `dsp_version` 2→3) |
 | `docs/PARITY.md` | Rust ↔ Godot audio parity rules and known gaps |
 | `docs/reviews/` | signed review records (required by the gate) |
 

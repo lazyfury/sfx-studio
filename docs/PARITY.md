@@ -29,6 +29,8 @@
 | 16 步 pattern / kick/hat 位掩码 | `render_music` | `SfxSynth.music` | ✅ |
 | 文件元数据 | `resource_name`、`group` | `SfxPatch.group` | ✅ 本轮补齐 |
 | 采样层渲染公式 | `render_sample` | `_build_sample` | ✅ Rust 单端（路径 WAV）；`.tres` 往返未支持 |
+| v2 干声渲染（旧工程） | `synth::render_patch` | `SfxPatch._build_layers` | ✅ 0018 重构后 golden 不变 |
+| v3 PAN / SPACE / 母带 / 立体声 | `fx::render_patch` | — | ⛔ 仅 bake（见 D8） |
 
 ## 3. 已知差异（必须知晓）
 
@@ -41,6 +43,8 @@
 | D5 | `_s16` 截断 vs Rust `round()` | 最差 1 LSB | 不修（人耳不可闻）；若做 bit-exact 再统一 |
 | D6 | 实时预览固定 48k 并线性重采样到设备率；bake 仍按 `Patch.rate` | 预览与 bake 的滤波/噪声系数仍可能不同（D3） | 0015 已完成预览侧固定 48k + 重采样；bake 统一待 D3 决策 |
 | D7 | `MusicField::Rate` 仅影响 bake；实时预览已固定 48k | UI 标注为 `BAKE RATE` | 0015 起预览 48k + 设备重采样；bake 仍独立 |
+| D9 | DSP v3 更换了声音模型：PolyBLEP/2× 过采样振荡器、积分方波 Triangle、v3 鼓组、按 Hz 归一的噪声低通、采样 start/reverse/循环交叉淡化 | v2 路径逐样本不变（golden 仍 9/9）；v3 与 Godot 实时 DSP 不追求一致 | 所有 v3 patch 导出 `.tres` 时自动 bake（D8），发布以 WAV 为准。 |
+| D8 | DSP v3（PAN/SPACE/早期反射/混响/母带）只在 Rust 与 bake 中实现 | 外部手写 / 旧的 live `.tres` 仍是 v2；同参数会比 app 试听更干、更窄 | `dsp_version >= 3`（及含自动化/采样）的 patch 导出 `.tres` 时一律整段 bake，以 `baked` 引用 WAV，播放与 app 完全一致；`.tres` 导入固定 `dsp_version = 2`。 |
 
 ## 4. 必须遵守的改动规则
 
@@ -49,6 +53,8 @@
    - 更新本文件的差异表；
    - 增加/更新 golden 用例。
 2. 新增波形/参数必须同时改 Rust 与 Godot，或明确标注「仅单端」。
+   v3 的混音/母带参数按设计「仅 bake」：带这些参数的 patch 不允许以 live
+   `.tres` 导出，导出时自动 bake（见 D8）。
 3. 每个版本至少保留一组 `fixtures/*.json` + 期望 WAV 指纹（Phase 3 落地）。
 4. 不允许为了让测试通过而单方面修改公式而不改另一端。
 
@@ -75,6 +81,7 @@ GODOT=/path/to/godot ./scripts/parity.sh
 
 不覆盖（有意）：
 
+- **DSP v3 混音链 / 声音模型**：fixture 以 `synth::render_patch`（v2）渲染并逐样本比较，v3 由 `fx::render_patch` + `synth::render_layer_hq` 单端负责；
 - Noise / Pluck / 鼓：仍受 D1 RNG 差异影响；
 - 采样层：Godot 内嵌 `AudioStreamWAV`，Rust 为路径 WAV；
 - automation：导出时整段 bake，不参与逐层 golden。

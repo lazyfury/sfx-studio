@@ -5,21 +5,26 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::app::{State, Tab};
+use crate::app::{LibraryMode, State, Tab};
 use crate::model::{self, Project};
+use crate::presets::PresetBank;
 use crate::tres;
 
 pub(crate) fn open_folder(state: &mut State, folder: PathBuf) -> Result<Vec<String>, String> {
-    let (project, warnings) = load_folder(&folder)?;
+    let (project, mut warnings) = load_folder(&folder)?;
     state.doc.project = project;
-    state.doc.root = Some(folder);
+    state.doc.root = Some(folder.clone());
+    warnings.extend(state.presets.load_project(&folder));
     state.view.selected_patch = None;
     state.view.selected_layer = None;
     state.view.selected_clip = None;
     state.view.selected_env_point = None;
     state.view.inspector_scroll = 0.0;
     state.view.patch_scroll = 0;
+    state.view.preset_scroll = 0;
     state.view.layer_scroll = 0;
+    state.view.library_mode = LibraryMode::Project;
+    state.view.selected_preset = None;
     state.view.category_filter = None;
     state.view.favorites_only = false;
     state.view.search.clear();
@@ -57,6 +62,44 @@ pub(crate) fn print_warnings(warnings: &[String]) {
     for warning in warnings {
         eprintln!("warning: {warning}");
     }
+}
+
+/// Create a new project in `folder`: `sfx.project.json`, `audio/sfx/` samples
+/// and an internal `presets/` library seeded from the demo sounds.
+/// Refuses to overwrite an existing project file or a non-empty `presets/`.
+pub(crate) fn create_project(folder: &Path) -> Result<(Project, Vec<String>), String> {
+    if folder.join(model::PROJECT_FILE).exists() {
+        return Err(format!(
+            "{} already contains {}",
+            folder.display(),
+            model::PROJECT_FILE
+        ));
+    }
+    let preset_dir = folder.join(crate::presets::PRESETS_DIR);
+    if preset_dir.exists()
+        && std::fs::read_dir(&preset_dir)
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false)
+    {
+        return Err(format!(
+            "{} already contains files in {}/",
+            folder.display(),
+            crate::presets::PRESETS_DIR
+        ));
+    }
+    std::fs::create_dir_all(folder).map_err(|error| error.to_string())?;
+    let name = folder
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("project");
+    let mut project = Project::starter(name);
+    let warnings = project.validate();
+    model::save_project(folder, &project).map_err(|error| error.to_string())?;
+    let presets = Project::demo("preset bank").patches;
+    if let Err(error) = PresetBank::write_presets(folder, &presets) {
+        return Err(format!("presets: {error}"));
+    }
+    Ok((project, warnings))
 }
 
 /// Load `sfx.project.json` when present, otherwise import `audio/sfx/*.tres`.

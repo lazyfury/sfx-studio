@@ -8,6 +8,7 @@ impl SfxLogic {
         self.cancel_preview();
         self.state.ensure_cache(rate);
         self.state.playback.defer_render = false;
+        self.state.playback.preset_playing = false;
         let Some(audio) = &self.audio else {
             self.state.toast("no audio device");
             return;
@@ -15,16 +16,17 @@ impl SfxLogic {
         match self.state.view.tab {
             Tab::Patches => {
                 let samples = self.state.playback.cache.clone();
+                let channels = self.state.playback.cache_channels.max(1);
                 let offset = if self.state.playback.seeked {
                     (self.state.playback.playhead * rate as f32) as usize
                 } else {
                     0
                 };
-                if samples.is_empty() || offset >= samples.len() {
+                if samples.is_empty() || offset >= samples.len() / channels {
                     self.state.toast("nothing to play");
                     return;
                 }
-                audio.play(samples, offset, self.state.playback.loop_play);
+                audio.play(samples, channels, offset, self.state.playback.loop_play);
                 if !self.state.playback.seeked {
                     self.state.playback.playhead = 0.0;
                 }
@@ -35,7 +37,7 @@ impl SfxLogic {
                 for sample in &mut samples {
                     *sample *= gain;
                 }
-                audio.play(samples, 0, true);
+                audio.play(samples, 1, 0, true);
                 self.state.playback.playhead = 0.0;
             }
         }
@@ -52,6 +54,7 @@ impl SfxLogic {
             }
         }
         self.state.playback.was_playing = false;
+        self.state.playback.preset_playing = false;
         self.state.playback.playhead = time.max(0.0);
         self.state.playback.seeked = true;
         self.state.bump_view();
@@ -64,5 +67,6 @@ impl SfxLogic {
         self.state.playback.playhead = 0.0;
         self.state.playback.seeked = false;
         self.state.playback.was_playing = false;
+        self.state.playback.preset_playing = false;
     }
 }

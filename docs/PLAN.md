@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；RNG 一致性与采样 `.tres` 往返见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -79,7 +79,7 @@
 
 ## 2. 本轮验收证据
 
-审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`、`0008-timeline-zoom-and-library.md`、`0009-module-split.md`、`0010-background-preview-render.md`、`0011-state-field-groups.md`、`0012-stable-ids.md`、`0013-id-based-selection.md`、`0014-rt-audio-callback.md`、`0015-48k-resample-reconnect.md`、`0016-sample-waveform.md`、`0017-parity-golden.md`（status: approved，source_hash 匹配）。
+审查记录：`docs/reviews/0001-rust-hardening.md`、`0002-field-spec.md`、`0003-module-split.md`、`0004-ui-menu-deferred-render.md`、`0005-ui-icons-margins.md`、`0006-timeline-audio-interaction.md`、`0007-layer-inspector-registry.md`、`0008-timeline-zoom-and-library.md`、`0009-module-split.md`、`0010-background-preview-render.md`、`0011-state-field-groups.md`、`0012-stable-ids.md`、`0013-id-based-selection.md`、`0014-rt-audio-callback.md`、`0015-48k-resample-reconnect.md`、`0016-sample-waveform.md`、`0017-parity-golden.md`、`0018-dsp-v3-stereo-space.md`、`0019-hd-voices-and-drums.md`、`0020-library-modes-drag-in.md`（status: approved，source_hash 匹配）。
 
 ```bash
 cargo fmt --check
@@ -260,3 +260,114 @@ cargo run -- --selfcheck   # 2 frames / 2555 commands / 119 text runs
 - [ ] 独立第二审查完成，`docs/reviews/NNNN-*.md` 写入 `status: approved` 且 `source_hash` 匹配。
 - [ ] `scripts/review_gate.sh` 通过（pre-push 强制；共享 runner 可执行 `scripts/ci.sh`）。
 - [ ] 数据格式/导出行为变化时，同步更新 `docs/FORMAT.md`、`docs/PARITY.md`。
+
+## 6. 本轮增量（0018）— DSP v3：空间 / 立体声 / 母带
+
+目标：让 demo 与导出音频脱离「干声合成器」听感，同时不破坏 Rust ↔ Godot 的
+既有 golden 一致性。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0018-1 | 去咔哒 | 每层 / 总线首尾 2–4 ms 淡入淡出 | `edges_are_declicked` |
+| 0018-2 | 立体声 + PAN | `Layer.pan`，等功率声像，缓存/播放/导出全链路双声道 | `pan_hard_left_is_silent_on_the_right` |
+| 0018-3 | 混响 + 早期反射 | `Patch.space` / `Patch.room`；ER 6 抽头 + 4 comb + 2 allpass，随长度生成尾音 | `space_adds_energy_after_source` |
+| 0018-4 | 母带 | DC block + 20 Hz 高通 + 软限幅 + 峰值归一化（v3 始终归一到 0.95） | `master_output_never_clips` |
+| 0018-5 | 24-bit 导出 | 手动 Export WAV 写 24-bit stereo + TPDF dither；bake 保持 Godot 友好的 16-bit stereo | `wav24_header_is_stereo_pcm` |
+| 0018-6 | DSP 版本 | `DSP_VERSION = 3`；老工程保持 v2 声音，检查器提供 `UPGRADE TO HD` | `legacy_patches_stay_mono_and_unprocessed` |
+| 0018-7 | 一致性 | `.tres` 实时播放仍为 v2 子集；带 PAN/空间/自动化的 patch 在 `.tres` 导出时整段 bake | `needs_bake` 路径 + PARITY.md D8 |
+
+非目标（下一批）：PolyBLEP/过采样、鼓重做、采样层 round-robin、humanize。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+./scripts/review_gate.sh
+```
+
+实测（2026-11-15）：
+
+- `cargo test` 102 passed；`--selfcheck` 2 frames / 2569 commands / 125 text runs。
+- `./scripts/parity.sh` 9/9 `parity ok`，`max |Δ|` 仍为 0.00674（v2 路径未变）。
+- 临时工程 `--bake/--export/--dump`：48 kHz 16-bit stereo WAV、1.334 s（含混响尾音）、
+  `peak = -0.45 dBFS`、首尾样本为 0、左右 RMS 0.081/0.102。
+- Godot 4.7.2 实测加载导出的 `.tres`：`baked=true len=1.334 stereo=true`，与 Rust 渲染一致。
+- v2 工程保持 0.35 s、`L == R`、无尾音（PAN/SPACE 被忽略）。
+
+## 7. 本轮增量（0019）— HD 声音模型：去混叠 / 鼓组 / 采样播放
+
+目标：解决「合成器味」的根因——朴素波形的混叠、玩具级鼓组、采样循环接缝，
+同时保持 v2 golden 逐样本不变。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0019-1 | 去混叠 | Saw/Pulse/Square 用 PolyBLEP；Triangle 用积分方波；tone/FM/Arp/Pluck 以 2× 渲染后过 31 抽头半带 FIR 抽取 | `hq_oscillators_reject_alias_energy`（5 kHz 锯齿 13 kHz 杂散 0.036 → 0.000004）、`decimator_preserves_dc_and_low_frequencies` |
+| 0019-2 | 鼓组重写 | Kick：click + 音高包络 + sub + soft clip；Snare：双腔体 + SVF 带通噪声 + 瞬态；Hat：6 个 PolyBLEP 方波金属音 + 6.5 kHz 高通；Clap：4 段带通突发 + 尾音 | `hq_drums_are_finite_and_remodelled`（含 kick/hat 过零率对比） |
+| 0019-3 | 采样率一致性 | 噪声低通按 22.05 kHz 参考换算成 Hz；混响 damping 按 Hz；Pluck 环路滤波/增益按 Hz 与参考率换算；v3 固定 48 kHz bake | `hq_voices_are_rate_consistent`（22k/44.1k 的 RMS 与过零率漂移 < 25%） |
+| 0019-4 | 采样播放 | `sample_start`、`sample_reverse`、10 ms 交叉淡化循环；SAMPLE 检查器新增 START/REVERSE | `sample_start_reverse_and_loop_crossfade`、`sample_inspector_exposes_start_and_reverse` |
+| 0019-5 | 变体/轮替 | A/B/C 变体额外抖动 `space/room/pan`；游戏内随机选一个变体即 round-robin | `variations_are_inserted_and_kept_in_order` |
+| 0019-6 | 示例工程 | 新增 `--new DIR`：写出 demo 工程 + baked 音频，便于试听/回归 | CLI 手测 + `--new` 端到端 |
+| 0019-7 | 版本隔离 | v2 仍走 `synth::render_layer`；v3 走 `render_layer_hq`；`TrackOptions` 显式区分 | `./scripts/parity.sh` 9/9 不变 |
+
+非目标：真正的多文件 round-robin / velocity 层（需要模型与 Godot 侧扩展）；卷积混响。
+
+实测（2026-11-15）：
+
+- `cargo test` 109 passed；`--selfcheck` 2 frames / 2566 commands / 124 text runs。
+- `./scripts/parity.sh` 9/9 `parity ok`（v2 路径未变）。
+- `--new /tmp/sfx-demo`：11 个 patch 全部 bake，48 kHz / 16-bit stereo，峰值统一
+  −0.45 dBFS；`explosion` 1.697 s、`wind` 2.649 s、`coin` 0.294 s（尾音随 space 缩放）。
+- Godot 4.7.2 加载 `explosion.tres`：`baked=true len=1.697 stereo=true rate=48000`。
+- 5 kHz 锯齿 13 kHz 折叠杂散：v2 0.0359 → v3 0.000004。
+
+
+## 22. 本轮增量（0020）— 工程目录 / 工程内预设 / 拖入
+
+目标：工程必须以目录为单位打开；PRESETS 数据来自当前工程目录自带的
+`presets/*.json`，不是全局编译库；预设可直接拖进时间线或工程库。
+不改变工程 schema、DSP 或 Godot 导出。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0020-1 | 工程目录 | 启动时 `rfd` 选择工程根目录（或 `--project DIR`）；取消则进入空状态，不再自动加载 demo | `empty_state_has_no_project_or_presets`、空状态绘制 `NO PROJECT` / `OPEN A PROJECT` |
+| 0020-2 | 空状态 | `State::empty()` 无工程/无预设；中央显示 OPEN/NEW PROJECT 提示；`State::demo()` 仅供测试与 selfcheck | `empty_project_paints_open_hints` |
+| 0020-3 | 工程内预设 | `src/presets.rs` 从 `<project>/presets/*.json` 加载；收藏存 `presets/.favorites.json`；不写入 `sfx.project.json` | `loads_presets_and_favorites_from_a_project_folder`、`opening_a_project_loads_its_internal_presets` |
+| 0020-4 | 新建工程 | GUI `MENU → NEW PROJECT…` 写 starter 工程 + `presets/`；`--new DIR` 额外 bake；已存在工程文件/非空 `presets/` 时拒绝覆盖 | `write_presets_creates_unique_files_and_roundtrips`、CLI `--new` 端到端 |
+| 0020-5 | 双库模式 | 左栏标题条 `PROJECT \| PRESETS`；只切换数据源，中央时间线与工程文档保持不变 | `preset_mode_swaps_rows_and_hit_targets` |
+| 0020-6 | 试听 | 单击预设同步渲染并播放；独立 `preset_playing` 标记，工程播放头不被试听拖动 | `preset_filters_and_selection_stay_out_of_the_project` |
+| 0020-7 | 拖入手势 | 4 px 阈值；ghost、目标行/时间线高亮；Esc / 指针离开取消 | `drop_target_maps_timeline_rows_and_the_left_panel` |
+| 0020-8 | 时间线落点 | 复制预设 layers 到当前 patch，重新发 ID；落点作为预设 0 点，无 clip 层生成显式 clip，有 clip 层保留相对编排；整次 drop 一条 undo | `dropping_a_preset_inserts_layers_and_is_one_undo_step`、`instantiate_layers_anchors_implicit_and_explicit_clips` |
+| 0020-9 | 工程落点 | 拖到左栏：整份预设复制为工程 patch，名称去重（`_2`），`favorite=false`，切回 PROJECT 并选中 | `dropping_a_preset_on_the_left_copies_it_into_the_project`、`copied_patches_get_unique_names_and_fresh_ids` |
+| 0020-10 | 只读边界 | PRESETS 模式禁用 New Sound/Rename/Delete/Duplicate/Randomize/Vary/Favorite/Export/Bake/TRES；菜单置灰，快捷键同样拦截；Save/Open/播放/图层编辑保留 | `preset_mode_disables_project_only_actions` |
+| 0020-11 | 上限 | 拖入前检查 32 层 / 512 patch 上限，避免保存时静默截断 | 拖入代码路径 + `validate()` 既有上限 |
+
+非目标：引用式 clip（一个 track 放任意音色）、外部 Finder WAV 拖放、
+`SAVE AS PRESET`（把当前 patch 写回 `presets/`）。这些需要 schema/DSP/平台层
+扩展，保留为后续独立项。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+./scripts/review_gate.sh
+```
+
+实测（2026-11-15）：
+
+- `cargo test` 123 passed。
+- `--selfcheck` 2 frames / 2572 commands / 126 text runs。
+- `--new /tmp/...`：写出 1 个 starter patch、11 个 `presets/*.json`、baked 音频；
+  `--dump` 仍为 schema v4。
+- 单测覆盖：空工程状态、工程目录加载预设/收藏、预设写入去重、PROJECT/PRESETS
+  切换、预设试听隔离、时间线/左栏 drop、ID 重发、undo、拖拽 ghost 绘制。
+  未在窗口环境手测启动目录选择与指针拖拽（本环境无 GUI），由
+  `create_project`/`open_folder`/`drop_preset`/paint 单测与 headless selfcheck 覆盖。
+- 工程 schema 仍为 v4；CLI/bake/`.tres` 导出路径未改。

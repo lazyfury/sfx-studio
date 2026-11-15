@@ -24,7 +24,11 @@ const FADE_SECONDS: f32 = 0.005;
 
 enum Command {
     Play {
+        /// Interleaved frames (`L, R` or mono).
         samples: Vec<f32>,
+        /// Source channels: 1 = mono, 2 = stereo.
+        channels: usize,
+        /// Start frame (not sample index).
         start: usize,
         looping: bool,
     },
@@ -34,6 +38,8 @@ enum Command {
 /// Owned by the audio callback after the stream is built.
 struct Playback {
     samples: Vec<f32>,
+    /// Interleaved source channels (1 or 2).
+    channels: usize,
     /// Fractional source-frame cursor (48 kHz); advanced by the resample ratio.
     pos: f64,
     looping: bool,
@@ -47,17 +53,21 @@ impl Playback {
         match command {
             Command::Play {
                 samples,
+                channels,
                 start,
                 looping,
             } => {
                 if samples.is_empty() {
                     self.samples.clear();
+                    self.channels = 1;
                     self.fade_target = 0.0;
                     self.pos = 0.0;
                     return;
                 }
                 self.samples = samples;
-                self.pos = start.min(self.samples.len().saturating_sub(1)) as f64;
+                self.channels = channels.clamp(1, 2);
+                let frames = self.frames();
+                self.pos = start.min(frames.saturating_sub(1)) as f64;
                 self.looping = looping;
                 self.fade_target = 1.0;
             }
@@ -67,33 +77,62 @@ impl Playback {
         }
     }
 
-    /// Advance one output frame. `ratio` is source frames per output frame.
-    /// Used by the callback and by regression tests.
-    fn render_frame(&mut self, step: f32, ratio: f64, audible: bool, playing: &AtomicBool) -> f32 {
-        let mut value = 0.0f32;
-        if (audible || self.fade > 0.0) && !self.samples.is_empty() {
-            let len = self.samples.len();
-            if self.pos >= len as f64 {
+    fn frames(&self) -> usize {
+        self.samples.len() / self.channels.max(1)
+    }
+
+    /// Advance one output frame, returning `(left, right)`. `ratio` is source
+    /// frames per output frame. Used by the callback and by regression tests.
+    fn render_frame(
+        &mut self,
+        step: f32,
+        ratio: f64,
+        audible: bool,
+        playing: &AtomicBool,
+    ) -> (f32, f32) {
+        let mut left = 0.0f32;
+        let mut right = 0.0f32;
+        let frames = self.frames();
+        if (audible || self.fade > 0.0) && frames > 0 {
+            if self.pos >= frames as f64 {
                 if self.looping {
                     // Wrap without replaying the last frame.
-                    self.pos %= len as f64;
+                    self.pos %= frames as f64;
                 } else {
                     self.fade_target = 0.0;
-                    self.pos = len as f64;
+                    self.pos = frames as f64;
                 }
             }
-            if self.pos < len as f64 {
+            if self.pos < frames as f64 {
                 let index = self.pos.floor() as usize;
                 let frac = (self.pos - index as f64) as f32;
-                let a = self.samples[index];
-                let b = if index + 1 < len {
-                    self.samples[index + 1]
-                } else if self.looping {
-                    self.samples[0]
-                } else {
-                    a
+                let channels = self.channels.max(1);
+                let sample = |frame: usize, channel: usize| -> f32 {
+                    self.samples
+                        .get(frame * channels + channel)
+                        .copied()
+                        .unwrap_or(0.0)
                 };
-                value = a + (b - a) * frac;
+                let next = if index + 1 < frames {
+                    index + 1
+                } else if self.looping {
+                    0
+                } else {
+                    index
+                };
+                for channel in 0..channels.min(2) {
+                    let a = sample(index, channel);
+                    let b = sample(next, channel);
+                    let value = a + (b - a) * frac;
+                    if channel == 0 {
+                        left = value;
+                    } else {
+                        right = value;
+                    }
+                }
+                if channels == 1 {
+                    right = left;
+                }
                 self.pos += ratio;
             }
         }
@@ -106,7 +145,7 @@ impl Playback {
         if self.fade <= 0.0 && self.fade_target <= 0.0 {
             playing.store(false, Ordering::Release);
         }
-        value * self.fade
+        (left * self.fade, right * self.fade)
     }
 }
 
@@ -114,6 +153,7 @@ impl Default for Playback {
     fn default() -> Self {
         Self {
             samples: Vec::new(),
+            channels: 1,
             pos: 0.0,
             looping: false,
             fade: 0.0,
@@ -237,8 +277,9 @@ impl AudioEngine {
         self.rate
     }
 
-    /// Start playing `samples` (rendered at [`PREVIEW_RATE`]) at `start_frame`.
-    pub fn play(&self, samples: Vec<f32>, start_frame: usize, looping: bool) {
+    /// Start playing interleaved `samples` (rendered at [`PREVIEW_RATE`]) at
+    /// `start_frame`. `channels` is 1 for mono or 2 for stereo.
+    pub fn play(&self, samples: Vec<f32>, channels: usize, start_frame: usize, looping: bool) {
         if samples.is_empty() {
             self.stop();
             return;
@@ -247,10 +288,13 @@ impl AudioEngine {
             self.playing.store(false, Ordering::Release);
             return;
         }
-        let start = start_frame.min(samples.len().saturating_sub(1));
+        let channels = channels.clamp(1, 2);
+        let frames = samples.len() / channels;
+        let start = start_frame.min(frames.saturating_sub(1));
         if let Ok(mut slot) = self.command.lock() {
             *slot = Some(Command::Play {
                 samples,
+                channels,
                 start,
                 looping,
             });
@@ -300,7 +344,7 @@ where
     let rate = engine.rate;
     let step = 1.0 / (FADE_SECONDS * rate as f32).max(1.0);
     let ratio = PREVIEW_RATE as f64 / rate.max(1) as f64;
-    let channels = engine.channels;
+    let out_channels = engine.channels;
     let command = engine.command.clone();
     let playing = engine.playing.clone();
     let position = engine.position.clone();
@@ -326,6 +370,7 @@ where
                 if let Some(command) = take_command(&command) {
                     if let Command::Play {
                         samples,
+                        channels,
                         start,
                         looping,
                     } = command
@@ -334,6 +379,7 @@ where
                         retire(&retired, old);
                         playback.apply(Command::Play {
                             samples,
+                            channels,
                             start,
                             looping,
                         });
@@ -345,9 +391,18 @@ where
                 if audible && playback.fade > 0.0 && playback.samples.is_empty() {
                     underruns.fetch_add(1, Ordering::Relaxed);
                 }
-                for frame in data.chunks_mut(channels) {
-                    let value = playback.render_frame(step, ratio, audible, &playing);
-                    for sample in frame {
+                for frame in data.chunks_mut(out_channels) {
+                    let (left, right) = playback.render_frame(step, ratio, audible, &playing);
+                    for (index, sample) in frame.iter_mut().enumerate() {
+                        let value = if out_channels == 1 {
+                            (left + right) * 0.5
+                        } else if index == 0 {
+                            left
+                        } else if index == 1 {
+                            right
+                        } else {
+                            (left + right) * 0.5
+                        };
                         *sample = T::from_sample(value);
                     }
                 }
@@ -375,7 +430,7 @@ mod tests {
         };
         let mut out = Vec::new();
         for _ in 0..6 {
-            out.push(playback.render_frame(0.0, 1.0, true, &playing));
+            out.push(playback.render_frame(0.0, 1.0, true, &playing).0);
         }
         assert_eq!(out, vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0]);
         assert!(playing.load(Ordering::Acquire));
@@ -390,9 +445,9 @@ mod tests {
             fade_target: 1.0,
             ..Playback::default()
         };
-        assert_eq!(playback.render_frame(0.5, 1.0, true, &playing), 1.0);
-        assert_eq!(playback.render_frame(0.5, 1.0, true, &playing), 0.0);
-        assert_eq!(playback.render_frame(0.5, 1.0, true, &playing), 0.0);
+        assert_eq!(playback.render_frame(0.5, 1.0, true, &playing).0, 1.0);
+        assert_eq!(playback.render_frame(0.5, 1.0, true, &playing).0, 0.0);
+        assert_eq!(playback.render_frame(0.5, 1.0, true, &playing).0, 0.0);
         assert!(!playing.load(Ordering::Acquire));
     }
 
@@ -402,12 +457,13 @@ mod tests {
         let mut playback = Playback::default();
         playback.apply(Command::Play {
             samples: vec![0.0, 1.0, 2.0],
+            channels: 1,
             start: 1,
             looping: true,
         });
-        assert_eq!(playback.render_frame(1.0, 1.0, true, &playing), 1.0);
-        assert_eq!(playback.render_frame(0.0, 1.0, true, &playing), 2.0);
-        assert_eq!(playback.render_frame(0.0, 1.0, true, &playing), 0.0);
+        assert_eq!(playback.render_frame(1.0, 1.0, true, &playing).0, 1.0);
+        assert_eq!(playback.render_frame(0.0, 1.0, true, &playing).0, 2.0);
+        assert_eq!(playback.render_frame(0.0, 1.0, true, &playing).0, 0.0);
     }
 
     #[test]
@@ -416,13 +472,14 @@ mod tests {
         let mut playback = Playback::default();
         playback.apply(Command::Play {
             samples: vec![1.0; 8],
+            channels: 1,
             start: 0,
             looping: false,
         });
-        assert_eq!(playback.render_frame(0.5, 1.0, true, &playing), 0.5);
+        assert_eq!(playback.render_frame(0.5, 1.0, true, &playing).0, 0.5);
         playback.apply(Command::Stop);
-        assert_eq!(playback.render_frame(0.5, 1.0, true, &playing), 0.0);
-        assert_eq!(playback.render_frame(0.5, 1.0, true, &playing), 0.0);
+        assert_eq!(playback.render_frame(0.5, 1.0, true, &playing).0, 0.0);
+        assert_eq!(playback.render_frame(0.5, 1.0, true, &playing).0, 0.0);
     }
 
     #[test]
@@ -443,9 +500,30 @@ mod tests {
         };
         // Device at 48k -> ratio 1.0; at 24k -> ratio 2.0 (two source frames
         // per output frame). Half ratio covers interpolation.
-        assert_eq!(playback.render_frame(0.0, 0.5, true, &playing), 0.0);
-        assert_eq!(playback.render_frame(0.0, 0.5, true, &playing), 0.5);
-        assert_eq!(playback.render_frame(0.0, 0.5, true, &playing), 1.0);
+        assert_eq!(playback.render_frame(0.0, 0.5, true, &playing).0, 0.0);
+        assert_eq!(playback.render_frame(0.0, 0.5, true, &playing).0, 0.5);
+        assert_eq!(playback.render_frame(0.0, 0.5, true, &playing).0, 1.0);
+    }
+
+    #[test]
+    fn stereo_frames_keep_left_and_right_separate() {
+        let playing = AtomicBool::new(true);
+        let mut playback = Playback::default();
+        playback.apply(Command::Play {
+            samples: vec![0.25, -0.5, 0.75, -1.0],
+            channels: 2,
+            start: 0,
+            looping: false,
+        });
+        assert_eq!(playback.frames(), 2);
+        assert_eq!(
+            playback.render_frame(1.0, 1.0, true, &playing),
+            (0.25, -0.5)
+        );
+        assert_eq!(
+            playback.render_frame(0.0, 1.0, true, &playing),
+            (0.75, -1.0)
+        );
     }
 
     #[test]

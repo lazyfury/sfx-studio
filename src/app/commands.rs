@@ -8,7 +8,14 @@ impl SfxLogic {
         if let Some(engine) = &audio {
             state.playback.audio_ok = true;
             state.playback.audio_rate = engine.sample_rate();
-            state.ui.status = format!("audio {} Hz · OPEN a project folder", engine.sample_rate());
+            state.ui.status = if state.doc.root.is_some() {
+                format!("audio {} Hz · project loaded", engine.sample_rate())
+            } else {
+                format!(
+                    "audio {} Hz · OPEN a project folder (⌘O) · MENU → NEW PROJECT",
+                    engine.sample_rate()
+                )
+            };
         } else {
             state.ui.status = "no audio device · UI only".into();
         }
@@ -25,6 +32,11 @@ impl SfxLogic {
     pub(super) fn activate(&mut self, action: ui::Action) {
         use ui::Action as A;
         self.state.view.menu_open = false;
+        if !ui::action_available(&self.state, action) {
+            self.state
+                .toast("PRESETS library is read-only · switch to PROJECT to edit");
+            return;
+        }
         self.state.commit_edit();
         let snapshot = matches!(
             action,
@@ -49,17 +61,20 @@ impl SfxLogic {
                 | A::Vary
                 | A::LoadSample
                 | A::ToggleSampleLoop
+                | A::ToggleSampleReverse
         );
         if snapshot {
             self.push_undo();
         }
         match action {
+            A::NewProject => self.new_project(),
             A::Open => self.open(),
             A::Save => self.save(),
             A::Bake => self.bake(),
             A::Tres => self.export_tres(),
             A::ExportWav => self.export_wav(),
             A::Randomize => self.randomize(),
+            A::UpgradeDsp => self.upgrade_dsp(),
             A::Vary => self.vary(),
             A::Favorite => self.toggle_favorite(),
             A::CategoryCycle => self.cycle_category(),
@@ -208,6 +223,7 @@ impl SfxLogic {
             }
             A::LoadSample => self.load_sample(),
             A::ToggleSampleLoop => self.toggle_sample_loop(),
+            A::ToggleSampleReverse => self.toggle_sample_reverse(),
             A::AddClip => {
                 let playhead = self.state.playback.playhead;
                 if let Some(layer) = self.state.layer_mut() {
@@ -266,6 +282,59 @@ impl SfxLogic {
         self.state.push_undo();
     }
 
+    fn new_project(&mut self) {
+        let Some(folder) = rfd::FileDialog::new()
+            .set_title("Choose a folder for the new SFX project")
+            .pick_folder()
+        else {
+            return;
+        };
+        if folder.join(model::PROJECT_FILE).exists() {
+            self.state.toast(format!(
+                "{} already contains {} · use OPEN",
+                folder.display(),
+                model::PROJECT_FILE
+            ));
+            return;
+        }
+        if self.state.doc.dirty {
+            self.state.view.modal = Some(Modal {
+                title: "DISCARD CHANGES AND CREATE A NEW PROJECT?".into(),
+                text: folder.display().to_string(),
+                action: ModalAction::ConfirmNewProject(folder),
+            });
+            self.state.bump_view();
+            return;
+        }
+        self.create_project_now(folder);
+    }
+
+    fn create_project_now(&mut self, folder: PathBuf) {
+        if self.state.playback.preset_playing {
+            self.stop();
+        }
+        match crate::project_io::create_project(&folder) {
+            Ok((_, mut warnings)) => {
+                self.state.view.timeline_zoom = 1.0;
+                self.state.view.timeline_offset = 0.0;
+                match open_folder(&mut self.state, folder) {
+                    Ok(load_warnings) => {
+                        warnings.extend(load_warnings);
+                        self.state.toast(if warnings.is_empty() {
+                            "project created".to_string()
+                        } else {
+                            format!("project created · {}", warnings.join("; "))
+                        });
+                    }
+                    Err(error) => self
+                        .state
+                        .toast(format!("project created but open failed: {error}")),
+                }
+            }
+            Err(error) => self.state.toast(format!("new project failed: {error}")),
+        }
+    }
+
     pub(super) fn open(&mut self) {
         let Some(folder) = rfd::FileDialog::new()
             .set_title("Open a Godot project folder")
@@ -286,6 +355,9 @@ impl SfxLogic {
     }
 
     fn open_folder_now(&mut self, folder: PathBuf) {
+        if self.state.playback.preset_playing {
+            self.stop();
+        }
         self.state.view.timeline_zoom = 1.0;
         self.state.view.timeline_offset = 0.0;
         match open_folder(&mut self.state, folder) {
@@ -363,13 +435,31 @@ impl SfxLogic {
             return;
         };
         let rate = synth::PREVIEW_RATE;
-        let samples = synth::render_patch(patch, rate);
-        match synth::write_wav(&path, &samples, rate) {
-            Ok(()) => self
-                .state
-                .toast(format!("exported {} (48 kHz)", path.display())),
+        let stereo = fx::render_patch(patch, rate);
+        match synth::write_wav_stereo(&path, &stereo.left, &stereo.right, rate, 24) {
+            Ok(()) => self.state.toast(format!(
+                "exported {} (48 kHz · 24-bit stereo)",
+                path.display()
+            )),
             Err(error) => self.state.toast(format!("export failed: {error}")),
         }
+    }
+
+    /// Opt an older project into the v3 stereo/space chain.
+    fn upgrade_dsp(&mut self) {
+        let Some(current) = self.state.patch().map(|patch| patch.dsp_version) else {
+            return;
+        };
+        if current >= model::DSP_VERSION {
+            return;
+        }
+        self.push_undo();
+        if let Some(patch) = self.state.patch_mut() {
+            patch.dsp_version = model::DSP_VERSION;
+        }
+        self.state.mark_dirty();
+        self.state
+            .toast("upgraded to HD DSP v3 · pan + space + limiter");
     }
 
     fn randomize(&mut self) {
@@ -410,6 +500,8 @@ impl SfxLogic {
             layer.wave = Wave::Sample;
             layer.sample_pitch = 0.0;
             layer.sample_loop = false;
+            layer.sample_start = 0.0;
+            layer.sample_reverse = false;
             layer.duration = (data.samples.len() as f32 / data.rate as f32).clamp(0.005, 3.0);
             layer.sample_path = stored;
             layer.sample_data = Some(data);
@@ -455,6 +547,15 @@ impl SfxLogic {
         self.state.bump_view();
     }
 
+    fn toggle_sample_reverse(&mut self) {
+        self.push_undo();
+        if let Some(layer) = self.state.layer_mut() {
+            layer.sample_reverse = !layer.sample_reverse;
+        }
+        self.state.mark_dirty();
+        self.state.bump_view();
+    }
+
     fn vary(&mut self) {
         let Some(base) = self.state.patch().cloned() else {
             return;
@@ -469,8 +570,13 @@ impl SfxLogic {
             copy.name = format!("{}{suffix}", base.name);
             copy.favorite = base.favorite;
             let mut rng = synth::Rng::new(seed.wrapping_add(index as u64 * 0x9E3779B9));
+            copy.space = (copy.space + rng.next_f32().abs() * 0.10).clamp(0.0, 1.0);
+            copy.room = (copy.room + rng.next_f32() * 0.10).clamp(0.0, 1.0);
             for layer in &mut copy.layers {
                 randomize_layer(layer, &mut rng, 0.30);
+                if copy.dsp_version >= 3 {
+                    layer.pan = (layer.pan + rng.next_f32() * 0.25).clamp(-1.0, 1.0);
+                }
             }
             self.state
                 .doc
@@ -498,6 +604,144 @@ impl SfxLogic {
             } else {
                 "removed from favorites"
             });
+        }
+    }
+
+    pub(super) fn toggle_preset_favorite(&mut self, index: usize) {
+        let Some(patch) = self.state.presets.get(index).cloned() else {
+            return;
+        };
+        let favorite = self.state.presets.toggle_favorite(&patch);
+        self.state.presets.save_favorites();
+        if self.state.view.favorites_only {
+            self.refresh_filter();
+        } else {
+            self.state.bump_view();
+        }
+        self.state.toast(if favorite {
+            "preset added to favorites"
+        } else {
+            "preset removed from favorites"
+        });
+    }
+
+    /// Audition a project-local preset without touching the project document.
+    pub(super) fn audition_preset(&mut self, index: usize) {
+        let Some(patch) = self.state.presets.get(index).cloned() else {
+            return;
+        };
+        let rate = self.state.preview_rate();
+        let Some(audio) = &self.audio else {
+            self.state.toast("no audio device");
+            return;
+        };
+        if audio.is_playing() {
+            audio.stop();
+        }
+        let samples = fx::render_patch(&patch, rate).interleave();
+        if samples.is_empty() {
+            self.state.toast("nothing to play");
+            return;
+        }
+        audio.play(samples, 2, 0, self.state.playback.loop_play);
+        self.state.playback.preset_playing = true;
+        self.state.playback.was_playing = true;
+        self.state.playback.seeked = false;
+        self.state
+            .toast(format!("preview · {} · drag to timeline", patch.name));
+    }
+
+    /// Complete a library drag. Timeline drops copy the preset's layers into
+    /// the current patch; left-panel drops copy the preset into the project.
+    pub(super) fn drop_preset(&mut self, index: usize, position: Vec2, layout: &ui::Layout) {
+        let Some(preset) = self.state.presets.get(index).cloned() else {
+            return;
+        };
+        let Some(target) = ui::drop_target(&self.state, layout, position) else {
+            self.state
+                .toast("drop a preset on the timeline or the left library");
+            return;
+        };
+        let preset_name = preset.name.clone();
+        match target {
+            ui::DropTarget::Timeline { layer, time } => {
+                if self.state.view.tab != Tab::Patches {
+                    self.state.toast("switch to the SOUND tab to drop a preset");
+                    return;
+                }
+                let Some(patch_index) = self.state.patch_index() else {
+                    self.state.toast("select a project patch first");
+                    return;
+                };
+                let current_layers = self
+                    .state
+                    .patch()
+                    .map(|patch| patch.layers.len())
+                    .unwrap_or(0);
+                if current_layers + preset.layers.len() > 32 {
+                    self.state.toast("layer limit is 32 · delete a layer first");
+                    return;
+                }
+                let time = if self.state.view.modifiers.shift {
+                    time
+                } else {
+                    ui::snap_time(time)
+                };
+                let layers = preset.instantiate_layers(time);
+                if layers.is_empty() {
+                    return;
+                }
+                let count = layers.len();
+                let first_has_clips = layers
+                    .first()
+                    .map(|layer| !layer.clips.is_empty())
+                    .unwrap_or(false);
+                self.state.begin_edit();
+                let at = self
+                    .state
+                    .patch()
+                    .map(|patch| patch.layers.len())
+                    .unwrap_or(0)
+                    .min(layer);
+                if let Some(patch) = self.state.doc.project.patches.get_mut(patch_index) {
+                    for (offset, layer) in layers.into_iter().enumerate() {
+                        patch.layers.insert(at + offset, layer);
+                    }
+                }
+                self.state.mark_dirty();
+                let last = self.state.patch().map(|p| p.layers.len()).unwrap_or(1);
+                self.state.select_layer(at.min(last.saturating_sub(1)));
+                if first_has_clips {
+                    self.state.select_clip(0);
+                }
+                self.state.commit_edit();
+                self.state.toast(format!(
+                    "inserted {count} layer(s) at {time:.3}s · {preset_name}"
+                ));
+            }
+            ui::DropTarget::ProjectLibrary => {
+                if self.state.doc.project.patches.len() >= 512 {
+                    self.state.toast("project patch limit is 512");
+                    return;
+                }
+                self.state.begin_edit();
+                let index = self.state.doc.project.insert_patch_copy(&preset);
+                self.state.mark_dirty();
+                self.state.set_library_mode(LibraryMode::Project);
+                self.state.select_patch(index);
+                self.state.select_layer(0);
+                self.state.commit_edit();
+                let name = self
+                    .state
+                    .doc
+                    .project
+                    .patches
+                    .get(index)
+                    .map(|patch| patch.name.clone())
+                    .unwrap_or(preset_name);
+                self.state
+                    .toast(format!("copied preset '{name}' into the project"));
+            }
         }
     }
 
@@ -559,8 +803,24 @@ impl SfxLogic {
     }
 
     pub(super) fn refresh_filter(&mut self) {
-        self.state.view.patch_scroll = 0;
-        self.keep_selection_visible();
+        match self.state.view.library_mode {
+            LibraryMode::Project => {
+                self.state.view.patch_scroll = 0;
+                self.keep_selection_visible();
+            }
+            LibraryMode::Presets => {
+                self.state.view.preset_scroll = 0;
+                if self
+                    .state
+                    .view
+                    .selected_preset
+                    .is_some_and(|index| !self.state.preset_visible(index))
+                {
+                    self.state.view.selected_preset = None;
+                }
+                self.state.ensure_preset_visible();
+            }
+        }
         self.state.bump_view();
     }
 
@@ -580,6 +840,9 @@ impl SfxLogic {
     pub(super) fn trigger_pad(&mut self, index: usize) {
         if index >= self.state.doc.project.patches.len() {
             return;
+        }
+        if self.state.view.library_mode != LibraryMode::Project {
+            self.state.set_library_mode(LibraryMode::Project);
         }
         if !self.state.patch_visible(index) {
             self.state.view.category_filter = None;
@@ -614,6 +877,7 @@ impl SfxLogic {
         let name = display_name(&modal.text);
         match modal.action {
             ModalAction::ConfirmOpen(folder) => self.open_folder_now(folder),
+            ModalAction::ConfirmNewProject(folder) => self.create_project_now(folder),
             ModalAction::NewPatch => {
                 self.push_undo();
                 self.state

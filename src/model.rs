@@ -12,15 +12,23 @@ pub const PROJECT_FILE: &str = "sfx.project.json";
 /// Current on-disk project schema. Bump this whenever a migration is needed.
 pub const PROJECT_VERSION: u32 = 4;
 
-/// Current DSP formula generation. Reserved for versioned render dispatch.
-pub const DSP_VERSION: u32 = 2;
+/// Current DSP formula generation. v3 adds pan, the stereo/reverb/limiter
+/// master chain and de-clicking; v2 projects keep their original dry mono
+/// render so the Rust ↔ Godot golden stays valid.
+pub const DSP_VERSION: u32 = 3;
 
 fn default_project_version() -> u32 {
     1
 }
 
+/// Files written before v3 (or hand-edited ones missing the field) must keep
+/// the legacy sound instead of silently changing on load.
 fn default_dsp_version() -> u32 {
-    DSP_VERSION
+    2
+}
+
+fn default_room() -> f32 {
+    0.5
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -433,6 +441,8 @@ pub struct Layer {
     pub delay: f32,
     pub duration: f32,
     pub gain: f32,
+    /// Stereo position, -1 (left) … 0 (centre) … 1 (right). DSP v3 only.
+    pub pan: f32,
     pub freq_start: f32,
     pub freq_end: f32,
     pub harsh: f32,
@@ -475,6 +485,12 @@ pub struct Layer {
     pub sample_pitch: f32,
     #[serde(default)]
     pub sample_loop: bool,
+    /// Playback start as a fraction of the sample (0 = beginning).
+    #[serde(default)]
+    pub sample_start: f32,
+    /// Play the sample backwards (start offset still counts from the head).
+    #[serde(default)]
+    pub sample_reverse: bool,
     /// Decoded samples; loaded from `sample_path` on open, never serialized.
     #[serde(skip)]
     pub sample_data: Option<crate::wav::SampleData>,
@@ -488,11 +504,14 @@ impl Default for Layer {
             sample_path: String::new(),
             sample_pitch: 0.0,
             sample_loop: false,
+            sample_start: 0.0,
+            sample_reverse: false,
             sample_data: None,
             enabled: true,
             delay: 0.0,
             duration: 0.15,
             gain: 0.3,
+            pan: 0.0,
             freq_start: 440.0,
             freq_end: 440.0,
             harsh: 0.0,
@@ -536,6 +555,8 @@ impl Layer {
             sample_path: String::new(),
             sample_pitch: 0.0,
             sample_loop: false,
+            sample_start: 0.0,
+            sample_reverse: false,
             sample_data: None,
             wave,
             ..Default::default()
@@ -591,6 +612,7 @@ impl Layer {
         self.delay = finite(self.delay, 0.0).clamp(0.0, 8.0);
         self.duration = finite(self.duration, 0.15).clamp(0.005, 3.0);
         self.gain = finite(self.gain, 0.3).clamp(0.0, 1.0);
+        self.pan = finite(self.pan, 0.0).clamp(-1.0, 1.0);
         self.freq_start = finite(self.freq_start, 440.0).clamp(20.0, 12000.0);
         self.freq_end = finite(self.freq_end, 440.0).clamp(20.0, 12000.0);
         self.harsh = finite(self.harsh, 0.0).clamp(0.0, 1.0);
@@ -617,6 +639,7 @@ impl Layer {
         self.pluck_brightness = finite(self.pluck_brightness, 0.5).clamp(0.0, 1.0);
         self.drum_tone = finite(self.drum_tone, 1.0).clamp(0.25, 4.0);
         self.drum_snap = finite(self.drum_snap, 1.0).clamp(0.0, 2.0);
+        self.sample_start = finite(self.sample_start, 0.0).clamp(0.0, 0.95);
         self.seed = self.seed.min(99_999_999);
 
         self.arp_freqs
@@ -647,7 +670,13 @@ pub struct Patch {
     pub favorite: bool,
     pub rate: u32,
     pub normalize: bool,
-    /// DSP formula generation reserved for future versioned rendering.
+    /// Reverb / early-reflection amount, 0 = dry. DSP v3 only.
+    #[serde(default)]
+    pub space: f32,
+    /// Reverb size and tail darkness, 0 = small/bright … 1 = large/dark.
+    #[serde(default = "default_room")]
+    pub room: f32,
+    /// DSP formula generation. 2 = legacy dry mono, 3 = HD stereo chain.
     #[serde(default = "default_dsp_version")]
     pub dsp_version: u32,
     pub layers: Vec<Layer>,
@@ -662,6 +691,8 @@ impl Default for Patch {
             favorite: false,
             rate: 22050,
             normalize: true,
+            space: 0.0,
+            room: default_room(),
             dsp_version: DSP_VERSION,
             layers: vec![Layer::default()],
         }
@@ -690,6 +721,63 @@ impl Patch {
             .iter()
             .flat_map(|layer| layer.clips.iter())
             .any(|clip| clip.has_automation())
+    }
+
+    /// Effective bake rate. v3 keeps the full HD band at 48 kHz; v2 honours
+    /// the per-patch rate so existing baked assets stay bit-identical.
+    pub fn bake_rate(&self) -> u32 {
+        if self.dsp_version >= 3 {
+            48_000
+        } else {
+            self.rate
+        }
+    }
+
+    /// True when a live `.tres` cannot reproduce this patch exactly:
+    /// v3 mixes through the master chain, automation does not flatten and
+    /// sample layers have no `.tres` representation. Such patches are baked
+    /// to a WAV on `.tres` export.
+    pub fn needs_baked_tres(&self) -> bool {
+        self.dsp_version >= 3
+            || self.has_automation()
+            || self.layers.iter().any(|layer| layer.wave == Wave::Sample)
+    }
+
+    /// Clone this patch's layers for insertion into another patch, anchored
+    /// at `at` seconds. IDs are cleared so the target project can assign its
+    /// own stable IDs through `ensure_ids()`.
+    ///
+    /// A layer with no explicit clips becomes one explicit clip at `at +
+    /// layer.delay`; otherwise the whole clip arrangement keeps its internal
+    /// timing and its earliest clip lands exactly on `at`.
+    pub fn instantiate_layers(&self, at: f32) -> Vec<Layer> {
+        let at = at.clamp(0.0, ClipField::Start.spec().max);
+        self.layers
+            .iter()
+            .map(|layer| {
+                let mut copy = layer.clone();
+                copy.id = 0;
+                if copy.clips.is_empty() {
+                    copy.clips = vec![Clip {
+                        start: (at + copy.delay).clamp(0.0, ClipField::Start.spec().max),
+                        duration: copy.duration.clamp(0.005, ClipField::Duration.spec().max),
+                        ..Clip::default()
+                    }];
+                } else {
+                    let first = copy
+                        .clips
+                        .iter()
+                        .map(|clip| clip.start)
+                        .fold(f32::INFINITY, f32::min);
+                    let offset = at - first;
+                    for clip in &mut copy.clips {
+                        clip.id = 0;
+                        clip.start = (clip.start + offset).clamp(0.0, ClipField::Start.spec().max);
+                    }
+                }
+                copy
+            })
+            .collect()
     }
 }
 
@@ -829,6 +917,20 @@ fn assign_id(id: &mut u32, seen: &mut Vec<u32>, next: &mut u32) {
 }
 
 impl Project {
+    /// Minimal new project: one editable starter patch. Presets are written
+    /// separately into `<project>/presets/` by the project creator.
+    pub fn starter(name: impl Into<String>) -> Self {
+        let mut project = Self {
+            name: name.into(),
+            ..Self::default()
+        };
+        project
+            .patches
+            .push(Patch::new_layer("patch_01", Wave::Sine));
+        project.ensure_ids();
+        project
+    }
+
     pub fn demo(name: impl Into<String>) -> Self {
         let mut project = Self {
             version: PROJECT_VERSION,
@@ -864,6 +966,7 @@ impl Project {
         string.decay = 0.5;
         string.sustain = 0.25;
         string.release = 0.18;
+        string.pan = -0.20;
         let mut friction = Layer::new(Wave::Noise);
         friction.delay = 0.24;
         friction.duration = 0.60;
@@ -876,10 +979,11 @@ impl Project {
         friction.sweep_gain = 0.0;
         friction.env_shape = EnvShape::Sine;
         friction.seed = 7102;
-        project.patches.push(patch_with_layers(
-            "bow_draw",
-            Category::Combat,
-            vec![creak, string, friction],
+        friction.pan = 0.35;
+        project.patches.push(with_space(
+            patch_with_layers("bow_draw", Category::Combat, vec![creak, string, friction]),
+            0.22,
+            0.45,
         ));
 
         let mut snap = Layer::new(Wave::Saw);
@@ -903,6 +1007,7 @@ impl Project {
         twang.attack = 0.0005;
         twang.decay = 0.05;
         twang.release = 0.015;
+        twang.pan = -0.15;
         let mut release_thump = Layer::new(Wave::Kick);
         release_thump.duration = 0.12;
         release_thump.gain = 0.18;
@@ -919,6 +1024,7 @@ impl Project {
         whoosh.sweep_gain = 0.25;
         whoosh.env_shape = EnvShape::Sine;
         whoosh.seed = 7201;
+        whoosh.pan = 0.40;
         let mut air = Layer::new(Wave::Noise);
         air.delay = 0.03;
         air.duration = 0.20;
@@ -932,10 +1038,15 @@ impl Project {
         air.env_shape = EnvShape::Exp;
         air.decay = 7.0;
         air.seed = 7202;
-        project.patches.push(patch_with_layers(
-            "arrow_shot",
-            Category::Combat,
-            vec![snap, twang, release_thump, whoosh, air],
+        air.pan = -0.45;
+        project.patches.push(with_space(
+            patch_with_layers(
+                "arrow_shot",
+                Category::Combat,
+                vec![snap, twang, release_thump, whoosh, air],
+            ),
+            0.18,
+            0.40,
         ));
 
         let mut thud = Layer::new(Wave::Kick);
@@ -953,6 +1064,7 @@ impl Project {
         crack.env_shape = EnvShape::Exp;
         crack.decay = 11.0;
         crack.seed = 7301;
+        crack.pan = 0.30;
         let mut clang = Layer::new(Wave::Fm);
         clang.duration = 0.12;
         clang.gain = 0.13;
@@ -964,6 +1076,7 @@ impl Project {
         clang.attack = 0.0005;
         clang.decay = 0.08;
         clang.release = 0.03;
+        clang.pan = -0.35;
         let mut sub = Layer::new(Wave::Sine);
         sub.duration = 0.32;
         sub.gain = 0.20;
@@ -978,6 +1091,8 @@ impl Project {
             vec![thud, crack, clang, sub],
         );
         hit.favorite = true;
+        hit.space = 0.30;
+        hit.room = 0.55;
         project.patches.push(hit);
 
         let mut boom = Layer::new(Wave::Kick);
@@ -1009,6 +1124,7 @@ impl Project {
         crackle.env_shape = EnvShape::Exp;
         crackle.decay = 8.0;
         crackle.seed = 7402;
+        crackle.pan = 0.50;
         let mut debris = Layer::new(Wave::Noise);
         debris.delay = 0.25;
         debris.duration = 0.80;
@@ -1021,6 +1137,7 @@ impl Project {
         debris.sweep_gain = 0.0;
         debris.env_shape = EnvShape::Sine;
         debris.seed = 7403;
+        debris.pan = -0.50;
         let mut rumble = Layer::new(Wave::Sine);
         rumble.duration = 0.70;
         rumble.gain = 0.28;
@@ -1035,6 +1152,8 @@ impl Project {
             vec![boom, blast, crackle, debris, rumble],
         );
         explosion.favorite = true;
+        explosion.space = 0.42;
+        explosion.room = 0.85;
         project.patches.push(explosion);
 
         let mut low_wind = Layer::new(Wave::Noise);
@@ -1060,6 +1179,7 @@ impl Project {
         mid_wind.sweep_gain = 0.03;
         mid_wind.env_shape = EnvShape::Sine;
         mid_wind.seed = 7502;
+        mid_wind.pan = 0.30;
         let mut hiss = Layer::new(Wave::Noise);
         hiss.delay = 0.35;
         hiss.duration = 1.60;
@@ -1072,6 +1192,7 @@ impl Project {
         hiss.sweep_gain = 0.0;
         hiss.env_shape = EnvShape::Sine;
         hiss.seed = 7503;
+        hiss.pan = -0.40;
         let mut howl = Layer::new(Wave::Triangle);
         howl.delay = 0.20;
         howl.duration = 2.0;
@@ -1087,17 +1208,21 @@ impl Project {
         howl.filter = FilterMode::Lowpass;
         howl.cutoff_start = 900.0;
         howl.cutoff_end = 1400.0;
-        let mut wind = patch_with_layers(
-            "wind",
-            Category::Environment,
-            vec![low_wind, mid_wind, hiss, howl],
+        howl.pan = 0.15;
+        let mut wind = with_space(
+            patch_with_layers(
+                "wind",
+                Category::Environment,
+                vec![low_wind, mid_wind, hiss, howl],
+            ),
+            0.25,
+            0.70,
         );
         wind.favorite = true;
         project.patches.push(wind);
 
-        project
-            .patches
-            .push(make_patch("blip_up", Wave::Sine, Category::Ui, |l| {
+        project.patches.push(with_space(
+            make_patch("blip_up", Wave::Sine, Category::Ui, |l| {
                 l.freq_start = 620.0;
                 l.freq_end = 980.0;
                 l.duration = 0.085;
@@ -1105,28 +1230,37 @@ impl Project {
                 l.harsh = 0.25;
                 l.decay = 0.04;
                 l.release = 0.01;
-            }));
-        let mut laser = make_patch("laser", Wave::Pulse, Category::Laser, |l| {
-            l.duty = 0.25;
-            l.freq_start = 900.0;
-            l.freq_end = 180.0;
-            l.duration = 0.18;
-            l.gain = 0.32;
-            l.attack = 0.001;
-            l.decay = 0.12;
-            l.release = 0.02;
-        });
+            }),
+            0.10,
+            0.30,
+        ));
+        let mut laser = with_space(
+            make_patch("laser", Wave::Pulse, Category::Laser, |l| {
+                l.duty = 0.25;
+                l.freq_start = 900.0;
+                l.freq_end = 180.0;
+                l.duration = 0.18;
+                l.gain = 0.32;
+                l.attack = 0.001;
+                l.decay = 0.12;
+                l.release = 0.02;
+            }),
+            0.12,
+            0.35,
+        );
         laser.favorite = true;
         project.patches.push(laser);
-        project
-            .patches
-            .push(make_patch("coin", Wave::Square, Category::Ui, |l| {
+        project.patches.push(with_space(
+            make_patch("coin", Wave::Square, Category::Ui, |l| {
                 l.freq_start = 988.0;
                 l.freq_end = 1319.0;
                 l.duration = 0.11;
                 l.gain = 0.24;
                 l.decay = 0.05;
-            }));
+            }),
+            0.10,
+            0.30,
+        ));
         project
             .patches
             .push(make_patch("boom", Wave::Noise, Category::Impact, |l| {
@@ -1221,6 +1355,48 @@ impl Project {
             index += 1;
         }
     }
+
+    /// A case-insensitive unique display name for a preset copied into the
+    /// project (e.g. `laser` → `laser_2`).
+    pub fn unique_patch_name(&self, base: &str) -> String {
+        let base = base.trim();
+        let base = if base.is_empty() { "preset" } else { base };
+        let mut candidate = base.to_string();
+        let mut suffix = 2;
+        while self
+            .patches
+            .iter()
+            .any(|patch| patch.name.eq_ignore_ascii_case(&candidate))
+        {
+            candidate = format!("{base}_{suffix}");
+            suffix += 1;
+        }
+        candidate
+    }
+
+    /// Append a copy of `source` as a new project patch. Layer and clip IDs are
+    /// cleared; `mark_dirty()` assigns project-local IDs afterwards.
+    pub fn insert_patch_copy(&mut self, source: &Patch) -> usize {
+        let mut copy = source.clone();
+        copy.id = 0;
+        copy.favorite = false;
+        copy.name = self.unique_patch_name(&source.name);
+        for layer in &mut copy.layers {
+            layer.id = 0;
+            for clip in &mut layer.clips {
+                clip.id = 0;
+            }
+        }
+        self.patches.push(copy);
+        self.patches.len() - 1
+    }
+}
+
+/// Attach the v3 space chain to a demo preset.
+fn with_space(mut patch: Patch, space: f32, room: f32) -> Patch {
+    patch.space = space;
+    patch.room = room;
+    patch
 }
 
 fn make_patch(name: &str, wave: Wave, category: Category, edit: impl FnOnce(&mut Layer)) -> Patch {
@@ -1385,7 +1561,7 @@ impl Project {
         }
         for patch in &mut self.patches {
             if patch.dsp_version == 0 {
-                patch.dsp_version = DSP_VERSION;
+                patch.dsp_version = 2;
             }
         }
         self.ensure_ids();
@@ -1438,9 +1614,9 @@ impl Project {
                 patch.name = candidate;
             }
             patch.rate = patch.rate.clamp(8000, 48000);
-            if patch.dsp_version == 0 {
-                patch.dsp_version = DSP_VERSION;
-            }
+            patch.space = finite(patch.space, 0.0).clamp(0.0, 1.0);
+            patch.room = finite(patch.room, default_room()).clamp(0.0, 1.0);
+            patch.dsp_version = patch.dsp_version.clamp(1, DSP_VERSION);
             if patch.layers.is_empty() {
                 patch.layers.push(Layer::default());
             }
@@ -1553,6 +1729,7 @@ pub enum LayerField {
     Delay,
     Duration,
     Gain,
+    Pan,
     FreqStart,
     FreqEnd,
     Harsh,
@@ -1578,6 +1755,7 @@ pub enum LayerField {
     PluckDamping,
     PluckBrightness,
     SamplePitch,
+    SampleStart,
     DrumTone,
     DrumSnap,
     Seed,
@@ -1594,6 +1772,7 @@ impl LayerField {
             Self::Delay => FieldSpec::new("DELAY", "s", 0.0, 2.0, 0.001, Linear),
             Self::Duration => FieldSpec::new("LENGTH", "s", 0.005, 3.0, 0.001, Linear),
             Self::Gain => FieldSpec::new("GAIN", "", 0.0, 1.0, 0.001, Linear),
+            Self::Pan => FieldSpec::new("PAN", "", -1.0, 1.0, 0.01, Linear),
             Self::FreqStart => FieldSpec::new("FREQ A", "Hz", 20.0, 12000.0, 1.0, Log),
             Self::FreqEnd => FieldSpec::new("FREQ B", "Hz", 20.0, 12000.0, 1.0, Log),
             Self::Harsh => FieldSpec::new("HARSH", "", 0.0, 1.0, 0.001, Linear),
@@ -1619,6 +1798,7 @@ impl LayerField {
             Self::PluckDamping => FieldSpec::new("DAMPING", "", 0.9, 0.9999, 0.0001, Linear),
             Self::PluckBrightness => FieldSpec::new("BRIGHT", "", 0.0, 1.0, 0.001, Linear),
             Self::SamplePitch => FieldSpec::new("PITCH", "st", -24.0, 24.0, 0.1, Linear),
+            Self::SampleStart => FieldSpec::new("START", "", 0.0, 0.95, 0.01, Linear),
             Self::DrumTone => FieldSpec::new("TONE", "", 0.25, 2.0, 0.01, Linear),
             Self::DrumSnap => FieldSpec::new("SNAP", "", 0.0, 2.0, 0.01, Linear),
             Self::Seed => FieldSpec::new("SEED", "", 0.0, 99_999_999.0, 1.0, Linear),
@@ -1651,6 +1831,7 @@ impl LayerField {
             Self::Delay => layer.delay,
             Self::Duration => layer.duration,
             Self::Gain => layer.gain,
+            Self::Pan => layer.pan,
             Self::FreqStart => layer.freq_start,
             Self::FreqEnd => layer.freq_end,
             Self::Harsh => layer.harsh,
@@ -1676,6 +1857,7 @@ impl LayerField {
             Self::PluckDamping => layer.pluck_damping,
             Self::PluckBrightness => layer.pluck_brightness,
             Self::SamplePitch => layer.sample_pitch,
+            Self::SampleStart => layer.sample_start,
             Self::DrumTone => layer.drum_tone,
             Self::DrumSnap => layer.drum_snap,
             Self::Seed => layer.seed as f32,
@@ -1691,6 +1873,7 @@ impl LayerField {
             Self::Delay => layer.delay = value.max(0.0),
             Self::Duration => layer.duration = value.max(0.005),
             Self::Gain => layer.gain = value.clamp(0.0, 1.0),
+            Self::Pan => layer.pan = value.clamp(-1.0, 1.0),
             Self::FreqStart => layer.freq_start = value.max(20.0),
             Self::FreqEnd => layer.freq_end = value.max(20.0),
             Self::Harsh => layer.harsh = value.clamp(0.0, 1.0),
@@ -1719,6 +1902,7 @@ impl LayerField {
             Self::PluckDamping => layer.pluck_damping = value.clamp(0.9, 0.9999),
             Self::PluckBrightness => layer.pluck_brightness = value.clamp(0.0, 1.0),
             Self::SamplePitch => layer.sample_pitch = value.clamp(-24.0, 24.0),
+            Self::SampleStart => layer.sample_start = value.clamp(0.0, 0.95),
             Self::DrumTone => layer.drum_tone = value.max(0.25),
             Self::DrumSnap => layer.drum_snap = value.max(0.0),
             Self::Seed => layer.seed = value.max(0.0) as u32,
@@ -1734,6 +1918,60 @@ impl LayerField {
                 }
                 layer.arp_freqs[index] = value.max(20.0);
             }
+        }
+    }
+
+    pub fn format(self, value: f32) -> String {
+        self.spec().format(value)
+    }
+}
+
+/// Patch-level (per-sound) parameters shown in the SPACE inspector block.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PatchField {
+    Space,
+    Room,
+}
+
+impl PatchField {
+    pub const ALL: [PatchField; 2] = [PatchField::Space, PatchField::Room];
+
+    pub fn spec(self) -> FieldSpec {
+        use Scale::Linear;
+        match self {
+            Self::Space => FieldSpec::new("SPACE", "", 0.0, 1.0, 0.01, Linear),
+            Self::Room => FieldSpec::new("ROOM", "", 0.0, 1.0, 0.01, Linear),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        self.spec().label
+    }
+
+    pub fn range(self) -> (f32, f32, f32) {
+        let spec = self.spec();
+        (spec.min, spec.max, spec.step)
+    }
+
+    pub fn norm(self, value: f32) -> f32 {
+        self.spec().norm(value)
+    }
+
+    pub fn denorm(self, norm: f32) -> f32 {
+        self.spec().denorm(norm)
+    }
+
+    pub fn get(self, patch: &Patch) -> f32 {
+        match self {
+            Self::Space => patch.space,
+            Self::Room => patch.room,
+        }
+    }
+
+    pub fn set(self, patch: &mut Patch, value: f32) {
+        match self {
+            Self::Space => patch.space = value.clamp(0.0, 1.0),
+            Self::Room => patch.room = value.clamp(0.0, 1.0),
         }
     }
 
@@ -1863,6 +2101,7 @@ pub enum LayerRowSpec {
     FilterOptions,
     SampleFile,
     SampleLoop,
+    SampleReverse,
 }
 
 /// A row plus the predicate that decides whether it applies to a layer.
@@ -2009,7 +2248,9 @@ static SAMPLE_SECTIONS: &[LayerSectionSpec] = &[LayerSectionSpec {
     rows: &[
         row(LayerRowSpec::SampleFile, always),
         row(LayerRowSpec::Field(LayerField::SamplePitch), always),
+        row(LayerRowSpec::Field(LayerField::SampleStart), always),
         row(LayerRowSpec::SampleLoop, always),
+        row(LayerRowSpec::SampleReverse, always),
     ],
 }];
 
@@ -2206,6 +2447,62 @@ mod tests {
     }
 
     #[test]
+    fn instantiate_layers_anchors_implicit_and_explicit_clips() {
+        let mut implicit = Layer::new(Wave::Sine);
+        implicit.id = 9;
+        implicit.delay = 0.05;
+        implicit.duration = 0.4;
+        let mut explicit = Layer::new(Wave::Noise);
+        explicit.id = 10;
+        explicit.clips = vec![
+            Clip {
+                id: 11,
+                start: 0.30,
+                duration: 0.10,
+                ..Clip::default()
+            },
+            Clip {
+                id: 12,
+                start: 0.60,
+                duration: 0.20,
+                ..Clip::default()
+            },
+        ];
+        let source = Patch {
+            layers: vec![implicit, explicit],
+            ..Patch::default()
+        };
+        let layers = source.instantiate_layers(0.5);
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[0].id, 0);
+        assert_eq!(layers[0].clips.len(), 1);
+        assert!((layers[0].clips[0].start - 0.55).abs() < 0.0001);
+        assert_eq!(layers[0].clips[0].id, 0);
+        assert_eq!(layers[1].id, 0);
+        assert!((layers[1].clips[0].start - 0.50).abs() < 0.0001);
+        assert!((layers[1].clips[1].start - 0.80).abs() < 0.0001);
+        assert_eq!(layers[1].clips[0].id, 0);
+    }
+
+    #[test]
+    fn copied_patches_get_unique_names_and_fresh_ids() {
+        let mut project = Project::demo("copy");
+        let source = project.patches[0].clone();
+        let index = project.insert_patch_copy(&source);
+        assert_eq!(index, project.patches.len() - 1);
+        {
+            let copy = &project.patches[index];
+            assert_eq!(copy.name, format!("{}_2", source.name));
+            assert_ne!(copy.name, source.name);
+            assert_eq!(copy.id, 0);
+            assert_eq!(copy.layers[0].id, 0);
+            assert!(!copy.favorite);
+        }
+        project.ensure_ids();
+        assert_ne!(project.patches[index].id, 0);
+    }
+
+    #[test]
     fn project_json_roundtrip() {
         let mut project = Project::demo("roundtrip");
         project.patches[0].layers[0].freq_start = 123.4;
@@ -2278,6 +2575,8 @@ mod tests {
         layer.sample_path = "audio/sfx/samples/click.wav".into();
         layer.sample_pitch = 7.0;
         layer.sample_loop = true;
+        layer.sample_start = 0.4;
+        layer.sample_reverse = true;
 
         let text = serde_json::to_string_pretty(&project).unwrap();
         let back: Project = serde_json::from_str(&text).unwrap();
@@ -2285,6 +2584,8 @@ mod tests {
         assert_eq!(layer.sample_path, "audio/sfx/samples/click.wav");
         assert!((layer.sample_pitch - 7.0).abs() < 0.001);
         assert!(layer.sample_loop);
+        assert!((layer.sample_start - 0.4).abs() < 0.001);
+        assert!(layer.sample_reverse);
         assert!(layer.sample_data.is_none());
 
         let warnings = project.load_samples(&root);
@@ -2363,7 +2664,68 @@ mod tests {
         let warnings = project.migrate();
         assert!(!warnings.is_empty());
         assert_eq!(project.version, PROJECT_VERSION);
-        assert_eq!(project.patches[0].dsp_version, DSP_VERSION);
+        // Missing DSP generation means "render like the legacy plugin", not
+        // "silently adopt the new master chain".
+        assert_eq!(project.patches[0].dsp_version, 2);
+    }
+
+    #[test]
+    fn dsp_version_three_is_the_default_for_new_patches() {
+        let patch = Patch::default();
+        assert_eq!(patch.dsp_version, DSP_VERSION);
+        assert_eq!(patch.space, 0.0);
+        assert!((patch.room - 0.5).abs() < 0.001);
+        assert_eq!(patch.layers[0].pan, 0.0);
+    }
+
+    #[test]
+    fn space_room_and_pan_roundtrip_and_clamp() {
+        let mut patch = Patch {
+            space: 0.4,
+            room: 0.8,
+            ..Patch::default()
+        };
+        patch.layers[0].pan = -0.6;
+        let text = serde_json::to_string_pretty(&patch).unwrap();
+        let back: Patch = serde_json::from_str(&text).unwrap();
+        assert!((back.space - 0.4).abs() < 1e-6);
+        assert!((back.room - 0.8).abs() < 1e-6);
+        assert!((back.layers[0].pan + 0.6).abs() < 1e-6);
+
+        // Untrusted values are repaired by validate().
+        let mut project = Project::demo("clamp");
+        project.patches[0].space = f32::NAN;
+        project.patches[0].room = 9.0;
+        project.patches[0].layers[0].pan = -7.0;
+        project.validate();
+        let patch = &project.patches[0];
+        assert_eq!(patch.space, 0.0);
+        assert_eq!(patch.room, 1.0);
+        assert_eq!(patch.layers[0].pan, -1.0);
+    }
+
+    #[test]
+    fn patch_fields_map_through_the_field_spec() {
+        let mut patch = Patch::default();
+        PatchField::Space.set(&mut patch, 1.4);
+        assert!((patch.space - 1.0).abs() < 1e-6);
+        assert!((PatchField::Space.get(&patch) - 1.0).abs() < 1e-6);
+        assert_eq!(PatchField::ALL.len(), 2);
+        assert_eq!(PatchField::Room.spec().norm(0.5), 0.5);
+        let mut layer = Layer::new(Wave::Sine);
+        LayerField::Pan.set(&mut layer, -2.0);
+        assert_eq!(layer.pan, -1.0);
+        assert_eq!(LayerField::Pan.get(&layer), -1.0);
+    }
+
+    #[test]
+    fn v3_patches_are_flagged_for_baking_on_tres_export() {
+        let mut patch = Patch::default();
+        assert!(patch.needs_baked_tres());
+        patch.dsp_version = 2;
+        assert!(!patch.needs_baked_tres());
+        patch.layers[0].wave = Wave::Sample;
+        assert!(patch.needs_baked_tres());
     }
 
     #[test]

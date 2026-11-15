@@ -82,6 +82,8 @@ pub struct Layout {
     pub category_items: Vec<(Option<Category>, Rect)>,
     pub favorite_rect: Rect,
     pub search_rect: Rect,
+    pub library_mode_buttons: Vec<(LibraryMode, Rect)>,
+    pub preset_rows: Vec<(usize, Rect)>,
     pub library_scrollbar: Rect,
     pub library_thumb: Rect,
     pub library_max_start: usize,
@@ -109,6 +111,24 @@ impl Layout {
             Vec2::new(LEFT_W, TOP_H),
             Size::new((viewport.width - LEFT_W - RIGHT_W).max(1.0), body_h),
         );
+
+        // PROJECT / PRESETS live in the left title strip so they do not steal
+        // a list row from the compact library.
+        let mode_w = 54.0;
+        let mode_h = 20.0;
+        let mode_y = left.top() + 3.0;
+        let presets_mode = Rect::from_min_size(
+            Vec2::new(left.right() - 10.0 - mode_w, mode_y),
+            Size::new(mode_w, mode_h),
+        );
+        let project_mode = Rect::from_min_size(
+            Vec2::new(presets_mode.left() - 4.0 - mode_w, mode_y),
+            Size::new(mode_w, mode_h),
+        );
+        let library_mode_buttons = vec![
+            (LibraryMode::Project, project_mode),
+            (LibraryMode::Presets, presets_mode),
+        ];
 
         let pad = 8.0;
         let header = Rect::from_min_size(
@@ -250,47 +270,50 @@ impl Layout {
         );
         let row_h = LIBRARY_ROW_H;
         let capacity = library_capacity(viewport);
-        let visible_patches = state.visible_patches();
-        let patch_start = state
-            .view
-            .patch_scroll
-            .min(visible_patches.len().saturating_sub(1));
+        let visible_rows = state.visible_library_rows();
+        let library_start = state
+            .library_scroll()
+            .min(visible_rows.len().saturating_sub(1));
         let mut patch_rows = Vec::new();
+        let mut preset_rows = Vec::new();
         for visible in 0..capacity {
-            let Some(index) = visible_patches.get(patch_start + visible).copied() else {
+            let Some(index) = visible_rows.get(library_start + visible).copied() else {
                 break;
             };
-            patch_rows.push((
-                index,
-                Rect::from_min_size(
-                    Vec2::new(left.left(), list_top + visible as f32 * row_h),
-                    Size::new(left.size.width - 8.0, row_h),
-                ),
-            ));
+            let rect = Rect::from_min_size(
+                Vec2::new(left.left(), list_top + visible as f32 * row_h),
+                Size::new(left.size.width - 8.0, row_h),
+            );
+            match state.view.library_mode {
+                LibraryMode::Project => patch_rows.push((index, rect)),
+                LibraryMode::Presets => preset_rows.push((index, rect)),
+            }
         }
 
         let layer_count = state.patch().map(|p| p.layers.len()).unwrap_or(0);
         let mut library_scrollbar = Rect::from_min_size(Vec2::ZERO, Size::ZERO);
         let mut library_thumb = Rect::from_min_size(Vec2::ZERO, Size::ZERO);
-        let library_max_start = visible_patches.len().saturating_sub(capacity);
-        if library_max_start > 0 && !patch_rows.is_empty() {
-            let track_top = patch_rows[0].1.top();
-            let track_bottom = music_row.top() - LIBRARY_END_GAP;
-            let track_h = (track_bottom - track_top).max(1.0);
-            let thumb_h =
-                ((capacity as f32 / visible_patches.len() as f32) * track_h).clamp(18.0, track_h);
-            let progress = patch_start as f32 / library_max_start as f32;
-            library_scrollbar = Rect::from_min_size(
-                Vec2::new(left.right() - 6.0, track_top),
-                Size::new(4.0, track_h),
-            );
-            library_thumb = Rect::from_min_size(
-                Vec2::new(
-                    left.right() - 6.0,
-                    track_top + progress * (track_h - thumb_h),
-                ),
-                Size::new(4.0, thumb_h),
-            );
+        let library_max_start = visible_rows.len().saturating_sub(capacity);
+        if library_max_start > 0 {
+            if let Some((_, first)) = patch_rows.first().or_else(|| preset_rows.first()) {
+                let track_top = first.top();
+                let track_bottom = music_row.top() - LIBRARY_END_GAP;
+                let track_h = (track_bottom - track_top).max(1.0);
+                let thumb_h =
+                    ((capacity as f32 / visible_rows.len() as f32) * track_h).clamp(18.0, track_h);
+                let progress = library_start as f32 / library_max_start as f32;
+                library_scrollbar = Rect::from_min_size(
+                    Vec2::new(left.right() - 6.0, track_top),
+                    Size::new(4.0, track_h),
+                );
+                library_thumb = Rect::from_min_size(
+                    Vec2::new(
+                        left.right() - 6.0,
+                        track_top + progress * (track_h - thumb_h),
+                    ),
+                    Size::new(4.0, thumb_h),
+                );
+            }
         }
 
         let timeline_h = if state.view.tab == Tab::Music {
@@ -530,6 +553,8 @@ impl Layout {
             category_items,
             favorite_rect,
             search_rect,
+            library_mode_buttons,
+            preset_rows,
             library_scrollbar,
             library_thumb,
             library_max_start,
@@ -580,6 +605,42 @@ impl Layout {
         let norm = ((plot.bottom() - pos.y) / plot.size.height.max(1.0)).clamp(0.0, 1.0);
         (time, kind.denorm(norm))
     }
+}
+
+/// Resolve where a dragged preset would land. Timeline rows win over the left
+/// panel so a drop on the track area always inserts audio.
+pub fn drop_target(state: &State, layout: &Layout, pos: Vec2) -> Option<DropTarget> {
+    if state.view.tab == Tab::Patches && layout.timeline.contains(pos) {
+        let count = state.patch().map(|patch| patch.layers.len()).unwrap_or(0);
+        let mut layer = count;
+        for (index, row) in &layout.layer_rows {
+            if pos.y < row.bottom() {
+                layer = *index;
+                break;
+            }
+        }
+        if pos.y < layout.timeline.top() + RULER_H {
+            layer = layout
+                .layer_rows
+                .first()
+                .map(|(index, _)| *index)
+                .unwrap_or(0);
+        }
+        let plot_left = layout.timeline.left() + TIMELINE_LABEL;
+        let time = if pos.x >= plot_left {
+            layout.x_time(pos.x)
+        } else {
+            state.playback.playhead
+        };
+        return Some(DropTarget::Timeline {
+            layer,
+            time: time.clamp(0.0, 8.0),
+        });
+    }
+    if layout.left.contains(pos) {
+        return Some(DropTarget::ProjectLibrary);
+    }
+    None
 }
 
 pub(super) fn automation_tabs(layout: &Layout) -> [(AutomationKind, Rect); 2] {
