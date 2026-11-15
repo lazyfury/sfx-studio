@@ -100,6 +100,9 @@ pub fn hit(state: &State, layout: &Layout, pos: Vec2) -> Option<Hit> {
                 Item::Toggle { action, rect, .. } if rect.contains(pos) => {
                     return Some(Hit::Action(*action));
                 }
+                Item::Curve { kind, rect } if rect.contains(pos) => {
+                    return Some(Hit::Curve(*kind));
+                }
                 _ => {}
             }
         }

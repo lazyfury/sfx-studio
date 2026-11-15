@@ -1340,6 +1340,7 @@ fn paint_inspector(
             | Item::Param { rect, .. }
             | Item::Options { rect, .. }
             | Item::Toggle { rect, .. }
+            | Item::Curve { rect, .. }
             | Item::Note { rect, .. } => *rect,
         };
         if rect.top() >= clip_bottom {
@@ -1464,6 +1465,9 @@ fn paint_inspector(
                     TEXT,
                 );
             }
+            Item::Curve { kind, rect } => {
+                paint_curve_editor(state, measurer, ctx, *kind, *rect);
+            }
             Item::Note { text, rect } => {
                 text_top(
                     ctx,
@@ -1477,6 +1481,60 @@ fn paint_inspector(
             }
         }
         clip_bottom = clip_bottom.max(rect.bottom());
+    }
+}
+
+fn paint_curve_editor(
+    state: &State,
+    measurer: &dyn TextMeasurer,
+    ctx: &mut PaintContext,
+    kind: CurveKind,
+    rect: Rect,
+) {
+    fill(ctx, rect, DARK);
+    stroke(ctx, rect, BORDER_HI);
+    for step in 1..4 {
+        let y = rect.top() + rect.size.height * step as f32 / 4.0;
+        hline(ctx, rect.left(), rect.right(), y, BORDER);
+    }
+    match kind {
+        CurveKind::Cycle => hline(ctx, rect.left(), rect.right(), rect.center().y, ACCENT_LINE),
+        CurveKind::Amp => hline(ctx, rect.left(), rect.right(), rect.bottom(), ACCENT_LINE),
+    }
+    text_top(
+        ctx,
+        measurer,
+        kind.label(),
+        rect.left() + 4.0,
+        rect.top() + 3.0,
+        SMALL,
+        FAINT,
+    );
+    let Some(layer) = state.layer() else {
+        return;
+    };
+    let values = curve_values(layer, kind);
+    if values.len() < 2 {
+        return;
+    }
+    let mut points: Vec<Vec2> = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| curve_point(kind, rect, *value, index, values.len()))
+        .collect();
+    if kind == CurveKind::Cycle {
+        points.push(Vec2::new(rect.right(), points[0].y));
+    }
+    let color = if state.view.hover_hit == Some(Hit::Curve(kind)) {
+        ACCENT
+    } else {
+        ACCENT_DARK
+    };
+    for pair in points.windows(2) {
+        ctx.draw_line(pair[0], pair[1], 1.25, color);
+    }
+    for point in points.iter().take(values.len()) {
+        ctx.fill_circle(*point, 2.0, color);
     }
 }
 
@@ -1767,6 +1825,24 @@ pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
                         value: layer.sample_reverse,
                         action: Action::ToggleSampleReverse,
                     }),
+                    LayerRowSpec::CurveEditor => {
+                        items.push(RawItem::Curve {
+                            kind: CurveKind::Cycle,
+                            height: 118.0,
+                        });
+                        items.push(RawItem::Note(
+                            "drag to draw · double-click resets to sine".into(),
+                        ));
+                    }
+                    LayerRowSpec::AmpCurveEditor => {
+                        items.push(RawItem::Curve {
+                            kind: CurveKind::Amp,
+                            height: 92.0,
+                        });
+                        items.push(RawItem::Note(
+                            "drag to draw · double-click resets to ADSR".into(),
+                        ));
+                    }
                 }
             }
         }
@@ -1996,6 +2072,7 @@ fn wave_color(wave: Wave) -> Color {
         Wave::Arp => hex(0x82E2A6),
         Wave::Fm => hex(0xFF9E64),
         Wave::Pluck => hex(0x9CDCFE),
+        Wave::Curve => hex(0xA8CE86),
         Wave::Sample => hex(0x6EE7D8),
         Wave::Kick => hex(0xF78C6C),
         Wave::Snare => hex(0xE6C889),
@@ -2240,6 +2317,7 @@ fn drag_info(state: &State) -> Option<String> {
         )),
         Drag::InspectorScroll { .. } => Some("PARAMETERS  scrolling".into()),
         Drag::LibraryScroll { .. } => Some("LIBRARY  scrolling".into()),
+        Drag::Curve { kind } => Some(format!("DRAW {}  ·  drag to edit", kind.label())),
         Drag::LibraryItem { index, moved, .. } => {
             let name = state
                 .presets

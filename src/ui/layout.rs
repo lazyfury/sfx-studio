@@ -427,6 +427,13 @@ impl Layout {
                     });
                     y += 38.0;
                 }
+                RawItem::Curve { kind, height } => {
+                    items.push(Item::Curve {
+                        kind,
+                        rect: inner_rect(y, height),
+                    });
+                    y += height + 6.0;
+                }
                 RawItem::Options {
                     label,
                     options,
@@ -580,6 +587,16 @@ impl Layout {
             inspector_scrollbar,
             inspector_thumb,
         }
+    }
+
+    pub fn curve_rect(&self, kind: CurveKind) -> Option<Rect> {
+        self.items.iter().find_map(|item| match item {
+            Item::Curve {
+                kind: candidate,
+                rect,
+            } if *candidate == kind => Some(*rect),
+            _ => None,
+        })
     }
 
     /// Maximum inspector scroll. Includes the top inset so the final row can

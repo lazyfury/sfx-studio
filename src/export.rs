@@ -490,6 +490,28 @@ mod tests {
     }
 
     #[test]
+    fn curve_patches_bake_on_tres_export() {
+        use crate::model::{Layer, Patch, Wave};
+        let root = temp_project_root("curve-export");
+        let mut layer = Layer::new(Wave::Curve);
+        layer.duration = 0.05;
+        layer.curve = vec![0.0, 1.0, -1.0, 0.0];
+        let patch = Patch {
+            name: "curve".into(),
+            layers: vec![layer],
+            ..Patch::default()
+        };
+        assert!(patch.needs_baked_tres());
+        let mut project = crate::model::Project::demo("curve");
+        project.patches = vec![patch];
+        export_tres(&project, &root).expect("tres");
+        assert!(root.join("audio/baked/curve.wav").exists());
+        let text = std::fs::read_to_string(root.join("audio/sfx/curve.tres")).unwrap();
+        assert!(text.contains("baked = ExtResource"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn unique_names_never_overwrite() {
         use crate::model::{Patch, Wave};
         let mut project = crate::model::Project::demo("names");

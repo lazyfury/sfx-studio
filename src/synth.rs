@@ -453,7 +453,9 @@ fn render_tone_at(layer: &Layer, rate: u32, hq: bool) -> Vec<f32> {
         }
         let increment = freq / rate as f32;
         phase += TAU * increment;
-        let raw = if hq {
+        let raw = if layer.wave == Wave::Curve {
+            cycle_value(&layer.curve, phase / TAU)
+        } else if hq {
             hq_wave(
                 layer.wave,
                 phase,
@@ -468,16 +470,22 @@ fn render_tone_at(layer: &Layer, rate: u32, hq: bool) -> Vec<f32> {
         let (nl, nb, filtered) = filter(layer, raw, low, band, k, rate);
         low = nl;
         band = nb;
-        let env = match layer.tone_env {
-            ToneEnv::Exp => (-layer.exp_decay * k).exp() * (t / layer.attack.max(0.0001)).min(1.0),
-            ToneEnv::Adsr => adsr(
-                t,
-                layer.duration,
-                layer.attack,
-                layer.decay,
-                layer.sustain,
-                layer.release,
-            ),
+        let env = if layer.wave == Wave::Curve && layer.amp_curve.len() >= 2 {
+            amp_curve_value(&layer.amp_curve, k)
+        } else {
+            match layer.tone_env {
+                ToneEnv::Exp => {
+                    (-layer.exp_decay * k).exp() * (t / layer.attack.max(0.0001)).min(1.0)
+                }
+                ToneEnv::Adsr => adsr(
+                    t,
+                    layer.duration,
+                    layer.attack,
+                    layer.decay,
+                    layer.sustain,
+                    layer.release,
+                ),
+            }
         };
         *slot = filtered * env * layer.gain;
     }
@@ -1107,7 +1115,41 @@ fn wave_sample(wave: Wave, phase: f32, duty: f32, harsh: f32) -> f32 {
     }
 }
 
-fn adsr(t: f32, duration: f32, attack: f32, decay: f32, sustain: f32, release: f32) -> f32 {
+/// Linear read from an evenly-spaced, wrapping single-cycle table.
+pub(crate) fn cycle_value(curve: &[f32], phase: f32) -> f32 {
+    if curve.len() < 2 {
+        return (TAU * phase).sin();
+    }
+    let n = curve.len();
+    let pos = phase.rem_euclid(1.0) * n as f32;
+    let index = pos.floor() as usize % n;
+    let frac = pos - pos.floor();
+    let a = curve[index];
+    let b = curve[(index + 1) % n];
+    a + (b - a) * frac
+}
+
+/// Linear read from an evenly-spaced amplitude table over 0..1.
+pub(crate) fn amp_curve_value(curve: &[f32], t: f32) -> f32 {
+    if curve.len() < 2 {
+        return 1.0;
+    }
+    let pos = t.clamp(0.0, 1.0) * (curve.len() - 1) as f32;
+    let index = (pos.floor() as usize).min(curve.len() - 2);
+    let frac = pos - index as f32;
+    let a = curve[index];
+    let b = curve[index + 1];
+    a + (b - a) * frac
+}
+
+pub(crate) fn adsr(
+    t: f32,
+    duration: f32,
+    attack: f32,
+    decay: f32,
+    sustain: f32,
+    release: f32,
+) -> f32 {
     if t < 0.0 {
         return 0.0;
     }
@@ -1566,6 +1608,25 @@ mod tests {
             .map(|pair| (pair[1] - pair[0]).abs())
             .fold(0.0f32, f32::max);
         assert!(max_step < 0.2, "loop step {max_step}");
+    }
+
+    #[test]
+    fn curve_wave_uses_the_drawn_cycle_and_amp_curve() {
+        let mut layer = Layer::new(Wave::Curve);
+        layer.duration = 0.02;
+        layer.gain = 1.0;
+        layer.attack = 0.0;
+        layer.decay = 0.0;
+        layer.sustain = 1.0;
+        layer.release = 0.0;
+        layer.curve = vec![1.0, -1.0, 1.0, -1.0];
+        let loud = render_layer_hq(&layer, 48_000);
+        assert!(!loud.is_empty());
+        assert!(peak(&loud) > 0.1);
+
+        layer.amp_curve = vec![0.0; 32];
+        let silent = render_layer_hq(&layer, 48_000);
+        assert!(peak(&silent) < 0.001, "amp curve should silence the voice");
     }
 
     #[test]

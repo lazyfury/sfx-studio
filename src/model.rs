@@ -46,6 +46,7 @@ pub enum Wave {
     Arp,
     Fm,
     Pluck,
+    Curve,
     Sample,
     Kick,
     Snare,
@@ -54,7 +55,7 @@ pub enum Wave {
 }
 
 impl Wave {
-    pub const ALL: [Wave; 14] = [
+    pub const ALL: [Wave; 15] = [
         Wave::Sine,
         Wave::Triangle,
         Wave::Saw,
@@ -64,6 +65,7 @@ impl Wave {
         Wave::Arp,
         Wave::Fm,
         Wave::Pluck,
+        Wave::Curve,
         Wave::Sample,
         Wave::Kick,
         Wave::Snare,
@@ -82,6 +84,7 @@ impl Wave {
             Wave::Arp => "ARP",
             Wave::Fm => "FM",
             Wave::Pluck => "PLUCK",
+            Wave::Curve => "CURVE",
             Wave::Sample => "SAMPLE",
             Wave::Kick => "KICK",
             Wave::Snare => "SNARE",
@@ -102,6 +105,7 @@ impl Wave {
             Wave::Arp => "琶音 · ARP 1-4 频率快速轮流发声",
             Wave::Fm => "FM · 频率调制，钟声/金属/硬质音色",
             Wave::Pluck => "拨弦 · Karplus-Strong，吉他式衰减",
+            Wave::Curve => "曲线 · 自绘单周期波形，可再画音量包络",
             Wave::Sample => "采样 · 载入 WAV，按音高/起点/循环播放",
             Wave::Kick => "底鼓 · 低频冲击 + 点击瞬态",
             Wave::Snare => "军鼓 · 噪声 + 鼓腔，短促打击",
@@ -113,7 +117,7 @@ impl Wave {
     pub fn is_tone(self) -> bool {
         matches!(
             self,
-            Wave::Sine | Wave::Triangle | Wave::Saw | Wave::Pulse | Wave::Square
+            Wave::Sine | Wave::Triangle | Wave::Saw | Wave::Pulse | Wave::Square | Wave::Curve
         )
     }
 
@@ -133,6 +137,7 @@ impl Wave {
             Wave::Arp => 6,
             Wave::Fm => 7,
             Wave::Pluck => 8,
+            Wave::Curve => 8,
             Wave::Sample => 9,
             Wave::Kick => 10,
             Wave::Snare => 11,
@@ -496,6 +501,14 @@ pub struct Layer {
     pub fm_decay: f32,
     pub pluck_damping: f32,
     pub pluck_brightness: f32,
+    /// Custom single-cycle shape for `Wave::Curve`, -1..1, evenly spaced.
+    /// Empty = sine fallback.
+    #[serde(default)]
+    pub curve: Vec<f32>,
+    /// Drawn amplitude envelope for `Wave::Curve`, 0..1 evenly spaced over
+    /// the layer duration. Empty = use ADSR.
+    #[serde(default)]
+    pub amp_curve: Vec<f32>,
     pub drum_tone: f32,
     pub drum_snap: f32,
     /// Empty = one implicit clip using `delay` / `duration` / layer gain.
@@ -565,6 +578,8 @@ impl Default for Layer {
             fm_decay: 4.0,
             pluck_damping: 0.996,
             pluck_brightness: 0.5,
+            curve: Vec::new(),
+            amp_curve: Vec::new(),
             drum_tone: 1.0,
             drum_snap: 1.0,
             clips: Vec::new(),
@@ -664,6 +679,14 @@ impl Layer {
         self.drum_tone = finite(self.drum_tone, 1.0).clamp(0.25, 4.0);
         self.drum_snap = finite(self.drum_snap, 1.0).clamp(0.0, 2.0);
         self.sample_start = finite(self.sample_start, 0.0).clamp(0.0, 0.95);
+        self.curve.truncate(64);
+        for value in &mut self.curve {
+            *value = finite(*value, 0.0).clamp(-1.0, 1.0);
+        }
+        self.amp_curve.truncate(64);
+        for value in &mut self.amp_curve {
+            *value = finite(*value, 1.0).clamp(0.0, 1.0);
+        }
         self.seed = self.seed.min(99_999_999);
 
         self.arp_freqs
@@ -764,7 +787,10 @@ impl Patch {
     pub fn needs_baked_tres(&self) -> bool {
         self.dsp_version >= 3
             || self.has_automation()
-            || self.layers.iter().any(|layer| layer.wave == Wave::Sample)
+            || self
+                .layers
+                .iter()
+                .any(|layer| matches!(layer.wave, Wave::Sample | Wave::Curve))
     }
 
     /// Decode every sample layer relative to `root`. Shared by project loads
@@ -2202,6 +2228,8 @@ pub enum LayerRowSpec {
     SampleFile,
     SampleLoop,
     SampleReverse,
+    CurveEditor,
+    AmpCurveEditor,
 }
 
 /// A row plus the predicate that decides whether it applies to a layer.
@@ -2354,6 +2382,32 @@ static SAMPLE_SECTIONS: &[LayerSectionSpec] = &[LayerSectionSpec {
     ],
 }];
 
+static CURVE_SHAPE: &[LayerRow] = &[row(LayerRowSpec::CurveEditor, always)];
+static CURVE_AMP: &[LayerRow] = &[row(LayerRowSpec::AmpCurveEditor, always)];
+
+static CURVE_SECTIONS: &[LayerSectionSpec] = &[
+    LayerSectionSpec {
+        title: "CURVE",
+        rows: CURVE_SHAPE,
+    },
+    LayerSectionSpec {
+        title: "AMP CURVE",
+        rows: CURVE_AMP,
+    },
+    LayerSectionSpec {
+        title: "PITCH",
+        rows: TONE_PITCH,
+    },
+    LayerSectionSpec {
+        title: "AMP ENV",
+        rows: TONE_AMP,
+    },
+    LayerSectionSpec {
+        title: "FILTER",
+        rows: TONE_FILTER,
+    },
+];
+
 static DRUM_SECTIONS: &[LayerSectionSpec] = &[LayerSectionSpec {
     title: "DRUM",
     rows: &[
@@ -2366,7 +2420,9 @@ static DRUM_SECTIONS: &[LayerSectionSpec] = &[LayerSectionSpec {
 /// Inspector layout for a wave family. This is the single source of truth for
 /// which fields a layer exposes; `ui::inspector_items` only renders it.
 pub fn layer_sections(wave: Wave) -> &'static [LayerSectionSpec] {
-    if wave.is_tone() {
+    if wave == Wave::Curve {
+        CURVE_SECTIONS
+    } else if wave.is_tone() {
         TONE_SECTIONS
     } else {
         match wave {
@@ -2717,6 +2773,23 @@ mod tests {
             copy.sample_data.as_ref().unwrap()
         ));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn curve_and_amp_curve_roundtrip_and_clamp() {
+        let mut layer = Layer::new(Wave::Curve);
+        layer.curve = vec![0.0, 1.0, -1.0, 0.5];
+        layer.amp_curve = vec![0.0, 0.5, 1.0];
+        let text = serde_json::to_string(&layer).unwrap();
+        let back: Layer = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.curve, layer.curve);
+        assert_eq!(back.amp_curve, layer.amp_curve);
+
+        layer.curve = vec![f32::NAN, 9.0, -9.0];
+        layer.amp_curve = vec![-1.0, 2.0];
+        layer.sanitize();
+        assert_eq!(layer.curve, vec![0.0, 1.0, -1.0]);
+        assert_eq!(layer.amp_curve, vec![0.0, 1.0]);
     }
 
     #[test]

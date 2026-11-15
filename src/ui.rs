@@ -8,8 +8,8 @@ use crate::app::{Drag, LibraryMode, State, Tab, TimelineDrag};
 use crate::icons::{self, Icon};
 use crate::model::{
     layer_sections, music_sections, AutomationKind, Category, ClipField, EnvShape, FilterMode,
-    LayerField, LayerRowSpec, MusicField, MusicRowSpec, MusicWave, PatchField, ToneEnv, Wave,
-    CLIP_FIELDS,
+    Layer, LayerField, LayerRowSpec, MusicField, MusicRowSpec, MusicWave, PatchField, ToneEnv,
+    Wave, CLIP_FIELDS,
 };
 use crate::synth;
 use crate::theme::{self, *};
@@ -93,6 +93,95 @@ pub enum PatternRow {
     Hat,
 }
 
+/// Editable curve canvases in the inspector.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CurveKind {
+    Cycle,
+    Amp,
+}
+
+impl CurveKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cycle => "SINGLE-CYCLE WAVE",
+            Self::Amp => "AMP CURVE",
+        }
+    }
+}
+
+/// Fixed editor resolution for both curve canvases.
+pub const CURVE_BINS: usize = 32;
+
+/// Values shown by the editor; empty/malformed data falls back to sine for the
+/// cycle and the current ADSR for amplitude.
+pub(crate) fn curve_values(layer: &Layer, kind: CurveKind) -> Vec<f32> {
+    match kind {
+        CurveKind::Cycle => {
+            if layer.curve.len() >= 2 {
+                layer.curve.clone()
+            } else {
+                (0..CURVE_BINS)
+                    .map(|index| (std::f32::consts::TAU * index as f32 / CURVE_BINS as f32).sin())
+                    .collect()
+            }
+        }
+        CurveKind::Amp => {
+            if layer.amp_curve.len() >= 2 {
+                layer.amp_curve.clone()
+            } else {
+                (0..CURVE_BINS)
+                    .map(|index| {
+                        let k = index as f32 / (CURVE_BINS - 1) as f32;
+                        let t = k * layer.duration;
+                        match layer.tone_env {
+                            ToneEnv::Exp => {
+                                (-layer.exp_decay * k).exp()
+                                    * (t / layer.attack.max(0.0001)).min(1.0)
+                            }
+                            ToneEnv::Adsr => synth::adsr(
+                                t,
+                                layer.duration,
+                                layer.attack,
+                                layer.decay,
+                                layer.sustain,
+                                layer.release,
+                            ),
+                        }
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
+pub fn curve_index(kind: CurveKind, rect: Rect, x: f32, len: usize) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    let t = ((x - rect.left()) / rect.size.width.max(1.0)).clamp(0.0, 1.0);
+    match kind {
+        CurveKind::Cycle => ((t * len as f32).floor() as usize).min(len - 1),
+        CurveKind::Amp => ((t * (len - 1) as f32).round() as usize).min(len - 1),
+    }
+}
+
+pub fn curve_value_from_y(kind: CurveKind, rect: Rect, y: f32) -> f32 {
+    let t = ((rect.bottom() - y) / rect.size.height.max(1.0)).clamp(0.0, 1.0);
+    match kind {
+        CurveKind::Cycle => t * 2.0 - 1.0,
+        CurveKind::Amp => t,
+    }
+}
+
+pub fn curve_point(kind: CurveKind, rect: Rect, value: f32, index: usize, len: usize) -> Vec2 {
+    let x = rect.left() + index as f32 / (len.saturating_sub(1).max(1)) as f32 * rect.size.width;
+    let norm = match kind {
+        CurveKind::Cycle => (value.clamp(-1.0, 1.0) + 1.0) * 0.5,
+        CurveKind::Amp => value.clamp(0.0, 1.0),
+    };
+    Vec2::new(x, rect.bottom() - norm * rect.size.height)
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Hit {
     Action(Action),
@@ -115,6 +204,7 @@ pub enum Hit {
         value: f32,
     },
     Pattern(PatternRow, usize),
+    Curve(CurveKind),
     MenuToggle,
     MenuItem(Action),
     MenuPanel,
@@ -191,6 +281,10 @@ pub enum RawItem {
         value: bool,
         action: Action,
     },
+    Curve {
+        kind: CurveKind,
+        height: f32,
+    },
     Note(String),
 }
 
@@ -216,6 +310,10 @@ pub enum Item {
         label: String,
         value: bool,
         action: Action,
+        rect: Rect,
+    },
+    Curve {
+        kind: CurveKind,
         rect: Rect,
     },
     Note {
@@ -477,6 +575,32 @@ mod tests {
     }
 
     #[test]
+    fn curve_wave_exposes_editable_canvases() {
+        let mut state = State::demo();
+        if let Some(layer) = state.layer_mut() {
+            layer.wave = Wave::Curve;
+            layer.curve = vec![0.0, 1.0, -1.0, 0.0];
+        }
+        let layout = Layout::new(&state, state.view.viewport);
+        let cycle = layout.curve_rect(CurveKind::Cycle).expect("cycle canvas");
+        let amp = layout.curve_rect(CurveKind::Amp).expect("amp canvas");
+        assert_eq!(
+            hit(&state, &layout, cycle.center()),
+            Some(Hit::Curve(CurveKind::Cycle))
+        );
+        assert_eq!(
+            hit(&state, &layout, amp.center()),
+            Some(Hit::Curve(CurveKind::Amp))
+        );
+        let values = curve_values(state.layer().unwrap(), CurveKind::Cycle);
+        assert_eq!(values, vec![0.0, 1.0, -1.0, 0.0]);
+        assert_eq!(curve_index(CurveKind::Cycle, cycle, cycle.left(), 4), 0);
+        assert_eq!(curve_index(CurveKind::Cycle, cycle, cycle.right(), 4), 3);
+        assert!((curve_value_from_y(CurveKind::Cycle, cycle, cycle.top()) - 1.0).abs() < 0.001);
+        assert!((curve_value_from_y(CurveKind::Cycle, cycle, cycle.bottom()) + 1.0).abs() < 0.001);
+    }
+
+    #[test]
     fn wave_guide_lists_every_wave_type() {
         let state = State::demo();
         let items = inspector_items(&state);
@@ -514,6 +638,7 @@ mod tests {
                 | Item::Param { rect, .. }
                 | Item::Options { rect, .. }
                 | Item::Toggle { rect, .. }
+                | Item::Curve { rect, .. }
                 | Item::Note { rect, .. } => *rect,
             })
             .expect("inspector row");
@@ -555,6 +680,7 @@ mod tests {
                 | Item::Param { rect, .. }
                 | Item::Options { rect, .. }
                 | Item::Toggle { rect, .. }
+                | Item::Curve { rect, .. }
                 | Item::Note { rect, .. } => *rect,
             };
             assert!(

@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节、0022 预设直接导出 WAV 见第 24 节、0023 预设可用性 / 读-编辑边界 / 采样内存见第 25 节、0024 预设文件生命周期 / 采样预设 / 和弦高亮见第 26 节、0025 预设采样懒加载 / .trash 恢复见第 27 节、0026 右侧检查器滚动修复 / 0027 滚轮方向对齐见第 28/29 节、0028 参数中文副标题 / 波形指南见第 30 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节、0022 预设直接导出 WAV 见第 24 节、0023 预设可用性 / 读-编辑边界 / 采样内存见第 25 节、0024 预设文件生命周期 / 采样预设 / 和弦高亮见第 26 节、0025 预设采样懒加载 / .trash 恢复见第 27 节、0026 右侧检查器滚动修复 / 0027 滚轮方向对齐见第 28/29 节、0028 参数中文副标题 / 波形指南见第 30 节、0029 CURVE 通用波形 / 曲线编辑器见第 31 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -645,3 +645,40 @@ cargo run -- --selfcheck
 - 参数行高 38px，滑块轨道在 `top+30`；副标题使用 SMALL/FAINT。
 - WAVE 选项下方显示当前波形解释；PATCHES 底部列出 14 种 `WAVE TYPES`。
 - `./scripts/preflight.sh` 通过；工程 schema / DSP / 导出路径未改。
+
+## 31. 本轮增量（0029）— CURVE 通用波形 / 曲线编辑器
+
+目标：新增一个不替代现有算法的通用 `CURVE` 声部。用户可绘制单周期波形，
+并绘制一段音量包络；其余频率、颤音、ADSR、滤波、Pan、Space 复用现有参数链。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0029-1 | 数据模型 | `Wave::Curve`；`Layer.curve`（-1…1，最多 64 点）与 `Layer.amp_curve`（0…1，最多 64 点）；`serde(default)` 反序列化，`sanitize()` clamp | `curve_and_amp_curve_roundtrip_and_clamp` |
+| 0029-2 | DSP | `cycle_value` 线性插值单周期表；v3 走 2× 渲染 + 半带滤波抽取；`amp_curve` 非空时覆盖 ADSR/Exp 包络 | `curve_wave_uses_the_drawn_cycle_and_amp_curve` |
+| 0029-3 | 编辑器 | 右侧新增 `CURVE` / `AMP CURVE` 画布（32 点）；拖动绘制、双击重置；命中返回 `Hit::Curve(kind)` | `curve_wave_exposes_editable_canvases` |
+| 0029-4 | 显示 | `Wave::Curve` 加入 WAVE 选项、中文说明、WAVE TYPES、时间线颜色 | `wave_guide_lists_every_wave_type` |
+| 0029-5 | 导出 | `Patch::needs_baked_tres()` 包含 CURVE；`.tres` 整段 bake，避免 Godot 无法表达自绘曲线 | `curve_patches_bake_on_tres_export` |
+| 0029-6 | 参数 | CURVE 使用 PITCH / AMP ENV / FILTER 既有字段；`Drag::Curve` 每次拖动只产生一次 undo | 代码路径 + 既有 undo 测试 |
+
+非目标：任意横坐标控制点（v1 固定 32 点等距）；独立音高/滤波曲线；Godot
+live 曲线支持（CURVE 导出为 baked WAV）。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-15）：
+
+- `cargo test` 156 passed；`--selfcheck` 2 frames / 2584 commands / 138 text runs。
+- `curve` / `amp_curve` JSON 往返与 NaN/clamp 单测通过；空数组回退正弦/ADSR。
+- CURVE v3 渲染有声；`amp_curve = [0.0; 32]` 时静音，证明包络覆盖生效。
+- 右侧出现 `SINGLE-CYCLE WAVE` 与 `AMP CURVE` 两个画布，命中返回
+  `Hit::Curve`；拖动绘制与双击重置共享同一个 undo 事务。
+- CURVE patch 的 `.tres` 导出整段 bake 到 `audio/baked/curve.wav`。
+- `./scripts/preflight.sh` 通过；工程 schema 仍为 v4。

@@ -257,6 +257,12 @@ impl AppLogic for SfxLogic {
                         self.activate(ui::Action::InstallPresets);
                         return EventResult::Handled;
                     }
+                    Some(ui::Hit::Curve(kind)) => {
+                        self.state.begin_edit();
+                        self.set_curve_from_pos(kind, *position, &layout);
+                        self.state.view.drag = Drag::Curve { kind };
+                        return EventResult::Handled;
+                    }
                     Some(ui::Hit::Action(action)) => {
                         self.state.view.hover = Some(action);
                         self.activate(action);
@@ -532,6 +538,16 @@ impl AppLogic for SfxLogic {
                             }
                         }
                     }
+                    Some(ui::Hit::Curve(kind)) => {
+                        self.push_undo();
+                        if let Some(layer) = self.state.layer_mut() {
+                            match kind {
+                                ui::CurveKind::Cycle => layer.curve.clear(),
+                                ui::CurveKind::Amp => layer.amp_curve.clear(),
+                            }
+                        }
+                        self.state.mark_dirty();
+                    }
                     Some(ui::Hit::MusicField(field)) => {
                         self.push_undo();
                         let default = model::Music::default();
@@ -706,6 +722,7 @@ impl AppLogic for SfxLogic {
             Drag::AutomationPoint { .. } => return Some(Cursor::Grabbing),
             Drag::LibraryItem { .. } => return Some(Cursor::Grabbing),
             Drag::Seek { .. } => return Some(Cursor::Grab),
+            Drag::Curve { .. } => return Some(Cursor::Grabbing),
             Drag::InspectorScroll { .. } | Drag::LibraryScroll { .. } => {
                 return Some(Cursor::RowResize)
             }
@@ -740,6 +757,7 @@ impl AppLogic for SfxLogic {
                 | ui::Hit::PresetRow(_)
                 | ui::Hit::PresetFavorite(_)
                 | ui::Hit::InstallPresets
+                | ui::Hit::Curve(_)
                 | ui::Hit::LibraryMode(_)
                 | ui::Hit::LayerRow(_)
                 | ui::Hit::Pattern(_, _)
@@ -822,6 +840,28 @@ impl SfxLogic {
         }
     }
 
+    fn set_curve_from_pos(&mut self, kind: ui::CurveKind, position: Vec2, layout: &ui::Layout) {
+        let Some(rect) = layout.curve_rect(kind) else {
+            return;
+        };
+        let Some(layer) = self.state.layer() else {
+            return;
+        };
+        let mut values = ui::curve_values(layer, kind);
+        if values.len() < 2 {
+            return;
+        }
+        let index = ui::curve_index(kind, rect, position.x, values.len());
+        values[index] = ui::curve_value_from_y(kind, rect, position.y);
+        if let Some(layer) = self.state.layer_mut() {
+            match kind {
+                ui::CurveKind::Cycle => layer.curve = values,
+                ui::CurveKind::Amp => layer.amp_curve = values,
+            }
+        }
+        self.state.mark_dirty();
+    }
+
     pub(super) fn set_param_from_x(
         &mut self,
         position: Vec2,
@@ -900,6 +940,10 @@ impl SfxLogic {
                     start,
                     moved,
                 };
+            }
+            Drag::Curve { kind } => {
+                self.set_curve_from_pos(kind, position, layout);
+                self.state.view.drag = Drag::Curve { kind };
             }
             Drag::Layer { field, last_x } => {
                 if self.state.view.modifiers.shift || self.state.view.modifiers.alt {

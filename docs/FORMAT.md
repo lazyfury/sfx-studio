@@ -69,6 +69,7 @@
 
 ### Layer / Clip / Automation
 
+- `curve` / `amp_curve`：`Wave::Curve` 的自绘单周期波形（-1…1）与音量曲线（0…1），最多 64 点；空数组分别回退到正弦和当前 ADSR。两者都是 `serde(default)` 追加字段，不改变 schema 版本。
 - `sample_path` / `sample_pitch` / `sample_loop`：`Wave::Sample` 的 WAV 路径与变调/循环参数。`sample_data`（解码后的单声道样本）不写入 JSON，加载工程时重新读取；相对路径按工程根目录解析。
 - `.tres` 导出的采样 patch 会整段 bake 到 `audio/baked/*.wav`（避免 Godot 侧嵌入 `AudioStreamWAV`）；`.tres` 导入仍把 `SAMPLE` 映射为 `Pluck`，不逐层往返采样。
 - 所有数值在加载时 `validate()`：NaN/Inf 修复、范围 clamp、数组上限、重名去重。
@@ -98,8 +99,8 @@
 ### `audio/sfx/*.tres`
 
 - 文件名为 `sanitize(patch.name)` 并全局去重（`coin`, `coin_2`, `sound`, `sound_2`）。
-- v3 声音模型：锯齿/方波/Pulse/Triangle 使用 2× 过采样 + PolyBLEP/polyBLAMP 等价实现（Triangle 为积分方波）；FM/Arp/Pluck 以 2× 渲染后半带滤波抽取；鼓组与噪声为 v3 重写（噪声低通按 Hz 归一）。
-- `.tres` 只表达 v2 参数图；`dsp_version >= 3`（以及含自动化/采样层）的 patch 会整段 bake 到 `audio/baked/*.wav` 并用 `baked = ExtResource(...)` 引用，保证导出与工程内试听逐样本一致。
+- v3 声音模型：锯齿/方波/Pulse/Triangle 使用 2× 过采样 + PolyBLEP/polyBLAMP 等价实现（Triangle 为积分方波）；CURVE 以 2× 插值后经半带滤波抽取；FM/Arp/Pluck 以 2× 渲染后半带滤波抽取；鼓组与噪声为 v3 重写（噪声低通按 Hz 归一）。
+- `.tres` 只表达 v2 参数图；`dsp_version >= 3`（以及含自动化/采样/CURVE 层）的 patch 会整段 bake 到 `audio/baked/*.wav` 并用 `baked = ExtResource(...)` 引用，保证导出与工程内试听逐样本一致。
 - 导入 `.tres` 时 `dsp_version` 固定为 2（live 格式能表达的代次）。
 - `resource_name` 保存原始显示名，用于重新导入。
 - `group` 保存 category 的 label（`Impact`、`UI`、`Combat`…），导入时映射回 `Category`。

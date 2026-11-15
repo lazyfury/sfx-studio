@@ -96,10 +96,11 @@ cargo run -- --demo-reel --out reel.wav
   A 4 px threshold keeps click-to-audition separate from dragging. Project
   patches stay click-to-open; only PRESETS rows start a drag.
 - **Sound** — waveform, play/stop/loop, randomize, A/B/C variations, favorite;
-  `SAMPLE` layers load a WAV with pitch, start, reverse and crossfaded loop
-  controls (see `docs/FORMAT.md`). v3 voices are band-limited (2× oversampled
-  PolyBLEP) and the drum models are rebuilt; existing projects stay on v2 until
-  `UPGRADE TO HD`.
+  `CURVE` layers add an editable single-cycle canvas and a drawable amplitude
+  curve (drag to draw, double-click to reset); `SAMPLE` layers load a WAV with
+  pitch, start, reverse and crossfaded loop controls (see `docs/FORMAT.md`).
+  v3 voices are band-limited (2× oversampled PolyBLEP) and the drum models are
+  rebuilt; existing projects stay on v2 until `UPGRADE TO HD`.
 - **Timeline** — drag clips to move/trim (5 ms snap, hold Shift for free
   placement); ⌘/Ctrl+wheel zooms around the cursor and Shift+wheel pans.
 - **Parameters** — scrollable panel; every slider has a Chinese subtitle that
@@ -107,8 +108,8 @@ cargo run -- --demo-reel --out reel.wav
   fine control, double-click to reset. `PAN` sits in the MIX block; the `SPACE`
   block holds the per-sound reverb amount/size and the legacy `UPGRADE TO HD`
   button. Waveform/ruler can be dragged to scrub the playhead. A `WAVE TYPES`
-  section lists all 14 oscillator/drum/sample modes with a one-line Chinese
-  description; hovering a WAVE button shows the same tip.
+  section lists all 15 oscillator/curve/drum/sample modes with a one-line
+  Chinese description; hovering a WAVE button shows the same tip.
 - **Menu** — `MENU` holds Open/Save/New/Rename/Duplicate/Delete, Randomize/Vary/Save as Preset/Favorite, Export WAV/Bake/TRES.
 - **Export** — `EXPORT WAV` writes 48 kHz · 24-bit stereo (TPDF dither);
   `BAKE GODOT` writes 48 kHz · 16-bit stereo WAVs + manifest (v3; legacy

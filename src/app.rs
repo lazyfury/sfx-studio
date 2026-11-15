@@ -119,6 +119,9 @@ pub enum Drag {
     Seek {
         waveform: bool,
     },
+    Curve {
+        kind: ui::CurveKind,
+    },
     InspectorScroll {
         start_y: f32,
         start_scroll: f32,
