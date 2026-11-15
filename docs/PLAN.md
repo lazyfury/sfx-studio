@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节、0022 预设直接导出 WAV 见第 24 节、0023 预设可用性 / 读-编辑边界 / 采样内存见第 25 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -415,3 +415,66 @@ cargo run -- --selfcheck
 - `--new /tmp/sfx-new-proj`：22 个 preset 文件（11 demo + 11 builtin）；
   `--install-presets` 在空工程写入 11 个，第二次报告 already has all。
 - 工程 schema 仍为 v4；bake / `.tres` / parity 代码路径未改。
+
+## 24. 本轮增量（0022）— 预设直接导出 WAV
+
+目标：PRESETS 库里的预设无需先复制进工程或拖上时间线，选中后即可直接
+渲染为音频文件；输出与工程导出保持一致（48 kHz / 24-bit stereo）。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0022-1 | 导出目标 | `State::export_patch()` 按当前库来源选择目标：PROJECT 用当前 patch，PRESETS 用选中预设 | `wav_export_target_follows_the_active_library` |
+| 0022-2 | 命令入口 | PRESETS 模式下 `MENU → EXPORT WAV` 与 `⌘/Ctrl+E` 可用；未选预设时提示先选择 | `preset_mode_disables_project_only_actions` |
+| 0022-3 | 渲染路径 | 复用 v3 `fx::render_patch` + 48 kHz / 24-bit stereo TPDF WAV；不改 DSP、schema、`.tres` | `preset_wav_export_is_48k_24bit_stereo` |
+| 0022-4 | 只读边界 | 导出只读预设，不修改 `presets/` 或 `sfx.project.json`；Bake/TRES/编辑命令仍禁用 | `preset_mode_disables_project_only_actions` |
+
+非目标：把预设自动写回工程；批量导出整个 PRESETS 库；导出 `.tres` 预设。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+## 25. 本轮增量（0023）— 预设易用性 / 模式边界 / 采样内存
+
+目标：让旧工程能自助恢复预设库，PRESETS 与 PROJECT 的编辑边界可见，
+并消除采样 PCM 在 undo/预览路径上的深拷贝；不改变工程 schema、DSP 或
+Godot 导出格式。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0023-1 | 空预设自救 | PRESETS 空库且有工程目录时显示 `INSTALL BUILTIN PRESETS`；调用 `PresetBank::install_missing`，不覆盖已有文件 | `empty_presets_offer_an_install_action`、`installing_presets_fills_an_empty_bank_without_a_project_file` |
+| 0023-2 | 模式边界 | PRESETS 模式右侧显示选中预设的只读摘要；禁用增删层/Clip、采样、升级 DSP 等工程编辑命令 | `preset_mode_inspector_describes_the_selected_preset`、`preset_mode_disables_project_only_actions` |
+| 0023-3 | Space 语义 | PROJECT 播放当前 patch；PRESETS 试听选中预设，未选则提示 | `space_in_presets_targets_the_selected_preset` |
+| 0023-4 | 保存为预设 | `MENU → SAVE AS PRESET` 把当前 patch 写入 `<project>/presets/`，同名不覆盖 | `saving_the_current_patch_adds_a_project_preset` |
+| 0023-5 | 采样共享 | `Layer.sample_data` 改为 `Arc<SampleData>`；undo、预览、`with_pitch`/拖入复制共享 PCM | `sample_fields_roundtrip_and_load` 中的 `Arc::ptr_eq` |
+| 0023-6 | 采样上限 | 源文件 64MB 上限；解码前按帧数限制为 60 秒 @48 kHz（2,880,000 帧） | `rejects_oversized_files_before_reading`、`rejects_samples_over_the_frame_limit` |
+| 0023-7 | ID 修复 | `ensure_ids` 用 `HashSet` 替换 `Vec::contains`，避免大工程 O(n²) | 既有 ID/migrate/validate 单测 |
+
+非目标：退出拦截、预设重命名/删除、异步 Bake、RT buffer 归还队列；这些
+依赖宿主关闭回调或更大范围的所有权调整，保留到下一轮。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-15）：
+
+- `cargo test` 142 passed；`--selfcheck` 2 frames / 2572 commands / 126 text runs。
+- `./scripts/preflight.sh` 通过（fmt + clippy + tests + selfcheck）。
+- 空 PRESETS 工程可从 GUI 一键写入 11 个内置预设；`SAVE AS PRESET` 写入当前 patch
+  且不覆盖同名预设。
+- `Layer.sample_data` 的 clone 通过 `Arc::ptr_eq` 验证共享；60 秒帧上限与 64MB
+  源文件上限均有单测。
+- 工程 schema 仍为 v4；DSP / bake / `.tres` 导出路径未改。

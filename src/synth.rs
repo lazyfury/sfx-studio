@@ -1405,10 +1405,10 @@ mod tests {
         layer.sustain = 1.0;
         layer.release = 0.0;
         layer.sample_loop = true;
-        layer.sample_data = Some(crate::wav::SampleData {
+        layer.sample_data = Some(std::sync::Arc::new(crate::wav::SampleData {
             rate: 48_000,
             samples: vec![0.0, 1.0, 0.0, -1.0],
-        });
+        }));
         let out = render_layer(&layer, 48_000);
         assert_eq!(out.len(), 4);
         assert!((out[0] - 0.0).abs() < 0.01);
@@ -1417,10 +1417,10 @@ mod tests {
         assert!((out[3] + 1.0).abs() < 0.01);
 
         layer.sample_pitch = 12.0;
-        layer.sample_data = Some(crate::wav::SampleData {
+        layer.sample_data = Some(std::sync::Arc::new(crate::wav::SampleData {
             rate: 48_000,
             samples: vec![0.0, 1.0, 2.0, 3.0],
-        });
+        }));
         let faster = render_layer(&layer, 48_000);
         assert!((faster[0] - 0.0).abs() < 0.01);
         assert!((faster[1] - 2.0).abs() < 0.01);
@@ -1534,10 +1534,10 @@ mod tests {
         layer.sustain = 1.0;
         layer.release = 0.0;
         layer.gain = 1.0;
-        layer.sample_data = Some(crate::wav::SampleData {
+        layer.sample_data = Some(std::sync::Arc::new(crate::wav::SampleData {
             rate,
             samples: vec![0.0, 1.0, 0.0, -1.0],
-        });
+        }));
         layer.sample_start = 0.5;
         let started = render_sample_hq(&layer, rate);
         assert!((started[0] - 1.0).abs() < 1e-3, "start {}", started[0]);
@@ -1556,7 +1556,10 @@ mod tests {
         layer.sample_reverse = false;
         layer.sample_loop = true;
         layer.duration = 0.05;
-        layer.sample_data = Some(crate::wav::SampleData { rate, samples });
+        layer.sample_data = Some(std::sync::Arc::new(crate::wav::SampleData {
+            rate,
+            samples,
+        }));
         let looped = render_sample_hq(&layer, rate);
         let max_step = looped
             .windows(2)
@@ -1604,10 +1607,10 @@ mod tests {
             layer.duration = 0.08;
             if wave == Wave::Sample {
                 layer.sample_loop = true;
-                layer.sample_data = Some(crate::wav::SampleData {
+                layer.sample_data = Some(std::sync::Arc::new(crate::wav::SampleData {
                     rate: 22050,
                     samples: vec![0.0, 0.5, -0.5, 1.0],
-                });
+                }));
             }
             let samples = render_layer(&layer, 22050);
             assert!(!samples.is_empty(), "{} empty", wave.label());

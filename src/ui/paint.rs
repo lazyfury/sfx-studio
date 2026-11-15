@@ -261,6 +261,17 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             FAINT,
         );
     }
+    if let Some(rect) = layout.install_presets {
+        theme::button_icon(
+            ctx,
+            measurer,
+            rect,
+            "INSTALL BUILTIN PRESETS",
+            icons::document(Icon::Download),
+            state.view.hover_hit == Some(Hit::InstallPresets),
+            false,
+        );
+    }
     let music_selected = state.view.tab == Tab::Music;
     if music_selected {
         fill(ctx, layout.music_row, ACTIVE);
@@ -419,7 +430,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
     );
     let info = if state.view.library_mode == LibraryMode::Presets {
         format!(
-            "PROJECT PRESETS  ·  {}  ·  drag to timeline",
+            "PROJECT PRESETS  ·  {}  ·  drag to timeline  ·  ⌘E export WAV",
             state.visible_presets().len()
         )
     } else if state.doc.root.is_none() {
@@ -730,15 +741,16 @@ fn paint_hover_tip(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintCo
             if action_available(state, action) {
                 action_tip(action)
             } else {
-                "PRESETS 只读 · 切回 PROJECT 编辑"
+                action_unavailable_message(state, action)
             }
         }
         Some(Hit::Search) => "搜索音效 · Search（/）",
         Some(Hit::CategoryFilter) => "切换分类过滤 · Category（C）",
         Some(Hit::FavoriteFilter) => "只看收藏 · Favorites",
         Some(Hit::LibraryMode(_)) => "切换工程库 / 内部预设库 · Library source",
-        Some(Hit::PresetRow(_)) => "单击试听 · 拖到时间线插入 / 左侧复制进工程",
+        Some(Hit::PresetRow(_)) => "单击试听 · 拖到时间线插入 / 左侧复制进工程 · ⌘E 导出 WAV",
         Some(Hit::PresetFavorite(_)) => "收藏预设 · Favorite",
+        Some(Hit::InstallPresets) => "把 11 个内置预设写入当前工程 · Install",
         Some(Hit::InspectorScrollbar) => "拖动滚动参数面板 · Scroll",
         _ => return,
     };
@@ -1538,7 +1550,66 @@ fn paint_modal(
     );
 }
 
+fn preset_inspector_items(state: &State) -> Vec<RawItem> {
+    let mut items = vec![RawItem::Section("PRESET LIBRARY".into())];
+    let Some(patch) = state
+        .view
+        .selected_preset
+        .and_then(|index| state.presets.get(index))
+    else {
+        items.push(RawItem::Note("SELECT A PRESET".into()));
+        items.push(RawItem::Note(
+            "click a row to audition · drag to timeline or left panel".into(),
+        ));
+        return items;
+    };
+
+    items.push(RawItem::Note(format!("NAME  {}", patch.name)));
+    items.push(RawItem::Note(format!(
+        "CATEGORY  {}",
+        patch.category.label()
+    )));
+    items.push(RawItem::Note(format!(
+        "{} LAYERS  ·  {:.3}s  ·  DSP v{}",
+        patch.layers.len(),
+        patch.end(),
+        patch.dsp_version
+    )));
+    items.push(RawItem::Note(format!(
+        "SPACE {:.2}  ·  ROOM {:.2}",
+        patch.space, patch.room
+    )));
+    items.push(RawItem::Section("LAYERS".into()));
+    for (index, layer) in patch.layers.iter().take(8).enumerate() {
+        items.push(RawItem::Note(format!(
+            "{:02}  {:<9} {:.3}s  gain {:.2}",
+            index + 1,
+            layer.wave.label(),
+            layer.duration,
+            layer.gain
+        )));
+    }
+    if patch.layers.len() > 8 {
+        items.push(RawItem::Note(format!(
+            "+{} more layer(s)",
+            patch.layers.len() - 8
+        )));
+    }
+    items.push(RawItem::Section("READ-ONLY".into()));
+    items.push(RawItem::Note(
+        "drag to timeline / left panel copies it to the project".into(),
+    ));
+    items.push(RawItem::Note("⌘E or MENU → EXPORT WAV".into()));
+    items.push(RawItem::Note(
+        "switch to PROJECT to edit project patches".into(),
+    ));
+    items
+}
+
 pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
+    if state.view.library_mode == LibraryMode::Presets {
+        return preset_inspector_items(state);
+    }
     let mut items = Vec::new();
     if state.view.tab == Tab::Patches {
         let Some(layer) = state.layer() else {
@@ -2229,7 +2300,7 @@ fn hover_info(state: &State) -> Option<String> {
     match state.view.hover_hit {
         Some(Hit::Action(action)) => {
             if !action_available(state, action) {
-                return Some("PRESETS 只读 · 切回 PROJECT 编辑".into());
+                return Some(action_unavailable_message(state, action).into());
             }
             let tip = action_tip(action);
             if tip.is_empty() {
@@ -2244,7 +2315,7 @@ fn hover_info(state: &State) -> Option<String> {
         Some(Hit::LibraryMode(mode)) => Some(format!("切换到 {} 库", mode.label())),
         Some(Hit::PresetRow(index)) => state.preset(index).map(|patch| {
             format!(
-                "PRESET · {} · {}  ·  click to audition / drag to insert",
+                "PRESET · {} · {}  ·  click to audition / drag to insert / ⌘E WAV",
                 patch.name,
                 patch.category.label()
             )
@@ -2253,10 +2324,13 @@ fn hover_info(state: &State) -> Option<String> {
             .presets
             .get(index)
             .map(|patch| format!("收藏预设 · {}", patch.name)),
+        Some(Hit::InstallPresets) => {
+            Some("安装 11 个内置预设到当前工程 · Install builtin presets".into())
+        }
         Some(Hit::InspectorScrollbar) => Some("拖动滚动参数面板 · Scroll".into()),
         Some(Hit::MenuItem(action)) => {
             if !action_available(state, action) {
-                return Some("PRESETS 只读 · 切回 PROJECT 编辑".into());
+                return Some(action_unavailable_message(state, action).into());
             }
             let tip = action_tip(action);
             if tip.is_empty() {

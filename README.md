@@ -79,7 +79,13 @@ cargo run -- --demo-reel --out reel.wav
   filter (`ALL` dropdown / `C`), favorites filter (star) and the scrollbar work
   in both modes. Clicking a preset auditions it without touching the project;
   the star (or `F`) keeps a preset favourite in
-  `<project>/presets/.favorites.json`.
+  `<project>/presets/.favorites.json`. With a preset selected, `MENU → EXPORT
+  WAV` (or `⌘/Ctrl+E`) renders it directly to a 48 kHz / 24-bit stereo WAV
+  without adding it to the project. Space auditions that preset instead of the
+  project patch. PRESETS is strictly read-only: the right inspector shows the
+  selected preset summary and project-edit controls are disabled. An empty
+  library offers `INSTALL BUILTIN PRESETS`; `MENU → SAVE AS PRESET` adds the
+  current project sound to the same library.
 - **Preset drag-in** — drag a preset row onto the timeline to copy its layers
   into the current patch at the drop time (5 ms snap, Shift for free
   placement); drop it on the left panel to copy it into the project library.
@@ -97,7 +103,7 @@ cargo run -- --demo-reel --out reel.wav
   block; the `SPACE` block holds the per-sound reverb amount/size and the
   legacy `UPGRADE TO HD` button. Waveform/ruler can be dragged to scrub the
   playhead.
-- **Menu** — `MENU` holds Open/Save/New/Rename/Duplicate/Delete, Randomize/Vary/Favorite, Export WAV/Bake/TRES.
+- **Menu** — `MENU` holds Open/Save/New/Rename/Duplicate/Delete, Randomize/Vary/Save as Preset/Favorite, Export WAV/Bake/TRES.
 - **Export** — `EXPORT WAV` writes 48 kHz · 24-bit stereo (TPDF dither);
   `BAKE GODOT` writes 48 kHz · 16-bit stereo WAVs + manifest (v3; legacy
   patches keep `Patch.rate`); `.tres` export bakes any v3 / automated / sampled
@@ -109,7 +115,7 @@ cargo run -- --demo-reel --out reel.wav
 
 | Key | Action |
 | --- | --- |
-| Space | Play / pause |
+| Space | Play / pause (PROJECT) · audition selected preset (PRESETS) |
 | / | Focus search |
 | 1–8 | Trigger patch 1–8 |
 | R | Randomize current sound |
@@ -122,7 +128,7 @@ cargo run -- --demo-reel --out reel.wav
 | ⌘/Ctrl+Z / ⇧⌘Z | Undo / redo |
 | ⌘/Ctrl+S | Save project |
 | ⌘/Ctrl+O | Open project folder |
-| ⌘/Ctrl+E | Export 48 kHz · 24-bit stereo WAV |
+| ⌘/Ctrl+E | Export 48 kHz · 24-bit stereo WAV (PROJECT patch / selected PRESET) |
 | ⌘/Ctrl+B | Bake Godot assets |
 | ⌘/Ctrl + wheel (timeline) | Zoom timeline |
 | Shift + wheel (timeline) | Pan timeline |
@@ -146,7 +152,9 @@ project plus an internal preset library:
 ```
 
 The PRESETS tab is read-only and always reflects the currently open project, so
-switching projects switches the library. Dropping a preset on the timeline
+switching projects switches the library. An old project without a preset bank
+can install the bundled families from the empty PRESETS view or with
+`--install-presets DIR`; nothing existing is overwritten. Dropping a preset on the timeline
 copies its layers (with fresh IDs) into the current patch and anchors its clip
 arrangement at the drop time. The current patch's DSP version, space and room
 are kept, so a v2 project still renders the inserted layers with the legacy

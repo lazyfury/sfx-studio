@@ -36,6 +36,8 @@ pub enum Action {
     NewProject,
     Open,
     Save,
+    InstallPresets,
+    SavePreset,
     ExportWav,
     Bake,
     Tres,
@@ -118,6 +120,7 @@ pub enum Hit {
     LibraryMode(LibraryMode),
     PresetRow(usize),
     PresetFavorite(usize),
+    InstallPresets,
     Search,
     LibraryScrollbar,
     Waveform(f32),
@@ -152,6 +155,7 @@ pub const MENU_ENTRIES: &[MenuEntry] = &[
     MenuEntry::Section("SOUND"),
     MenuEntry::Item("RANDOMIZE", Action::Randomize),
     MenuEntry::Item("VARY A/B/C", Action::Vary),
+    MenuEntry::Item("SAVE AS PRESET", Action::SavePreset),
     MenuEntry::Item("FAVORITE", Action::Favorite),
     MenuEntry::Section("EXPORT"),
     MenuEntry::Item("EXPORT WAV", Action::ExportWav),
@@ -214,6 +218,7 @@ fn action_icon(action: Action) -> Option<Icon> {
         Action::NewProject => Some(Icon::FilePlus),
         Action::Open => Some(Icon::FolderOpen),
         Action::Save => Some(Icon::Save),
+        Action::InstallPresets | Action::SavePreset => Some(Icon::FilePlus),
         Action::NewPatch => Some(Icon::FilePlus),
         Action::RenamePatch => Some(Icon::Pencil),
         Action::DuplicatePatch | Action::DuplicateLayer => Some(Icon::Copy),
@@ -240,7 +245,9 @@ fn action_tip(action: Action) -> &'static str {
         Action::NewProject => "新建工程目录 + 内部预设 · New project",
         Action::Open => "打开项目文件夹 · Open",
         Action::Save => "保存工程 · Save（⌘S）",
-        Action::ExportWav => "导出 48 kHz WAV · Export（⌘E）",
+        Action::InstallPresets => "安装内置预设到当前工程 · Install builtin presets",
+        Action::SavePreset => "把当前音效保存到工程预设库 · Save as preset",
+        Action::ExportWav => "导出 48 kHz WAV · 预设模式导出选中预设（⌘E）",
         Action::Bake => "烘焙 Godot 音频资源 · Bake（⌘B）",
         Action::Tres => "导出 Godot .tres 参数 · Resource",
         Action::Randomize => "随机微调当前音效 · Randomize（R）",
@@ -295,10 +302,18 @@ pub enum DropTarget {
 }
 
 /// Project-only commands are disabled while the PRESETS source is active so
-/// the selected row and the command target cannot silently disagree.
+/// the selected row and the command target cannot silently disagree. WAV
+/// export stays available, but it needs a selected preset to write.
 pub fn action_available(state: &State, action: Action) -> bool {
     if state.view.library_mode != LibraryMode::Presets {
         return true;
+    }
+    if action == Action::ExportWav {
+        return state
+            .view
+            .selected_preset
+            .and_then(|index| state.presets.get(index))
+            .is_some();
     }
     !matches!(
         action,
@@ -309,10 +324,32 @@ pub fn action_available(state: &State, action: Action) -> bool {
             | Action::Randomize
             | Action::Vary
             | Action::Favorite
-            | Action::ExportWav
+            | Action::SavePreset
             | Action::Bake
             | Action::Tres
+            | Action::AddLayer
+            | Action::DuplicateLayer
+            | Action::DeleteLayer
+            | Action::AddClip
+            | Action::DeleteClip
+            | Action::LoadSample
+            | Action::ToggleSampleLoop
+            | Action::ToggleSampleReverse
+            | Action::UpgradeDsp
     )
+}
+
+/// Human-readable reason for a greyed-out action, used by the tooltip and the
+/// status line. Keeps the PRESETS read-only boundary separate from the benign
+/// "select a preset first" case.
+pub fn action_unavailable_message(state: &State, action: Action) -> &'static str {
+    if state.view.library_mode == LibraryMode::Presets {
+        if action == Action::ExportWav {
+            return "先选中一个预设再导出 WAV · select a preset";
+        }
+        return "PRESETS 只读 · 切回 PROJECT 编辑";
+    }
+    "action unavailable"
 }
 
 pub use hit::hit;
@@ -517,6 +554,41 @@ mod tests {
     }
 
     #[test]
+    fn empty_presets_offer_an_install_action() {
+        let mut state = State::empty();
+        state.doc.root = Some(std::path::PathBuf::from("/tmp/sfx-studio-install"));
+        state.view.library_mode = LibraryMode::Presets;
+        let layout = Layout::new(&state, state.view.viewport);
+        let button = layout.install_presets.expect("install button");
+        assert_eq!(
+            hit(&state, &layout, button.center()),
+            Some(Hit::InstallPresets)
+        );
+
+        state.doc.root = None;
+        let layout = Layout::new(&state, state.view.viewport);
+        assert!(layout.install_presets.is_none());
+    }
+
+    #[test]
+    fn preset_mode_inspector_describes_the_selected_preset() {
+        let mut state = State::demo();
+        state.view.library_mode = LibraryMode::Presets;
+        state.select_preset(1);
+        let name = state.preset(1).expect("preset").name.clone();
+        let items = inspector_items(&state);
+        assert!(items
+            .iter()
+            .any(|item| matches!(item, RawItem::Note(text) if text.contains(name.as_str()))));
+        assert!(items
+            .iter()
+            .any(|item| matches!(item, RawItem::Section(text) if text == "READ-ONLY")));
+        assert!(!items
+            .iter()
+            .any(|item| matches!(item, RawItem::Param { .. })));
+    }
+
+    #[test]
     fn preset_mode_disables_project_only_actions() {
         let mut state = State::demo();
         state.view.library_mode = LibraryMode::Presets;
@@ -528,15 +600,32 @@ mod tests {
             Action::Randomize,
             Action::Vary,
             Action::Favorite,
-            Action::ExportWav,
+            Action::SavePreset,
             Action::Bake,
             Action::Tres,
+            Action::AddLayer,
+            Action::DuplicateLayer,
+            Action::DeleteLayer,
+            Action::AddClip,
+            Action::DeleteClip,
+            Action::LoadSample,
+            Action::ToggleSampleLoop,
+            Action::ToggleSampleReverse,
+            Action::UpgradeDsp,
         ] {
             assert!(!action_available(&state, action), "{action:?}");
         }
         assert!(action_available(&state, Action::Save));
         assert!(action_available(&state, Action::Open));
-        assert!(action_available(&state, Action::AddLayer));
+        assert!(action_available(&state, Action::InstallPresets));
+
+        // WAV export is the one project-style command that stays useful in
+        // PRESETS mode; it targets the selected preset and needs a selection.
+        assert!(!action_available(&state, Action::ExportWav));
+        assert!(action_unavailable_message(&state, Action::ExportWav).contains("先选中一个预设"));
+        state.select_preset(0);
+        assert!(action_available(&state, Action::ExportWav));
+
         state.view.library_mode = LibraryMode::Project;
         assert!(action_available(&state, Action::ExportWav));
     }

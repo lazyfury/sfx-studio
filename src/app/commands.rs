@@ -34,7 +34,7 @@ impl SfxLogic {
         self.state.view.menu_open = false;
         if !ui::action_available(&self.state, action) {
             self.state
-                .toast("PRESETS library is read-only · switch to PROJECT to edit");
+                .toast(ui::action_unavailable_message(&self.state, action));
             return;
         }
         self.state.commit_edit();
@@ -71,6 +71,8 @@ impl SfxLogic {
             A::NewProject => self.new_project(),
             A::Open => self.open(),
             A::Save => self.save(),
+            A::InstallPresets => self.install_presets(),
+            A::SavePreset => self.save_as_preset(),
             A::Bake => self.bake(),
             A::Tres => self.export_tres(),
             A::ExportWav => self.export_wav(),
@@ -411,6 +413,82 @@ impl SfxLogic {
         }
     }
 
+    /// Seed `<project>/presets/` with the builtin bank when the library is
+    /// empty. This is the GUI equivalent of `--install-presets` and never
+    /// overwrites an existing file.
+    fn install_presets(&mut self) {
+        let Some(root) = self.state.doc.root.clone() else {
+            self.state.toast("open a project first");
+            return;
+        };
+        match crate::presets::PresetBank::install_missing(&root, &crate::builtin::bank(20_240_607))
+        {
+            Ok(0) => {
+                let warnings = self.state.presets.load_project(&root);
+                self.state.bump_view();
+                if self.state.presets.presets.is_empty() {
+                    self.state
+                        .toast("no usable presets in presets/ · check the JSON files");
+                } else if warnings.is_empty() {
+                    self.state
+                        .toast("all builtin presets are already installed");
+                } else {
+                    self.state
+                        .toast(format!("presets reloaded · {}", warnings.join("; ")));
+                }
+            }
+            Ok(written) => {
+                let warnings = self.state.presets.load_project(&root);
+                self.state.view.selected_preset = None;
+                self.state.view.preset_scroll = 0;
+                self.state.bump_view();
+                self.state.toast(if warnings.is_empty() {
+                    format!("installed {written} builtin presets")
+                } else {
+                    format!(
+                        "installed {written} builtin presets · {}",
+                        warnings.join("; ")
+                    )
+                });
+            }
+            Err(error) => self.state.toast(format!("install presets failed: {error}")),
+        }
+    }
+
+    /// Persist the current project patch into `<project>/presets/` so it can
+    /// be auditioned and dragged like the bundled library. Existing preset
+    /// names are never overwritten.
+    fn save_as_preset(&mut self) {
+        let Some(root) = self.state.doc.root.clone() else {
+            self.state.toast("open a project first");
+            return;
+        };
+        let Some(patch) = self.state.patch().cloned() else {
+            self.state.toast("select a sound first");
+            return;
+        };
+        let name = patch.name.clone();
+        match crate::presets::PresetBank::install_missing(&root, &[patch]) {
+            Ok(0) => self.state.toast(format!("preset '{name}' already exists")),
+            Ok(_) => {
+                let warnings = self.state.presets.load_project(&root);
+                self.state.view.selected_preset = self
+                    .state
+                    .presets
+                    .presets
+                    .iter()
+                    .position(|preset| preset.name == name);
+                self.state.bump_view();
+                self.state.toast(if warnings.is_empty() {
+                    format!("saved preset '{name}'")
+                } else {
+                    format!("saved preset '{name}' · {}", warnings.join("; "))
+                });
+            }
+            Err(error) => self.state.toast(format!("save preset failed: {error}")),
+        }
+    }
+
     pub(super) fn bake(&mut self) {
         let Some(root) = self.ensure_root() else {
             return;
@@ -432,7 +510,8 @@ impl SfxLogic {
     }
 
     pub(super) fn export_wav(&mut self) {
-        let Some(patch) = self.state.patch() else {
+        let Some(patch) = self.state.export_patch().cloned() else {
+            self.state.toast("select a sound or preset to export");
             return;
         };
         let default_name = format!("{}.wav", patch.safe_name());
@@ -444,11 +523,10 @@ impl SfxLogic {
         else {
             return;
         };
-        let rate = synth::PREVIEW_RATE;
-        let stereo = fx::render_patch(patch, rate);
-        match synth::write_wav_stereo(&path, &stereo.left, &stereo.right, rate, 24) {
-            Ok(()) => self.state.toast(format!(
-                "exported {} (48 kHz · 24-bit stereo)",
+        match export::write_patch_wav(&patch, &path) {
+            Ok(seconds) => self.state.toast(format!(
+                "exported {} · {} · {seconds:.2}s · 48 kHz / 24-bit stereo",
+                patch.name,
                 path.display()
             )),
             Err(error) => self.state.toast(format!("export failed: {error}")),
@@ -514,7 +592,7 @@ impl SfxLogic {
             layer.sample_reverse = false;
             layer.duration = (data.samples.len() as f32 / data.rate as f32).clamp(0.005, 3.0);
             layer.sample_path = stored;
-            layer.sample_data = Some(data);
+            layer.sample_data = Some(std::sync::Arc::new(data));
         }
         self.state.mark_dirty();
         self.state.bump_view();

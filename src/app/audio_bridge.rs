@@ -3,6 +3,30 @@
 use super::*;
 
 impl SfxLogic {
+    /// Space toggles whichever library is active: the project patch in
+    /// PROJECT mode, or a read-only audition of the selected preset in
+    /// PRESETS mode.
+    pub(super) fn toggle_play(&mut self) {
+        let audio_playing = self.audio.as_ref().is_some_and(|audio| audio.is_playing());
+        if self.state.view.library_mode == LibraryMode::Presets {
+            if self.state.playback.preset_playing || audio_playing {
+                self.stop();
+                return;
+            }
+            let Some(index) = self.state.view.selected_preset else {
+                self.state.toast("select a preset to audition");
+                return;
+            };
+            self.audition_preset(index);
+            return;
+        }
+        if self.state.playback.was_playing || audio_playing {
+            self.stop();
+        } else {
+            self.play();
+        }
+    }
+
     pub(super) fn play(&mut self) {
         let rate = self.state.preview_rate();
         self.cancel_preview();

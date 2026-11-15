@@ -481,6 +481,19 @@ impl State {
         self.presets.get(index)
     }
 
+    /// The patch that the WAV export command should write. The active library
+    /// decides the target: PRESETS exports the selected preset without adding
+    /// it to the project, PROJECT exports the current sound.
+    pub fn export_patch(&self) -> Option<&Patch> {
+        match self.view.library_mode {
+            LibraryMode::Project => self.patch(),
+            LibraryMode::Presets => self
+                .view
+                .selected_preset
+                .and_then(|index| self.presets.get(index)),
+        }
+    }
+
     pub fn select_preset(&mut self, index: usize) {
         if self.presets.get(index).is_some() {
             self.view.selected_preset = Some(index);
@@ -1314,6 +1327,108 @@ mod tests {
             .preset(*index)
             .is_some_and(|p| p.name == favorite.name)));
         assert!(!favorites.is_empty());
+    }
+
+    #[test]
+    fn installing_presets_fills_an_empty_bank_without_a_project_file() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "sfx-studio-install-presets-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut logic = SfxLogic {
+            state: State::empty(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        logic.state.doc.root = Some(root.clone());
+        logic.state.set_library_mode(LibraryMode::Presets);
+        assert_eq!(logic.state.presets.len(), 0);
+
+        logic.activate(ui::Action::InstallPresets);
+        assert_eq!(
+            logic.state.presets.len(),
+            crate::builtin::PRESET_NAMES.len()
+        );
+        assert!(root.join("presets").is_dir());
+        assert!(logic.state.ui.status.contains("installed"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn saving_the_current_patch_adds_a_project_preset() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "sfx-studio-save-preset-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut logic = SfxLogic {
+            state: State::demo(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        logic.state.doc.root = Some(root.clone());
+        logic.state.presets = crate::presets::PresetBank::default();
+        let name = logic.state.patch().expect("patch").name.clone();
+        assert_eq!(logic.state.presets.len(), 0);
+
+        logic.activate(ui::Action::SavePreset);
+        assert_eq!(logic.state.presets.len(), 1);
+        assert_eq!(logic.state.presets.presets[0].name, name);
+        assert!(logic.state.ui.status.contains("saved preset"));
+        assert!(root.join("presets").is_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn space_in_presets_targets_the_selected_preset() {
+        let mut logic = SfxLogic {
+            state: State::demo(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        logic.state.set_library_mode(LibraryMode::Presets);
+        logic.toggle_play();
+        assert!(logic.state.ui.status.contains("select a preset"));
+
+        logic.state.select_preset(0);
+        logic.toggle_play();
+        assert!(logic.state.ui.status.contains("no audio device"));
+        assert!(!logic.state.playback.was_playing);
+        assert_eq!(logic.state.playback.playhead, 0.0);
+    }
+
+    #[test]
+    fn wav_export_target_follows_the_active_library() {
+        let mut state = State::demo();
+        let project_name = state.export_patch().expect("project patch").name.clone();
+
+        state.set_library_mode(LibraryMode::Presets);
+        assert!(state.export_patch().is_none());
+        state.select_preset(2);
+        let preset_name = state.presets.get(2).expect("preset").name.clone();
+        assert_eq!(
+            state.export_patch().map(|patch| patch.name.as_str()),
+            Some(preset_name.as_str())
+        );
+        assert_ne!(preset_name, project_name);
+
+        state.set_library_mode(LibraryMode::Project);
+        assert_eq!(
+            state.export_patch().map(|patch| patch.name.as_str()),
+            Some(project_name.as_str())
+        );
     }
 
     #[test]

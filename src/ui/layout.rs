@@ -84,6 +84,8 @@ pub struct Layout {
     pub search_rect: Rect,
     pub library_mode_buttons: Vec<(LibraryMode, Rect)>,
     pub preset_rows: Vec<(usize, Rect)>,
+    /// One-click recovery when a project has no `presets/` files yet.
+    pub install_presets: Option<Rect>,
     pub library_scrollbar: Rect,
     pub library_thumb: Rect,
     pub library_max_start: usize,
@@ -289,6 +291,16 @@ impl Layout {
                 LibraryMode::Presets => preset_rows.push((index, rect)),
             }
         }
+
+        let install_presets = (state.view.library_mode == LibraryMode::Presets
+            && state.presets.presets.is_empty()
+            && state.doc.root.is_some())
+        .then(|| {
+            Rect::from_min_size(
+                Vec2::new(left.left() + 12.0, left.top() + 114.0),
+                Size::new(left.size.width - 24.0, 24.0),
+            )
+        });
 
         let layer_count = state.patch().map(|p| p.layers.len()).unwrap_or(0);
         let mut library_scrollbar = Rect::from_min_size(Vec2::ZERO, Size::ZERO);
@@ -555,6 +567,7 @@ impl Layout {
             search_rect,
             library_mode_buttons,
             preset_rows,
+            install_presets,
             library_scrollbar,
             library_thumb,
             library_max_start,

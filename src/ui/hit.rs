@@ -41,6 +41,12 @@ pub fn hit(state: &State, layout: &Layout, pos: Vec2) -> Option<Hit> {
     if layout.search_rect.contains(pos) {
         return Some(Hit::Search);
     }
+    if layout
+        .install_presets
+        .is_some_and(|rect| rect.contains(pos))
+    {
+        return Some(Hit::InstallPresets);
+    }
     if layout.library_scrollbar.contains(pos) {
         return Some(Hit::LibraryScrollbar);
     }

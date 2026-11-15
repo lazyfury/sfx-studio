@@ -60,13 +60,7 @@ impl AppLogic for SfxLogic {
                 let cmd = self.state.view.modifiers.meta || self.state.view.modifiers.ctrl;
                 match key {
                     Key::Space => {
-                        if self.state.playback.was_playing
-                            || self.audio.as_ref().is_some_and(|a| a.is_playing())
-                        {
-                            self.stop();
-                        } else {
-                            self.play();
-                        }
+                        self.toggle_play();
                         return EventResult::Handled;
                     }
                     Key::Tab => {
@@ -257,6 +251,10 @@ impl AppLogic for SfxLogic {
                 match pointer_hit {
                     Some(ui::Hit::Search) => {
                         self.state.view.search_focus = true;
+                        return EventResult::Handled;
+                    }
+                    Some(ui::Hit::InstallPresets) => {
+                        self.activate(ui::Action::InstallPresets);
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::Action(action)) => {
@@ -745,6 +743,7 @@ impl AppLogic for SfxLogic {
                 | ui::Hit::PatchFavorite(_)
                 | ui::Hit::PresetRow(_)
                 | ui::Hit::PresetFavorite(_)
+                | ui::Hit::InstallPresets
                 | ui::Hit::LibraryMode(_)
                 | ui::Hit::LayerRow(_)
                 | ui::Hit::Pattern(_, _)

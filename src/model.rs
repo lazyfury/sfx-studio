@@ -3,7 +3,9 @@
 //! The standalone app owns this format. It can also import/export the Godot
 //! plugin's `.tres` resources (see `tres.rs`).
 
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -492,8 +494,10 @@ pub struct Layer {
     #[serde(default)]
     pub sample_reverse: bool,
     /// Decoded samples; loaded from `sample_path` on open, never serialized.
+    /// Shared behind `Arc` so undo snapshots, preview jobs and clip copies do
+    /// not duplicate the full PCM buffer.
     #[serde(skip)]
-    pub sample_data: Option<crate::wav::SampleData>,
+    pub sample_data: Option<Arc<crate::wav::SampleData>>,
 }
 
 impl Default for Layer {
@@ -905,7 +909,7 @@ impl Default for Project {
     }
 }
 
-fn assign_id(id: &mut u32, seen: &mut Vec<u32>, next: &mut u32) {
+fn assign_id(id: &mut u32, seen: &mut HashSet<u32>, next: &mut u32) {
     if *id == 0 || seen.contains(id) {
         while seen.contains(next) {
             *next += 1;
@@ -913,7 +917,7 @@ fn assign_id(id: &mut u32, seen: &mut Vec<u32>, next: &mut u32) {
         *id = *next;
         *next += 1;
     }
-    seen.push(*id);
+    seen.insert(*id);
 }
 
 impl Project {
@@ -1303,7 +1307,8 @@ impl Project {
     /// Assign stable IDs to any patch/layer/clip that lacks one (or repeats
     /// an existing ID). Safe to call after every structural edit.
     pub fn ensure_ids(&mut self) {
-        let mut seen: Vec<u32> = Vec::new();
+        // HashSet keeps ID repair linear even for a 512-patch library.
+        let mut seen: HashSet<u32> = HashSet::new();
         let mut next = self.next_id.max(1);
         for patch in &mut self.patches {
             assign_id(&mut patch.id, &mut seen, &mut next);
@@ -1334,7 +1339,7 @@ impl Project {
                     root.join(path)
                 };
                 match crate::wav::load(&resolved) {
-                    Ok(data) => layer.sample_data = Some(data),
+                    Ok(data) => layer.sample_data = Some(Arc::new(data)),
                     Err(error) => warnings.push(format!(
                         "{}: sample {} unreadable ({error})",
                         patch.name, layer.sample_path
@@ -2608,6 +2613,14 @@ mod tests {
             .expect("sample decoded");
         assert_eq!(data.rate, 22_050);
         assert_eq!(data.samples.len(), 3);
+        // Undo, preview and clip-copy paths clone the layer; the PCM buffer
+        // must stay shared instead of being duplicated.
+        let layer = &project.patches[0].layers[0];
+        let copy = layer.clone();
+        assert!(Arc::ptr_eq(
+            layer.sample_data.as_ref().unwrap(),
+            copy.sample_data.as_ref().unwrap()
+        ));
         std::fs::remove_dir_all(&root).ok();
     }
 

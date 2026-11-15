@@ -29,6 +29,16 @@ pub fn unique_names(project: &Project) -> Vec<String> {
     names
 }
 
+/// Render one patch (project sound or project-local preset) for the manual
+/// WAV export path: 48 kHz, 24-bit stereo, deterministic TPDF dither.
+pub fn write_patch_wav(patch: &Patch, path: &Path) -> Result<f32, String> {
+    let rate = synth::PREVIEW_RATE;
+    let stereo = fx::render_patch(patch, rate);
+    synth::write_wav_stereo(path, &stereo.left, &stereo.right, rate, 24)
+        .map_err(|error| error.to_string())?;
+    Ok(stereo.frames() as f32 / rate as f32)
+}
+
 pub fn bake(project: &Project, root: &Path) -> Result<String, String> {
     let baked = root.join("audio").join("baked");
     std::fs::create_dir_all(&baked).map_err(|e| e.to_string())?;
@@ -411,10 +421,10 @@ mod tests {
         layer.release = 0.0;
         layer.sample_loop = true;
         layer.sample_path = "audio/sfx/samples/x.wav".into();
-        layer.sample_data = Some(crate::wav::SampleData {
+        layer.sample_data = Some(std::sync::Arc::new(crate::wav::SampleData {
             rate: 48_000,
             samples: vec![0.0, 0.5, -0.5, 1.0],
-        });
+        }));
         project.patches.push(patch);
 
         export_tres(&project, &root).expect("tres");
@@ -589,6 +599,25 @@ mod tests {
             .expect("exported Laser Beam");
         assert_eq!(magic.category, Category::Magic);
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn preset_wav_export_is_48k_24bit_stereo() {
+        let root = temp_project_root("preset-wav");
+        let patch = crate::builtin::generate("pickupCoin", 3).expect("builtin preset");
+        let path = root.join("coin.wav");
+        let seconds = write_patch_wav(&patch, &path).expect("write preset wav");
+        assert!(seconds > 0.05, "{seconds}");
+
+        let bytes = std::fs::read(&path).expect("read wav");
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 2);
+        assert_eq!(
+            u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+            48_000
+        );
+        assert_eq!(u16::from_le_bytes(bytes[34..36].try_into().unwrap()), 24);
         let _ = std::fs::remove_dir_all(&root);
     }
 
