@@ -1134,6 +1134,21 @@ mod tests {
     }
 
     #[test]
+    fn inspector_wheel_scroll_moves_down_on_a_downward_wheel() {
+        let mut state = State::demo();
+        state.view.viewport = Size::new(1024.0, 400.0);
+        let layout = ui::Layout::new(&state, state.view.viewport);
+        let max = layout.inspector_max_scroll();
+        assert!(max > 0.0);
+        assert!(super::input::inspector_wheel_scroll(0.0, -1.0, &layout) > 0.0);
+        assert_eq!(
+            super::input::inspector_wheel_scroll(max, -1.0, &layout),
+            max
+        );
+        assert!(super::input::inspector_wheel_scroll(10.0, 1.0, &layout) < 10.0);
+    }
+
+    #[test]
     fn chord_preset_index_follows_the_current_progression() {
         let mut music = model::Music::default();
         apply_chord_preset(&mut music, 1);

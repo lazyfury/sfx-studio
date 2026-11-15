@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节、0022 预设直接导出 WAV 见第 24 节、0023 预设可用性 / 读-编辑边界 / 采样内存见第 25 节、0024 预设文件生命周期 / 采样预设 / 和弦高亮见第 26 节、0025 预设采样懒加载 / .trash 恢复见第 27 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节、0022 预设直接导出 WAV 见第 24 节、0023 预设可用性 / 读-编辑边界 / 采样内存见第 25 节、0024 预设文件生命周期 / 采样预设 / 和弦高亮见第 26 节、0025 预设采样懒加载 / .trash 恢复见第 27 节、0026 右侧检查器滚动修复见第 28 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -549,3 +549,34 @@ cargo run -- --selfcheck
 - `restore_latest` 把 `presets/.trash/one.json.<stamp>.bak` 移回
   `presets/one.json`；冲突时使用 `_2` 后缀。
 - `./scripts/preflight.sh` 通过；工程 schema 仍为 v4，DSP/导出路径未改。
+
+## 28. 本轮修复（0026）— 右侧检查器滚动
+
+目标：修复右侧 PARAMETERS 面板滚轮方向反了、以及滚动最大值少 4px 导致
+最后一行无法完全露出。不改变布局尺寸或参数面板内容。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0026-1 | 滚轮方向 | 抽出 `inspector_wheel_scroll`；向下滚（`delta.y < 0`）增大 scroll，与左侧库列表一致 | `inspector_wheel_scroll_moves_down_on_a_downward_wheel` |
+| 0026-2 | 底部可达 | `INSPECTOR_TOP_PAD` 计入 `inspector_max_scroll`；滚动到底时最后一行 bottom == 面板 bottom | `inspector_scroll_reaches_the_last_row` |
+| 0026-3 | 拖动滚动条 | 拖动和滚轮共用 `layout.inspector_max_scroll()`，不再各自推导 | 代码路径 + 新单测 |
+
+非目标：惯性滚动、滚动条点击轨道跳转、分页/折叠参数组。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-15）：
+
+- `cargo test` 150 passed；`--selfcheck` 2 frames / 2572 commands / 126 text runs。
+- 1024×400 窗口下 `inspector_max_scroll > 0`；滚动到底时最后一行 bottom 与
+  inspector bottom 相差 < 0.01px。
+- 同尺寸下 `delta.y = -1` 使 scroll 增大，`delta.y = +1` 使 scroll 减小。
+- `./scripts/preflight.sh` 通过；工程 schema / DSP / 导出路径未改。

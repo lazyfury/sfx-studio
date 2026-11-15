@@ -574,11 +574,8 @@ impl AppLogic for SfxLogic {
                     return EventResult::Handled;
                 }
                 if layout.right.contains(*position) {
-                    let max_scroll =
-                        (layout.inspector_content_h - layout.inspector.size.height).max(0.0);
-                    self.state.view.inspector_scroll = (self.state.view.inspector_scroll
-                        - step as f32 * 22.0)
-                        .clamp(0.0, max_scroll);
+                    self.state.view.inspector_scroll =
+                        inspector_wheel_scroll(self.state.view.inspector_scroll, delta.y, &layout);
                     return EventResult::Handled;
                 }
                 if layout.timeline.contains(*position) {
@@ -755,6 +752,13 @@ impl AppLogic for SfxLogic {
             None => Some(Cursor::Default),
         }
     }
+}
+
+/// One wheel notch scrolls `22px`; positive `delta.y` means “scroll up”.
+pub(super) fn inspector_wheel_scroll(current: f32, delta_y: f32, layout: &ui::Layout) -> f32 {
+    let rows = (delta_y.abs() / 24.0).max(1.0);
+    let step = if delta_y > 0.0 { -rows } else { rows };
+    (current + step * 22.0).clamp(0.0, layout.inspector_max_scroll())
 }
 
 impl SfxLogic {
@@ -1007,8 +1011,7 @@ impl SfxLogic {
                 start_y,
                 start_scroll,
             } => {
-                let max_scroll =
-                    (layout.inspector_content_h - layout.inspector.size.height).max(0.0);
+                let max_scroll = layout.inspector_max_scroll();
                 let travel = (layout.inspector_scrollbar.size.height
                     - layout.inspector_thumb.size.height)
                     .max(1.0);

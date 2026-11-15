@@ -21,6 +21,8 @@ pub const INSPECTOR_LABEL: f32 = 82.0;
 /// Inner breathing room for inspector rows so controls never touch the panel
 /// card edges.
 pub const INSPECTOR_PAD: f32 = 6.0;
+/// Top inset of the first inspector row; included in the scroll maximum.
+pub const INSPECTOR_TOP_PAD: f32 = 4.0;
 /// Time grid used by clip/automation drags (5 ms).
 pub const CLIP_SNAP: f32 = 0.005;
 
@@ -448,6 +450,28 @@ mod tests {
             .collect();
         assert!(labels.contains(&"OPEN…"), "menu labels: {labels:?}");
         assert!(labels.contains(&"EXPORT WAV"));
+    }
+
+    #[test]
+    fn inspector_scroll_reaches_the_last_row() {
+        let mut state = State::demo();
+        state.view.viewport = Size::new(1024.0, 400.0);
+        let base = Layout::new(&state, state.view.viewport);
+        assert!(base.inspector_max_scroll() > 0.0);
+        state.view.inspector_scroll = base.inspector_max_scroll();
+        let layout = Layout::new(&state, state.view.viewport);
+        let last = layout
+            .items
+            .last()
+            .map(|item| match item {
+                Item::Section { rect, .. }
+                | Item::Param { rect, .. }
+                | Item::Options { rect, .. }
+                | Item::Toggle { rect, .. }
+                | Item::Note { rect, .. } => *rect,
+            })
+            .expect("inspector row");
+        assert!((last.bottom() - layout.inspector.bottom()).abs() < 0.01);
     }
 
     #[test]

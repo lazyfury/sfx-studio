@@ -394,7 +394,7 @@ impl Layout {
         );
         let raw = inspector_items(state);
         let mut items = Vec::new();
-        let mut y = inspector.top() + 4.0 - state.view.inspector_scroll;
+        let mut y = inspector.top() + INSPECTOR_TOP_PAD - state.view.inspector_scroll;
         let content_start = y;
         let inner_left = inspector.left() + INSPECTOR_PAD;
         let inner_width = (inspector.size.width - INSPECTOR_PAD * 2.0).max(1.0);
@@ -491,7 +491,8 @@ impl Layout {
                 Vec2::new(right.right() - 9.0, inspector.top() + 2.0),
                 Size::new(5.0, (inspector.size.height - 4.0).max(1.0)),
             );
-            let max_scroll = (inspector_content_h - inspector.size.height).max(0.001);
+            let max_scroll =
+                (inspector_content_h + INSPECTOR_TOP_PAD - inspector.size.height).max(0.001);
             let thumb_h = ((inspector.size.height / inspector_content_h) * track.size.height)
                 .clamp(18.0, track.size.height);
             let t = (state.view.inspector_scroll / max_scroll).clamp(0.0, 1.0);
@@ -577,6 +578,12 @@ impl Layout {
             inspector_scrollbar,
             inspector_thumb,
         }
+    }
+
+    /// Maximum inspector scroll. Includes the top inset so the final row can
+    /// be fully revealed instead of stopping four pixels short.
+    pub fn inspector_max_scroll(&self) -> f32 {
+        (self.inspector_content_h + INSPECTOR_TOP_PAD - self.inspector.size.height).max(0.0)
     }
 
     pub fn time_x(&self, time: f32) -> f32 {
