@@ -61,6 +61,14 @@ cargo run -- --bake  <project-dir>   # audio/baked + sfx_manifest.json
 cargo run -- --export <project-dir>  # audio/sfx/*.tres + music.tres
 cargo run -- --project <project-dir> # open the GUI on a folder
 cargo run -- --help
+
+# Builtin presets and demo audio
+cargo run -- --list-presets
+cargo run -- --preset pickupCoin --seed 3 --out coin.wav
+cargo run -- --install-presets <project-dir>   # add missing builtins
+cargo run -- --demo <new-dir>                  # playable demo pack
+cargo run -- --demo-track boss_theme --out boss.wav
+cargo run -- --demo-reel --out reel.wav
 ```
 
 ## Workflow
@@ -131,8 +139,8 @@ project plus an internal preset library:
 <project>/
 ├── sfx.project.json
 ├── presets/              # project-local presets, one Patch JSON per file
-│   ├── laser.json
-│   ├── coin.json
+│   ├── laser.json        # 11 hand-built demo sounds
+│   ├── pickup_coin.json  # + 11 jsfxr-style builtin families
 │   └── .favorites.json   # optional UI favourites
 └── audio/...
 ```
@@ -143,6 +151,44 @@ copies its layers (with fresh IDs) into the current patch and anchors its clip
 arrangement at the drop time. The current patch's DSP version, space and room
 are kept, so a v2 project still renders the inserted layers with the legacy
 chain until `UPGRADE TO HD`.
+
+## Builtin presets and demo tracks
+
+`src/builtin.rs` mirrors the small jsfxr library surface
+(`sfxr.generate("pickupCoin")`): the eleven families `pickupCoin`,
+`laserShoot`, `explosion`, `powerUp`, `hitHurt`, `jump`, `blipSelect`,
+`synth`, `tone`, `click` and `random` are available by name, with snake_case
+and uppercase spellings accepted. Every family is a normal `Patch`, so it can
+be dropped on the timeline, written to `presets/` or rendered by the CLI.
+Generation is deterministic for a given `(name, seed)` pair; `--seed` is the
+equivalent of jsfxr's "generate another one".
+
+`--new` seeds a fresh project with **11 hand-built demo presets + 11 builtin
+presets** (22 files). Existing projects can pull in only the missing builtins
+with `--install-presets <project-dir>`; nothing already in `presets/` is
+overwritten.
+
+`src/demo.rs` ships three small arrangements — `NEON DRIVE` (138 BPM),
+`BOSS THEME` (168 BPM) and `STAR MENU` (92 BPM) — plus sound-effect cues placed
+over the music. The MUSIC inspector has a `DEMO TRACKS` section that loads any
+of them into the current project (undoable). `--demo <new-dir>` writes a
+self-contained pack:
+
+```text
+<demo-dir>/
+├── sfx.project.json          # 11 builtin patches + NEON DRIVE music
+├── presets/                  # the same 11 presets (draggable in the GUI)
+├── audio/baked/              # per-sound WAVs + music.wav + manifest
+└── audio/demo/
+    ├── neon_drive.wav        # music + cue mix, 48 kHz / 24-bit stereo
+    ├── boss_theme.wav
+    ├── star_menu.wav
+    ├── reel.wav              # every preset in jsfxr order
+    └── index.json            # seed, durations, file references
+```
+
+Open it with `--project <demo-dir>`, or audition the WAVs directly. The demo
+pack refuses to overwrite an existing `sfx.project.json`.
 
 ## Godot side
 

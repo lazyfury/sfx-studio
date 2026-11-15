@@ -107,6 +107,58 @@ impl PresetBank {
         Ok(written)
     }
 
+    /// Add only presets that are not already present by patch name *or* by
+    /// target file stem. Existing files are never rewritten, which makes the
+    /// CLI's `--install-presets` safe on a project the user has edited.
+    pub fn install_missing(root: &Path, patches: &[Patch]) -> io::Result<usize> {
+        let dir = root.join(PRESETS_DIR);
+        std::fs::create_dir_all(&dir)?;
+        let mut names = HashSet::new();
+        let mut files = HashSet::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let is_json = path.extension().is_some_and(|ext| ext == "json");
+                let hidden = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with('.'));
+                if !is_json || hidden {
+                    continue;
+                }
+                if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                    files.insert(stem.to_lowercase());
+                }
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if let Ok(patch) = serde_json::from_str::<Patch>(&text) {
+                        names.insert(patch.name.to_lowercase());
+                    }
+                }
+            }
+        }
+        let mut written = 0;
+        for (index, patch) in patches.iter().enumerate() {
+            if names.contains(&patch.name.to_lowercase()) {
+                continue;
+            }
+            let base = preset_file_stem(&patch.name, index);
+            let mut stem = base.clone();
+            let mut suffix = 2;
+            while files.contains(&stem.to_lowercase()) || dir.join(format!("{stem}.json")).exists()
+            {
+                stem = format!("{base}_{suffix}");
+                suffix += 1;
+            }
+            let text = serde_json::to_string_pretty(patch)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            model::write_atomic(&dir.join(format!("{stem}.json")), text.as_bytes())?;
+            files.insert(stem.to_lowercase());
+            names.insert(patch.name.to_lowercase());
+            written += 1;
+        }
+        Ok(written)
+    }
+
     pub fn len(&self) -> usize {
         self.presets.len()
     }
@@ -227,6 +279,31 @@ mod tests {
         assert_eq!(bank.len(), 2);
         assert!(bank.is_favorite(&two));
         assert!(!bank.is_favorite(&one));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn install_missing_never_overwrites_existing_names_or_files() {
+        let root = temp_dir("preset-install");
+        let dir = root.join(PRESETS_DIR);
+        std::fs::create_dir_all(&dir).expect("preset dir");
+        let existing = Patch::new_layer("tone", Wave::Sine);
+        std::fs::write(
+            dir.join("custom.json"),
+            serde_json::to_string(&existing).expect("json"),
+        )
+        .expect("write custom");
+        // A different preset whose name is free, but whose file stem collides.
+        let collides = Patch::new_layer("custom", Wave::Noise);
+        let fresh = Patch::new_layer("brand_new", Wave::Saw);
+        let written = PresetBank::install_missing(&root, &[existing.clone(), collides, fresh])
+            .expect("install");
+        assert_eq!(written, 2);
+        assert!(dir.join("custom_2.json").exists());
+        assert!(dir.join("brand_new.json").exists());
+        let text = std::fs::read_to_string(dir.join("custom.json")).expect("read");
+        let kept: Patch = serde_json::from_str(&text).expect("parse");
+        assert_eq!(kept.layers[0].wave, Wave::Sine);
         let _ = std::fs::remove_dir_all(&root);
     }
 

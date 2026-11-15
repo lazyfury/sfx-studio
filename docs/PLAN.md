@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -371,3 +371,47 @@ cargo run -- --selfcheck
   未在窗口环境手测启动目录选择与指针拖拽（本环境无 GUI），由
   `create_project`/`open_folder`/`drop_preset`/paint 单测与 headless selfcheck 覆盖。
 - 工程 schema 仍为 v4；CLI/bake/`.tres` 导出路径未改。
+
+## 23. 本轮增量（0021）— jsfxr 预设目录 / demo 音轨
+
+目标：参考 jsfxr 的 library 用法（`sfxr.generate(name)` + `sfxr.toWave`），
+为 SFX LAB 提供「按名字生成预设」和可直接试听的 demo 音轨；不改变工程
+schema、DSP 或 Godot 导出路径。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0021-1 | jsfxr 预设名 | 新增 `src/builtin.rs`：`pickupCoin`/`laserShoot`/`explosion`/`powerUp`/`hitHurt`/`jump`/`blipSelect`/`synth`/`tone`/`click`/`random` 共 11 个 family | `every_jsfxr_family_is_available_by_any_spelling` |
+| 0021-2 | 确定性 | `generate(name, seed)` 对同一 `(name, seed)` 完全可复现；`random` 选择一个真实 family 并保留 `random_sfx` 名 | `generation_is_deterministic_per_seed`、`random_is_a_real_family_with_a_stable_name` |
+| 0021-3 | 普通 Patch | 每个预设都是 `Patch`（多 layer、v3 DSP、space/room、category）；可直接进 `presets/*.json` / 时间线 | `bank_has_unique_names_and_renders_audible_audio`（11/11 有声、有限、≤ 1.0） |
+| 0021-4 | CLI 单音 | `--list-presets`、`--preset NAME [--seed N] [--out FILE]`，输出 48 kHz / 24-bit stereo WAV | `/tmp/coin.wav`：0.33 s、peak 0.950、RMS 0.153 |
+| 0021-5 | 新工程预设 | `--new` / NEW PROJECT 写入 11 个手调 demo + 11 个 builtin preset；`--install-presets DIR` 只补缺失项，不覆盖已有文件 | `--new`：1 sound / 22 presets；`install_missing_never_overwrites_existing_names_or_files` |
+| 0021-6 | demo 音轨 | `src/demo.rs`：`NEON DRIVE` 138 BPM、`BOSS THEME` 168 BPM、`STAR MENU` 92 BPM；music bed + 预设 cue，混音归一到 −0.9 dBFS | `the_three_tracks_have_unique_keys_and_a_beat`、`rendered_tracks_are_finite_audible_and_cover_the_cues` |
+| 0021-7 | preset reel | `--demo-reel` 按 jsfxr 顺序串联 11 个预设，间隔 0.18 s | `reel_visits_every_preset_in_order`；`reel.wav` 7.95 s |
+| 0021-8 | demo pack | `--demo DIR`：工程 + `presets/` + `audio/baked` + `audio/demo/{3 tracks,reel,index.json}`；拒绝覆盖已有工程 | `demo_pack_writes_a_loadable_project_presets_tracks_and_reel`、`--dump` 可读 |
+| 0021-9 | GUI | MUSIC 检查器新增 `DEMO TRACKS`（NEON DRIVE / BOSS THEME / STAR MENU）；载入替换当前 music，可撤销 | `music_inspector_follows_the_registry`、`loading_a_demo_track_replaces_the_music_and_is_undoable` |
+
+非目标：逐样本复刻 sfxr 的 8-bit 波形与参数曲线；把 `randomize` 改成
+jsfxr 的参数空间；把 demo 音轨直接嵌入 Godot 场景（demo WAV 仅用于试听）。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+./scripts/review_gate.sh
+```
+
+实测（2026-11-15）：
+
+- `cargo test` 133 passed；`--selfcheck` 2 frames / 2572 commands / 126 text runs。
+- `--demo /tmp/sfx-demo-pack --seed 7`：11 presets + 3 tracks + reel + `index.json`；
+  `--dump` 显示 schema v4、music 138 BPM / 4 bars。
+- `--preset pickupCoin --seed 3`：0.33 s / 48 kHz / 24-bit / peak 0.950。
+- `--demo-track boss_theme`：12.12 s（8 bars + explosion 尾音），peak 0.900。
+- `--demo-reel`：7.95 s / 11 presets，peak 0.900。
+- `--new /tmp/sfx-new-proj`：22 个 preset 文件（11 demo + 11 builtin）；
+  `--install-presets` 在空工程写入 11 个，第二次报告 already has all。
+- 工程 schema 仍为 v4；bake / `.tres` / parity 代码路径未改。

@@ -64,6 +64,7 @@ pub enum Action {
     ArpWave(MusicWave),
     TogglePatterns,
     ChordPreset(usize),
+    DemoTrack(usize),
     Transpose(i32),
     ResetPatterns,
     AddClip,
@@ -276,6 +277,7 @@ fn action_tip(action: Action) -> &'static str {
         Action::ArpWave(_) => "琶音波形 · Arp wave",
         Action::TogglePatterns => "自定义 16 步节奏 · Pattern",
         Action::ChordPreset(_) => "和弦预设 · Chord preset",
+        Action::DemoTrack(_) => "载入 demo 编曲 · Demo track",
         Action::Transpose(_) => "整体移调 · Transpose",
         Action::ResetPatterns => "重置节奏 · Reset pattern",
     }
@@ -686,10 +688,29 @@ mod tests {
         }
         assert_eq!(
             sections,
-            vec!["MUSIC", "INSTRUMENTS", "MIX", "HARMONY", "PATTERN"]
+            vec![
+                "MUSIC",
+                "INSTRUMENTS",
+                "MIX",
+                "DEMO TRACKS",
+                "HARMONY",
+                "PATTERN"
+            ]
         );
         assert!(params.contains(&"BPM".to_string()));
         assert!(params.contains(&"SEED".to_string()));
+        let demo_tracks: Vec<_> = items
+            .iter()
+            .flat_map(|item| match item {
+                RawItem::Options { options, .. } => options.as_slice(),
+                _ => &[],
+            })
+            .filter_map(|(label, action, _)| match action {
+                Action::DemoTrack(_) => Some(label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(demo_tracks, vec!["NEON DRIVE", "BOSS THEME", "STAR MENU"]);
     }
 
     #[test]

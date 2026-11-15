@@ -53,6 +53,7 @@ impl SfxLogic {
                 | A::ArpWave(_)
                 | A::TogglePatterns
                 | A::ChordPreset(_)
+                | A::DemoTrack(_)
                 | A::Transpose(_)
                 | A::ResetPatterns
                 | A::AddClip
@@ -212,6 +213,15 @@ impl SfxLogic {
             A::ChordPreset(index) => {
                 apply_chord_preset(&mut self.state.doc.project.music, index);
                 self.state.mark_music_dirty();
+            }
+            A::DemoTrack(index) => {
+                if let Some(track) = crate::demo::tracks().get(index) {
+                    self.state.doc.project.music = track.music.clone();
+                    self.state.mark_music_dirty();
+                    self.state.playback.playhead = 0.0;
+                    let title = track.title;
+                    self.state.toast(format!("demo track · {title}"));
+                }
             }
             A::Transpose(delta) => {
                 self.state.doc.project.music.transpose(delta);

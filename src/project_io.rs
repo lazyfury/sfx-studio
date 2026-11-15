@@ -95,7 +95,10 @@ pub(crate) fn create_project(folder: &Path) -> Result<(Project, Vec<String>), St
     let mut project = Project::starter(name);
     let warnings = project.validate();
     model::save_project(folder, &project).map_err(|error| error.to_string())?;
-    let presets = Project::demo("preset bank").patches;
+    // Preset bank = the hand-built demo sounds + the jsfxr-style builtin
+    // families, so a fresh project can drag either style onto the timeline.
+    let mut presets = Project::demo("preset bank").patches;
+    presets.extend(crate::builtin::bank(20_240_607));
     if let Err(error) = PresetBank::write_presets(folder, &presets) {
         return Err(format!("presets: {error}"));
     }

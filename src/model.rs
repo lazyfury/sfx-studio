@@ -2295,6 +2295,7 @@ pub enum MusicRowSpec {
     Field(MusicField),
     BassWaveOptions,
     ArpWaveOptions,
+    DemoTracks,
     ChordPresets,
     TransposeOptions,
     PatternToggle,
@@ -2341,6 +2342,10 @@ static MUSIC_SECTIONS: &[MusicSectionSpec] = &[
         ],
     },
     MusicSectionSpec {
+        title: "DEMO TRACKS",
+        rows: &[MusicRowSpec::DemoTracks],
+    },
+    MusicSectionSpec {
         title: "HARMONY",
         rows: &[MusicRowSpec::ChordPresets, MusicRowSpec::TransposeOptions],
     },
@@ -2371,7 +2376,14 @@ mod tests {
             .collect();
         assert_eq!(
             titles,
-            vec!["MUSIC", "INSTRUMENTS", "MIX", "HARMONY", "PATTERN"]
+            vec![
+                "MUSIC",
+                "INSTRUMENTS",
+                "MIX",
+                "DEMO TRACKS",
+                "HARMONY",
+                "PATTERN"
+            ]
         );
         let music_fields: Vec<_> = music_sections()
             .iter()

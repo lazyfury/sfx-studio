@@ -15,7 +15,7 @@ use igui_winit::{
 
 use crate::app::{SfxLogic, State};
 use crate::project_io::{create_project, load_folder, open_folder, print_warnings};
-use crate::{export, theme};
+use crate::{builtin, demo, export, fx, presets::PresetBank, synth, theme};
 
 pub fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -28,10 +28,100 @@ pub fn run() {
              --bake DIR     write audio/baked + manifest\n\
              --export DIR   write audio/sfx/*.tres + music.tres\n\
              --dump DIR     print a short project summary\n\
+             --list-presets list the bundled jsfxr-style preset families\n\
+             --preset NAME  render one builtin preset (--seed N, --out FILE.wav)\n\
+             --install-presets DIR  add missing builtin presets to a project\n\
+             --demo DIR     write a playable demo pack (presets + tracks + reel)\n\
+             --demo-track NAME  render one demo track (--out FILE.wav)\n\
+             --demo-reel    render every preset in sequence (--out FILE.wav)\n\
              --parity-fixtures DIR  write Rust/Godot parity fixtures\n\
              --parity-check DIR     compare Rust and Godot renders\n\
              --selfcheck    headless layout smoke test"
         );
+        return;
+    }
+    if args.iter().any(|arg| arg == "--list-presets") {
+        for name in builtin::PRESET_NAMES {
+            println!("{:<12} {}", name, builtin::patch_name(name));
+        }
+        return;
+    }
+    let seed = flag_value(&args, "--seed")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    if let Some(index) = args.iter().position(|arg| arg == "--preset") {
+        let Some(name) = args.get(index + 1) else {
+            eprintln!("--preset needs a name (try --list-presets)");
+            std::process::exit(2);
+        };
+        let out = flag_value(&args, "--out")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(format!("{name}.wav")));
+        match render_preset(name, seed, &out) {
+            Ok(message) => println!("{message}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "--install-presets") {
+        let Some(path) = args.get(index + 1) else {
+            eprintln!("--install-presets needs a project folder");
+            std::process::exit(2);
+        };
+        match install_presets(&PathBuf::from(path), seed) {
+            Ok(message) => println!("{message}"),
+            Err(error) => {
+                eprintln!("install presets failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "--demo-track") {
+        let Some(name) = args.get(index + 1) else {
+            eprintln!("--demo-track needs a track name (neon_drive, boss_theme, star_menu)");
+            std::process::exit(2);
+        };
+        let out = flag_value(&args, "--out")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(format!("{name}.wav")));
+        match render_demo_track(name, seed, &out) {
+            Ok(message) => println!("{message}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if args.iter().any(|arg| arg == "--demo-reel") {
+        let out = flag_value(&args, "--out")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("reel.wav"));
+        match render_reel(seed, &out) {
+            Ok(message) => println!("{message}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "--demo") {
+        let Some(path) = args.get(index + 1).map(PathBuf::from) else {
+            eprintln!("--demo needs an output folder");
+            std::process::exit(2);
+        };
+        match demo::write_pack(&path, seed) {
+            Ok(message) => println!("{message}"),
+            Err(error) => {
+                eprintln!("demo pack failed: {error}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
     if let Some(index) = args.iter().position(|arg| arg == "--parity-fixtures") {
@@ -205,6 +295,85 @@ pub fn run() {
         }
     }
     build_app(state, false).run();
+}
+
+fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    let index = args.iter().position(|arg| arg == flag)?;
+    args.get(index + 1).map(String::as_str)
+}
+
+fn render_preset(name: &str, seed: u32, out: &std::path::Path) -> Result<String, String> {
+    if !builtin::is_builtin(name) {
+        return Err(format!(
+            "unknown preset '{name}' · available: {}",
+            builtin::PRESET_NAMES.join(", ")
+        ));
+    }
+    let patch = builtin::generate(name, seed).ok_or_else(|| format!("unknown preset '{name}'"))?;
+    let rate = synth::PREVIEW_RATE;
+    let stereo = fx::render_patch(&patch, rate);
+    synth::write_wav_stereo(out, &stereo.left, &stereo.right, rate, 24)
+        .map_err(|error| error.to_string())?;
+    Ok(format!(
+        "{} → {} · {:.2}s · 48 kHz / 24-bit stereo · seed {seed}",
+        patch.name,
+        out.display(),
+        stereo.frames() as f32 / rate as f32
+    ))
+}
+
+fn render_demo_track(name: &str, seed: u32, out: &std::path::Path) -> Result<String, String> {
+    let tracks = demo::tracks();
+    let index = demo::find(name).ok_or_else(|| {
+        format!(
+            "unknown demo track '{name}' · available: {}",
+            tracks
+                .iter()
+                .map(|track| track.key)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    let track = &tracks[index];
+    let rate = synth::PREVIEW_RATE;
+    let stereo = demo::render_track(track, seed, rate);
+    synth::write_wav_stereo(out, &stereo.left, &stereo.right, rate, 24)
+        .map_err(|error| error.to_string())?;
+    Ok(format!(
+        "{} → {} · {:.2}s · 48 kHz / 24-bit stereo · seed {seed}",
+        track.title,
+        out.display(),
+        stereo.frames() as f32 / rate as f32
+    ))
+}
+
+fn render_reel(seed: u32, out: &std::path::Path) -> Result<String, String> {
+    let rate = synth::PREVIEW_RATE;
+    let stereo = demo::render_reel(seed, rate);
+    synth::write_wav_stereo(out, &stereo.left, &stereo.right, rate, 24)
+        .map_err(|error| error.to_string())?;
+    Ok(format!(
+        "preset reel → {} · {:.2}s · {} presets · seed {seed}",
+        out.display(),
+        stereo.frames() as f32 / rate as f32,
+        builtin::PRESET_NAMES.len()
+    ))
+}
+
+fn install_presets(folder: &std::path::Path, seed: u32) -> Result<String, String> {
+    let written = PresetBank::install_missing(folder, &builtin::bank(seed))
+        .map_err(|error| error.to_string())?;
+    if written == 0 {
+        return Ok(format!(
+            "{} already has all {} builtin preset(s)",
+            folder.display(),
+            builtin::PRESET_NAMES.len()
+        ));
+    }
+    Ok(format!(
+        "installed {written} builtin preset(s) → {}/presets/",
+        folder.display()
+    ))
 }
 
 fn new_demo(folder: &std::path::Path) -> Result<(), String> {

@@ -1739,6 +1739,21 @@ pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
                             })
                             .collect(),
                     }),
+                    MusicRowSpec::DemoTracks => items.push(RawItem::Options {
+                        label: "TRACK".into(),
+                        columns: 3,
+                        options: crate::demo::tracks()
+                            .iter()
+                            .enumerate()
+                            .map(|(index, track)| {
+                                (
+                                    track.title.into(),
+                                    Action::DemoTrack(index),
+                                    *music == track.music,
+                                )
+                            })
+                            .collect(),
+                    }),
                     MusicRowSpec::ChordPresets => items.push(RawItem::Options {
                         label: "CHORDS".into(),
                         columns: 3,

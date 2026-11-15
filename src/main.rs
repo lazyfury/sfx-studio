@@ -2,7 +2,9 @@
 
 mod app;
 mod audio;
+mod builtin;
 mod cli;
+mod demo;
 mod export;
 mod fx;
 mod icons;

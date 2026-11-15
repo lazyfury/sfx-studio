@@ -1109,6 +1109,26 @@ mod tests {
     }
 
     #[test]
+    fn loading_a_demo_track_replaces_the_music_and_is_undoable() {
+        let mut logic = SfxLogic {
+            state: State::demo(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        let before = logic.state.doc.project.music.clone();
+        let track = crate::demo::tracks().remove(1);
+        assert_ne!(before, track.music);
+        let undo_before = logic.state.doc.undo.len();
+        logic.activate(ui::Action::DemoTrack(1));
+        assert_eq!(logic.state.doc.project.music, track.music);
+        assert!(logic.state.doc.dirty);
+        assert_eq!(logic.state.doc.undo.len(), undo_before + 1);
+        logic.state.undo();
+        assert_eq!(logic.state.doc.project.music, before);
+    }
+
+    #[test]
     fn variations_are_inserted_and_kept_in_order() {
         let mut logic = SfxLogic {
             state: State::demo(),
