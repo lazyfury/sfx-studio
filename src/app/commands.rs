@@ -26,46 +26,33 @@ impl SfxLogic {
             render: background_preview
                 .then(render::RenderWorker::spawn)
                 .flatten(),
+            layout: None,
         }
     }
 
     pub(super) fn activate(&mut self, action: ui::Action) {
         use ui::Action as A;
-        self.state.view.menu_open = false;
+        self.state.view.overlays.clear();
         if !ui::action_available(&self.state, action) {
             self.state
                 .toast(ui::action_unavailable_message(&self.state, action));
             return;
         }
         self.state.commit_edit();
-        let snapshot = matches!(
-            action,
-            A::DeletePatch
-                | A::DuplicatePatch
-                | A::AddLayer
-                | A::DuplicateLayer
-                | A::DeleteLayer
-                | A::SetWave(_)
-                | A::SetFilter(_)
-                | A::SetEnv(_)
-                | A::SetToneEnv(_)
-                | A::BassWave(_)
-                | A::ArpWave(_)
-                | A::TogglePatterns
-                | A::ChordPreset(_)
-                | A::DemoTrack(_)
-                | A::Transpose(_)
-                | A::ResetPatterns
-                | A::AddClip
-                | A::DeleteClip
-                | A::Randomize
-                | A::Vary
-                | A::LoadSample
-                | A::ToggleSampleLoop
-                | A::ToggleSampleReverse
-        );
-        if snapshot {
-            self.push_undo();
+        // Menu/keyboard edits act on the project. If the user was inspecting
+        // an AUDIO/MUSIC row, reclaim the document focus first so the result
+        // is visible and the inspector follows the command. PRESET focus is
+        // still read-only (`action_available` already rejected these actions).
+        if ui::is_project_edit(action)
+            && matches!(
+                self.state.selected_library_kind(),
+                Some(crate::library::LibraryKind::Audio | crate::library::LibraryKind::Music)
+            )
+        {
+            self.state.focus_document();
+        }
+        if let Some(label) = ui::action_meta(action).undo {
+            self.state.push_undo_label(label);
         }
         match action {
             A::NewProject => self.new_project(),
@@ -76,6 +63,12 @@ impl SfxLogic {
             A::RenamePreset => self.open_rename_preset(),
             A::DeletePreset => self.open_delete_preset(),
             A::RestorePreset => self.restore_preset(),
+            A::RenameAudio => self.open_rename_audio(),
+            A::DeleteAudio => self.open_delete_audio(),
+            A::RestoreAudio => self.restore_audio(),
+            A::RenameMusic => self.open_rename_music(),
+            A::DeleteMusic => self.open_delete_music(),
+            A::RestoreMusic => self.restore_music(),
             A::Bake => self.bake(),
             A::Tres => self.export_tres(),
             A::ExportWav => self.export_wav(),
@@ -85,20 +78,8 @@ impl SfxLogic {
             A::Favorite => self.toggle_favorite(),
             A::CategoryCycle => self.cycle_category(),
             A::FavoriteFilter => self.toggle_favorite_filter(),
-            A::TabPatches => {
-                self.state.view.tab = Tab::Patches;
-                self.state.view.inspector_scroll = 0.0;
-                self.state.playback.defer_render = true;
-                self.state.bump_view();
-                self.state.playback.playhead = 0.0;
-            }
-            A::TabMusic => {
-                self.state.view.tab = Tab::Music;
-                self.state.view.inspector_scroll = 0.0;
-                self.state.playback.defer_render = true;
-                self.state.bump_view();
-                self.state.playback.playhead = 0.0;
-            }
+            A::TabPatches => self.switch_tab(Tab::Patches),
+            A::TabMusic => self.switch_tab(Tab::Music),
             A::NewPatch => {
                 let name = self.state.doc.project.next_patch_name();
                 self.state.view.modal = Some(Modal {
@@ -135,7 +116,7 @@ impl SfxLogic {
                     });
                 }
             }
-            A::Play => self.play(),
+            A::Play => self.play_focused(),
             A::Stop => self.stop(),
             A::Loop => self.state.playback.loop_play = !self.state.playback.loop_play,
             A::AddLayer => {
@@ -297,6 +278,18 @@ impl SfxLogic {
         self.state.push_undo();
     }
 
+    /// Switch the centre view and return focus to the document. Tab switching
+    /// must not leave a PRESET/AUDIO row owning the inspector or the transport,
+    /// otherwise the tab appears to do nothing.
+    pub(super) fn switch_tab(&mut self, tab: Tab) {
+        self.stop();
+        self.state.view.tab = tab;
+        self.state.focus_document();
+        self.state.view.inspector_scroll = 0.0;
+        self.state.playback.defer_render = true;
+        self.state.bump_view();
+    }
+
     fn new_project(&mut self) {
         let Some(folder) = rfd::FileDialog::new()
             .set_title("Choose a folder for the new SFX project")
@@ -455,9 +448,7 @@ impl SfxLogic {
             }
             Ok(written) => {
                 let warnings = self.state.presets.load_project(&root);
-                self.state.view.selected_preset = None;
                 self.state.view.selected_library = None;
-                self.state.view.preset_scroll = 0;
                 self.state.bump_view();
                 self.state.toast(if warnings.is_empty() {
                     format!("installed {written} builtin presets")
@@ -510,7 +501,7 @@ impl SfxLogic {
     }
 
     fn selected_preset(&self) -> Option<(usize, String)> {
-        let index = self.state.view.selected_preset?;
+        let index = self.state.selected_preset_index()?;
         let name = self.state.presets.get(index)?.name.clone();
         Some((index, name))
     }
@@ -537,6 +528,135 @@ impl SfxLogic {
             title: "DELETE PRESET?".into(),
             text: format!("{name} → presets/.trash/"),
             action: ModalAction::ConfirmDeletePreset,
+        });
+        self.state.bump_view();
+    }
+
+    fn restore_audio(&mut self) {
+        let Some(root) = self.state.doc.root.clone() else {
+            self.state.toast("open a project first");
+            return;
+        };
+        match self.state.audio_bank.restore_latest(&root) {
+            Ok(Some(name)) => {
+                self.state.audio_bank.load_project(&root);
+                if let Some(index) = self
+                    .state
+                    .audio_bank
+                    .assets()
+                    .iter()
+                    .position(|asset| asset.name == name)
+                {
+                    self.state.select_audio(index);
+                }
+                self.state.bump_view();
+                self.state.toast(format!("restored audio '{name}'"));
+            }
+            Ok(None) => self.state.toast("no deleted audio in audio/.trash/"),
+            Err(error) => self.state.toast(format!("restore audio failed: {error}")),
+        }
+    }
+
+    fn restore_music(&mut self) {
+        let Some(root) = self.state.doc.root.clone() else {
+            self.state.toast("open a project first");
+            return;
+        };
+        match self.state.music_bank.restore_latest(&root) {
+            Ok(Some(name)) => {
+                self.state.music_bank.load_project(&root);
+                if let Some(index) = self
+                    .state
+                    .music_bank
+                    .assets()
+                    .iter()
+                    .position(|asset| asset.name == name)
+                {
+                    self.state.select_music(index);
+                }
+                self.state.bump_view();
+                self.state.toast(format!("restored music '{name}'"));
+            }
+            Ok(None) => self.state.toast("no deleted music in music/.trash/"),
+            Err(error) => self.state.toast(format!("restore music failed: {error}")),
+        }
+    }
+
+    fn open_rename_audio(&mut self) {
+        let Some(asset) = self.state.selected_audio() else {
+            self.state.toast("select an audio file first");
+            return;
+        };
+        let stem = std::path::Path::new(&asset.name)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("audio")
+            .to_string();
+        self.state.view.modal = Some(Modal {
+            title: "RENAME AUDIO".into(),
+            text: stem,
+            action: ModalAction::RenameAudio,
+        });
+        self.state.bump_view();
+    }
+
+    fn open_delete_audio(&mut self) {
+        let Some(asset) = self.state.selected_audio() else {
+            self.state.toast("select an audio file first");
+            return;
+        };
+        let referenced = self.state.doc.project.patches.iter().any(|patch| {
+            patch
+                .layers
+                .iter()
+                .any(|layer| layer.sample_path == asset.path)
+        }) || self.state.presets.presets.iter().any(|patch| {
+            patch
+                .layers
+                .iter()
+                .any(|layer| layer.sample_path == asset.path)
+        });
+        let text = if referenced {
+            format!("{} (被 SAMPLE 层引用) → audio/.trash/", asset.name)
+        } else {
+            format!("{} → audio/.trash/", asset.name)
+        };
+        self.state.view.modal = Some(Modal {
+            title: "DELETE AUDIO?".into(),
+            text,
+            action: ModalAction::ConfirmDeleteAudio,
+        });
+        self.state.bump_view();
+    }
+
+    fn open_rename_music(&mut self) {
+        let Some(index) = self.state.selected_music() else {
+            self.state.toast("select a music file first");
+            return;
+        };
+        let Some(asset) = self.state.music_bank.get(index) else {
+            return;
+        };
+        self.state.view.modal = Some(Modal {
+            title: "RENAME MUSIC".into(),
+            text: asset.name.clone(),
+            action: ModalAction::RenameMusic,
+        });
+        self.state.bump_view();
+    }
+
+    fn open_delete_music(&mut self) {
+        let Some(index) = self.state.selected_music() else {
+            self.state.toast("select a music file first");
+            return;
+        };
+        let Some(asset) = self.state.music_bank.get(index) else {
+            return;
+        };
+        self.state.view.modal = Some(Modal {
+            title: "DELETE MUSIC?".into(),
+            text: format!("{} → music/.trash/", asset.name),
+            action: ModalAction::ConfirmDeleteMusic,
         });
         self.state.bump_view();
     }
@@ -592,8 +712,10 @@ impl SfxLogic {
 
     pub(super) fn export_wav(&mut self) {
         let mut sample_warnings = Vec::new();
-        if let Some(LibraryKey::Preset(index)) = self.state.view.selected_library {
-            sample_warnings = self.state.presets.hydrate(index);
+        if let Some(LibraryKey::Preset(id)) = self.state.view.selected_library {
+            if let Some(index) = self.state.presets.index_of(id) {
+                sample_warnings = self.state.presets.hydrate(index);
+            }
         }
         let Some(patch) = self.state.export_patch().cloned() else {
             self.state.toast("select a sound or preset to export");
@@ -674,8 +796,15 @@ impl SfxLogic {
                 return;
             }
         };
-        self.push_undo();
-        let stored = self.store_sample(&path);
+        self.apply_sample(&path, data);
+    }
+
+    /// Apply a decoded sample as a layer edit. Kept separate from the file
+    /// dialog so the undo transaction is testable and only fires after a
+    /// successful load (a cancelled picker must not create an undo entry).
+    pub(super) fn apply_sample(&mut self, source: &std::path::Path, data: crate::wav::SampleData) {
+        self.state.begin_edit();
+        let stored = self.store_sample(source);
         if let Some(layer) = self.state.layer_mut() {
             layer.wave = Wave::Sample;
             layer.sample_pitch = 0.0;
@@ -687,21 +816,16 @@ impl SfxLogic {
             layer.sample_data = Some(std::sync::Arc::new(data));
         }
         if let Some(root) = self.state.doc.root.clone() {
-            let selected = self.state.selected_audio().map(|asset| asset.path.clone());
+            let selected = self.state.selected_audio().map(|asset| asset.id);
             self.state.audio_bank.load_project(&root);
-            if let Some(path) = selected {
-                if let Some(index) = self
-                    .state
-                    .audio_bank
-                    .assets()
-                    .iter()
-                    .position(|asset| asset.path == path)
-                {
-                    self.state.view.selected_library = Some(LibraryKey::Audio(index));
+            if let Some(id) = selected {
+                if self.state.audio_bank.get_id(id).is_some() {
+                    self.state.view.selected_library = Some(LibraryKey::Audio(id));
                 }
             }
         }
         self.state.mark_dirty();
+        self.state.commit_edit();
         self.state.bump_view();
         self.state.toast("sample loaded");
     }
@@ -840,6 +964,7 @@ impl SfxLogic {
             return;
         }
         audio.play(samples, 2, 0, self.state.playback.loop_play);
+        self.state.playback.source = Some(PlaybackSource::Preset);
         self.state.playback.preset_playing = true;
         self.state.playback.was_playing = true;
         self.state.playback.seeked = false;
@@ -871,18 +996,24 @@ impl SfxLogic {
                     self.state.select_patch(index);
                 }
             }
-            LibraryKey::Audio(index) => {
-                self.state.view.tab = Tab::Patches;
-                self.state.playback.defer_render = true;
-                self.state.select_audio(index);
+            LibraryKey::Audio(id) => {
+                if let Some(index) = self.state.audio_bank.index_of(id) {
+                    self.state.view.tab = Tab::Patches;
+                    self.state.playback.defer_render = true;
+                    self.state.select_audio(index);
+                }
             }
-            LibraryKey::Preset(index) => {
-                self.state.select_preset(index);
+            LibraryKey::Preset(id) => {
+                if let Some(index) = self.state.presets.index_of(id) {
+                    self.state.select_preset(index);
+                }
             }
-            LibraryKey::Music(key) => {
-                self.state.view.tab = Tab::Music;
-                self.state.select_music(key);
-                self.state.playback.defer_render = true;
+            LibraryKey::Music(id) => {
+                if let Some(index) = self.state.music_bank.index_of(id) {
+                    self.state.view.tab = Tab::Music;
+                    self.state.select_music(index);
+                    self.state.playback.defer_render = true;
+                }
             }
         }
     }
@@ -904,13 +1035,23 @@ impl SfxLogic {
                     self.state.select_patch(index);
                 }
             }
-            LibraryKey::Audio(index) => {
-                self.state.view.tab = Tab::Patches;
-                self.state.playback.defer_render = true;
-                self.audition_audio(index);
+            LibraryKey::Audio(id) => {
+                if let Some(index) = self.state.audio_bank.index_of(id) {
+                    self.state.view.tab = Tab::Patches;
+                    self.state.playback.defer_render = true;
+                    self.audition_audio(index);
+                }
             }
-            LibraryKey::Preset(index) => self.audition_preset(index),
-            LibraryKey::Music(index) => self.load_music(index),
+            LibraryKey::Preset(id) => {
+                if let Some(index) = self.state.presets.index_of(id) {
+                    self.audition_preset(index);
+                }
+            }
+            LibraryKey::Music(id) => {
+                if let Some(index) = self.state.music_bank.index_of(id) {
+                    self.load_music(index);
+                }
+            }
         }
     }
 
@@ -975,6 +1116,7 @@ impl SfxLogic {
             return;
         }
         audio.play(samples, 1, 0, false);
+        self.state.playback.source = Some(PlaybackSource::Audio);
         self.state.playback.preset_playing = true;
         self.state.playback.was_playing = true;
         self.state.playback.seeked = false;
@@ -1067,8 +1209,16 @@ impl SfxLogic {
         layout: &ui::Layout,
     ) {
         match key {
-            LibraryKey::Preset(index) => self.drop_preset(index, position, layout),
-            LibraryKey::Audio(index) => self.drop_audio(index, position, layout),
+            LibraryKey::Preset(id) => {
+                if let Some(index) = self.state.presets.index_of(id) {
+                    self.drop_preset(index, position, layout);
+                }
+            }
+            LibraryKey::Audio(id) => {
+                if let Some(index) = self.state.audio_bank.index_of(id) {
+                    self.drop_audio(index, position, layout);
+                }
+            }
             LibraryKey::Sound(_) | LibraryKey::Music(_) => {
                 self.state.toast("only audio and presets can be dragged");
             }
@@ -1157,7 +1307,6 @@ impl SfxLogic {
                 self.state.begin_edit();
                 let index = self.state.doc.project.insert_patch_copy(&preset);
                 self.state.mark_dirty();
-                self.state.set_library_mode(LibraryMode::Project);
                 self.state.select_patch(index);
                 self.state.select_layer(0);
                 self.state.commit_edit();
@@ -1229,30 +1378,14 @@ impl SfxLogic {
 
     pub(super) fn pick_category(&mut self, category: Option<Category>) {
         self.state.view.category_filter = category;
-        self.state.view.category_menu_open = false;
+        self.state.view.overlays.close(Overlay::CategoryFilter);
         self.refresh_filter();
     }
 
     pub(super) fn pick_kind(&mut self, kind: Option<LibraryKind>) {
         self.state.view.kind_filter = kind;
-        self.state.view.kind_menu_open = false;
-        self.state.view.category_menu_open = false;
-        match kind {
-            Some(LibraryKind::Preset) => {
-                self.state.view.library_mode = LibraryMode::Presets;
-                self.state.view.selected_library =
-                    self.state.view.selected_preset.map(LibraryKey::Preset);
-            }
-            Some(LibraryKind::Sound) => {
-                self.state.view.library_mode = LibraryMode::Project;
-                self.state.view.selected_library =
-                    self.state.patch().map(|patch| LibraryKey::Sound(patch.id));
-            }
-            Some(LibraryKind::Audio | LibraryKind::Music) => {
-                self.state.view.library_mode = LibraryMode::Project;
-            }
-            None => {}
-        }
+        self.state.view.overlays.close(Overlay::KindFilter);
+        self.state.view.overlays.close(Overlay::CategoryFilter);
         self.refresh_filter();
         let selected_visible = self.state.view.selected_library.is_some_and(|key| {
             self.state
@@ -1267,14 +1400,12 @@ impl SfxLogic {
                 .first()
                 .map(|entry| entry.key)
             {
-                if matches!(key, LibraryKey::Music(_)) {
-                    self.activate_library_row(key);
-                } else {
-                    self.select_library_row(key);
-                }
+                // Filtering is a view operation: select the first visible row
+                // without auditioning/loading anything. Music is loaded only by
+                // an explicit click/Enter (see `activate_library_row`).
+                self.select_library_row(key);
             } else {
                 self.state.view.selected_library = None;
-                self.state.view.selected_preset = None;
             }
         }
         self.state.toast(match kind {
@@ -1289,8 +1420,8 @@ impl SfxLogic {
         self.state.view.favorites_only = false;
         self.state.view.search.clear();
         self.state.view.search_focus = false;
-        self.state.view.kind_menu_open = false;
-        self.state.view.category_menu_open = false;
+        self.state.view.overlays.close(Overlay::KindFilter);
+        self.state.view.overlays.close(Overlay::CategoryFilter);
         self.refresh_filter();
         self.state.toast("cleared library filters");
     }
@@ -1306,16 +1437,13 @@ impl SfxLogic {
     }
 
     pub(super) fn refresh_filter(&mut self) {
-        self.state.view.patch_scroll = 0;
-        self.state.view.preset_scroll = 0;
         self.state.view.library_scroll = 0;
         let selected = self.state.view.selected_library;
         let visible = self.state.visible_library_entries();
         if selected.is_some_and(|key| !visible.iter().any(|entry| entry.key == key)) {
             self.state.view.selected_library = None;
-            self.state.view.selected_preset = None;
         }
-        if self.state.view.library_mode != LibraryMode::Presets
+        if !self.state.preset_focus()
             && (self.state.view.kind_filter.is_none()
                 || self.state.view.kind_filter == Some(LibraryKind::Sound))
         {
@@ -1342,14 +1470,10 @@ impl SfxLogic {
         if index >= self.state.doc.project.patches.len() {
             return;
         }
-        if self.state.view.library_mode != LibraryMode::Project {
-            self.state.set_library_mode(LibraryMode::Project);
-        }
         if !self.state.patch_visible(index) {
             self.state.view.kind_filter = None;
             self.state.view.category_filter = None;
             self.state.view.favorites_only = false;
-            self.state.view.patch_scroll = 0;
             self.state.view.library_scroll = 0;
         }
         self.state.view.tab = Tab::Patches;
@@ -1434,6 +1558,72 @@ impl SfxLogic {
                     Err(error) => self.state.toast(format!("rename preset failed: {error}")),
                 }
             }
+            ModalAction::RenameAudio => {
+                let Some(root) = self.state.doc.root.clone() else {
+                    self.state.toast("open a project first");
+                    return;
+                };
+                let Some(index) = self.state.selected_audio_index() else {
+                    self.state.toast("select an audio file first");
+                    return;
+                };
+                match self.state.audio_bank.rename(&root, index, &name) {
+                    Ok(()) => {
+                        self.state.bump_view();
+                        self.state.toast(format!("renamed audio to '{name}'"));
+                    }
+                    Err(error) => self.state.toast(format!("rename audio failed: {error}")),
+                }
+            }
+            ModalAction::ConfirmDeleteAudio => {
+                let Some(root) = self.state.doc.root.clone() else {
+                    self.state.toast("open a project first");
+                    return;
+                };
+                let Some(index) = self.state.selected_audio_index() else {
+                    self.state.toast("select an audio file first");
+                    return;
+                };
+                match self.state.audio_bank.delete(&root, index) {
+                    Ok(()) => {
+                        self.state.view.selected_library = None;
+                        self.state.bump_view();
+                        self.state.toast("moved audio file to audio/.trash/");
+                    }
+                    Err(error) => self.state.toast(format!("delete audio failed: {error}")),
+                }
+            }
+            ModalAction::RenameMusic => {
+                let Some(index) = self.state.selected_music() else {
+                    self.state.toast("select a music file first");
+                    return;
+                };
+                match self.state.music_bank.rename(index, &name) {
+                    Ok(()) => {
+                        self.state.bump_view();
+                        self.state.toast(format!("renamed music to '{name}'"));
+                    }
+                    Err(error) => self.state.toast(format!("rename music failed: {error}")),
+                }
+            }
+            ModalAction::ConfirmDeleteMusic => {
+                let Some(root) = self.state.doc.root.clone() else {
+                    self.state.toast("open a project first");
+                    return;
+                };
+                let Some(index) = self.state.selected_music() else {
+                    self.state.toast("select a music file first");
+                    return;
+                };
+                match self.state.music_bank.delete(&root, index) {
+                    Ok(()) => {
+                        self.state.view.selected_library = None;
+                        self.state.bump_view();
+                        self.state.toast("moved music file to music/.trash/");
+                    }
+                    Err(error) => self.state.toast(format!("delete music failed: {error}")),
+                }
+            }
             ModalAction::ConfirmDeletePreset => {
                 let Some((index, name)) = self.selected_preset() else {
                     self.state.toast("select a preset first");
@@ -1446,9 +1636,7 @@ impl SfxLogic {
                             .as_deref()
                             .map(|root| self.state.presets.load_project(root))
                             .unwrap_or_default();
-                        self.state.view.selected_preset = None;
                         self.state.view.selected_library = None;
-                        self.state.view.preset_scroll = 0;
                         self.state.bump_view();
                         self.state.toast(if warnings.is_empty() {
                             format!("moved preset '{name}' to presets/.trash/")

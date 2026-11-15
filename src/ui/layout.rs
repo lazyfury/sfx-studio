@@ -91,6 +91,11 @@ pub struct Layout {
     pub library_scrollbar: Rect,
     pub library_thumb: Rect,
     pub library_max_start: usize,
+    /// Badge counts cached with the layout so paint never re-scans the
+    /// library on idle frames.
+    pub library_visible: usize,
+    pub library_total: usize,
+    pub preset_visible: usize,
     pub project_anchor: f32,
     pub inspector: Rect,
     pub inspector_content_h: f32,
@@ -138,25 +143,29 @@ impl Layout {
         let compact = viewport.width < 1260.0;
         let mut header_buttons = Vec::new();
         let mut x = header.right() - 6.0;
-        for (label, action, width) in [
-            ("DEL", Action::DeleteLayer, 44.0),
-            ("DUP", Action::DuplicateLayer, 46.0),
-            ("LAYER", Action::AddLayer, 62.0),
-            ("LOOP", Action::Loop, 52.0),
-            ("STOP", Action::Stop, 50.0),
-            ("PLAY", Action::Play, 48.0),
-            ("REDO", Action::Redo, 52.0),
-            ("UNDO", Action::Undo, 52.0),
+        for (action, width) in [
+            (Action::DeleteLayer, 44.0),
+            (Action::DuplicateLayer, 46.0),
+            (Action::AddLayer, 62.0),
+            (Action::Loop, 52.0),
+            (Action::Stop, 50.0),
+            (Action::Play, 48.0),
+            (Action::Redo, 52.0),
+            (Action::Undo, 52.0),
         ] {
             let width = if compact { 28.0 } else { width };
             let gap = if compact { 3.0 } else { 4.0 };
             x -= width;
             header_buttons.push(Button {
                 rect: Rect::from_min_size(Vec2::new(x, header.top() + 6.0), Size::new(width, 22.0)),
-                label: if compact { String::new() } else { label.into() },
+                label: if compact {
+                    String::new()
+                } else {
+                    action_meta(action).label.into()
+                },
                 action,
                 active: action == Action::Loop && state.playback.loop_play,
-                icon: action_icon(action),
+                icon: action_meta(action).icon,
             });
             x -= gap;
         }
@@ -166,13 +175,13 @@ impl Layout {
         let project_anchor = 170.0;
         let mut tab_buttons = Vec::new();
         let mut tab_x = viewport.width - 8.0 - 72.0 * 2.0 - 4.0;
-        for (label, action, tab, icon) in [
-            ("SOUND", Action::TabPatches, Tab::Patches, Icon::Waveform),
-            ("MUSIC", Action::TabMusic, Tab::Music, Icon::Music),
+        for (action, tab, icon) in [
+            (Action::TabPatches, Tab::Patches, Icon::Waveform),
+            (Action::TabMusic, Tab::Music, Icon::Music),
         ] {
             tab_buttons.push(Button {
                 rect: Rect::from_min_size(Vec2::new(tab_x, 4.0), Size::new(72.0, 22.0)),
-                label: label.into(),
+                label: action_meta(action).label.into(),
                 action,
                 active: state.view.tab == tab,
                 icon: Some(icon),
@@ -183,13 +192,13 @@ impl Layout {
         let mut menu_rect = None;
         let mut menu_items = Vec::new();
         let mut menu_sections = Vec::new();
-        if state.view.menu_open {
+        if state.view.overlays.is_open(Overlay::Menu) {
             let width = 224.0;
             let mut height = 10.0;
             for entry in MENU_ENTRIES {
                 height += match entry {
                     MenuEntry::Section(_) => 20.0,
-                    MenuEntry::Item(_, _) => 24.0,
+                    MenuEntry::Item(_) => 24.0,
                 };
             }
             let rect = Rect::from_min_size(
@@ -209,10 +218,10 @@ impl Layout {
                         ));
                         y += 20.0;
                     }
-                    MenuEntry::Item(label, action) => {
+                    MenuEntry::Item(action) => {
                         menu_items.push((
                             *action,
-                            *label,
+                            action_meta(*action).label,
                             Rect::from_min_size(
                                 Vec2::new(rect.left() + 4.0, y),
                                 Size::new(width - 8.0, 24.0),
@@ -241,7 +250,7 @@ impl Layout {
         );
         let mut category_menu = None;
         let mut category_items = Vec::new();
-        if state.view.category_menu_open {
+        if state.view.overlays.is_open(Overlay::CategoryFilter) {
             let row_h = 22.0;
             let choices = Category::ALL.len() + 1;
             let rect = Rect::from_min_size(
@@ -263,7 +272,7 @@ impl Layout {
         }
         let mut kind_menu = None;
         let mut kind_items = Vec::new();
-        if state.view.kind_menu_open {
+        if state.view.overlays.is_open(Overlay::KindFilter) {
             let row_h = 22.0;
             let choices = LibraryKind::ALL.len() + 1;
             let rect = Rect::from_min_size(
@@ -286,6 +295,9 @@ impl Layout {
         let row_h = LIBRARY_ROW_H;
         let capacity = library_capacity(viewport);
         let visible_rows = state.visible_library_rows();
+        let library_visible = state.visible_library_count();
+        let library_total = state.library_total_count();
+        let preset_visible = state.visible_preset_count();
         let library_max_start = visible_rows.len().saturating_sub(capacity);
         let library_start = state.library_scroll().min(library_max_start);
         let mut library_rows = Vec::new();
@@ -300,8 +312,7 @@ impl Layout {
             library_rows.push((row.clone(), rect));
         }
 
-        let install_presets = ((state.view.library_mode == LibraryMode::Presets
-            || state.view.kind_filter == Some(LibraryKind::Preset))
+        let install_presets = (state.preset_library_focus()
             && state.presets.presets.is_empty()
             && state.doc.root.is_some())
         .then(|| {
@@ -467,7 +478,7 @@ impl Layout {
                             label: text,
                             action,
                             active,
-                            icon: action_icon(action),
+                            icon: action_meta(action).icon,
                         });
                     }
                     items.push(Item::Options {
@@ -590,6 +601,9 @@ impl Layout {
             library_scrollbar,
             library_thumb,
             library_max_start,
+            library_visible,
+            library_total,
+            preset_visible,
             project_anchor,
             inspector,
             inspector_content_h,

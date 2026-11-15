@@ -61,7 +61,7 @@ pub fn bake(project: &Project, root: &Path) -> Result<String, String> {
             "rate": rate,
             "channels": 2,
             "bits": 16,
-            "duration": stereo.frames() as f32 / patch.rate as f32,
+            "duration": stereo.frames() as f32 / rate as f32,
             "loop": false
         }));
     }
@@ -196,7 +196,7 @@ fn patch_tres_inner(patch: &Patch, baked: Option<&str>) -> String {
     if baked.is_some() {
         out.push_str("baked = ExtResource(\"1_audio\")\n");
     }
-    let _ = writeln!(out, "rate = {}", patch.rate);
+    let _ = writeln!(out, "rate = {}", patch.bake_rate());
     let _ = writeln!(out, "normalize_layers = {}", bool_lit(patch.normalize));
     let _ = writeln!(out, "resource_name = \"{}\"", quote(&patch.name));
     let _ = writeln!(out, "group = \"{}\"", quote(patch.category.group()));
@@ -212,6 +212,12 @@ fn patch_tres_inner(patch: &Patch, baked: Option<&str>) -> String {
 }
 
 fn write_layer(out: &mut String, layer: &Layer) {
+    // `Curve` has no native Godot enum value and is baked on export; its
+    // documented alias must still round-trip to the same integer.
+    debug_assert!(layer
+        .wave
+        .godot_alias()
+        .is_none_or(|alias| alias.godot_id() == layer.wave.godot_id()));
     let _ = writeln!(out, "wave = {}", layer.wave.godot_id());
     let _ = writeln!(out, "enabled = {}", bool_lit(layer.enabled));
     let _ = writeln!(out, "tone_env = {}", layer.tone_env.godot_id());
@@ -613,6 +619,12 @@ mod tests {
         assert!(
             root.join("audio/sfx/music.tres").exists() || root.join("audio/music.tres").exists()
         );
+        let laser_tres =
+            std::fs::read_to_string(root.join("audio/sfx/laser_beam.tres")).expect("laser tres");
+        assert!(
+            laser_tres.contains("rate = 48000"),
+            "v3 baked .tres must advertise the 48 kHz bake rate: {laser_tres}"
+        );
         let imported = crate::tres::import_project(&root).unwrap().unwrap();
         let magic = imported
             .patches
@@ -621,6 +633,38 @@ mod tests {
             .expect("exported Laser Beam");
         assert_eq!(magic.category, Category::Magic);
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bake_manifest_duration_matches_the_written_wav() {
+        use crate::model::Project;
+        let root = temp_project_root("manifest-duration");
+        let mut project = Project::demo("manifest-duration");
+        let mut patch = crate::builtin::generate("pickupCoin", 3).expect("builtin preset");
+        patch.name = "coin".into();
+        // Legacy field is still 22050 on generated patches; v3 must bake at 48k.
+        assert_eq!(patch.rate, 22_050);
+        project.patches = vec![patch];
+
+        bake(&project, &root).expect("bake");
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("audio/sfx_manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let entry = &manifest["sounds"][0];
+        let duration = entry["duration"].as_f64().expect("duration");
+        assert_eq!(entry["rate"].as_u64(), Some(48_000));
+
+        let wav = std::fs::read(root.join("audio/baked/coin.wav")).expect("baked wav");
+        let rate = u32::from_le_bytes(wav[24..28].try_into().unwrap());
+        let frames = (wav.len() - 44) / 4;
+        let actual = frames as f64 / rate as f64;
+        assert_eq!(rate, 48_000);
+        assert!(
+            (duration - actual).abs() < 0.001,
+            "manifest duration {duration} must match WAV duration {actual}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

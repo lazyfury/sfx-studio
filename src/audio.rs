@@ -24,8 +24,9 @@ const FADE_SECONDS: f32 = 0.005;
 
 enum Command {
     Play {
-        /// Interleaved frames (`L, R` or mono).
-        samples: Vec<f32>,
+        /// Interleaved frames (`L, R` or mono). Shared with the UI cache so
+        /// pressing Play does not copy the rendered buffer.
+        samples: Arc<Vec<f32>>,
         /// Source channels: 1 = mono, 2 = stereo.
         channels: usize,
         /// Start frame (not sample index).
@@ -37,7 +38,7 @@ enum Command {
 
 /// Owned by the audio callback after the stream is built.
 struct Playback {
-    samples: Vec<f32>,
+    samples: Arc<Vec<f32>>,
     /// Interleaved source channels (1 or 2).
     channels: usize,
     /// Fractional source-frame cursor (48 kHz); advanced by the resample ratio.
@@ -58,7 +59,7 @@ impl Playback {
                 looping,
             } => {
                 if samples.is_empty() {
-                    self.samples.clear();
+                    self.samples = Arc::new(Vec::new());
                     self.channels = 1;
                     self.fade_target = 0.0;
                     self.pos = 0.0;
@@ -152,7 +153,7 @@ impl Playback {
 impl Default for Playback {
     fn default() -> Self {
         Self {
-            samples: Vec::new(),
+            samples: Arc::new(Vec::new()),
             channels: 1,
             pos: 0.0,
             looping: false,
@@ -168,7 +169,7 @@ fn take_command(slot: &Mutex<Option<Command>>) -> Option<Command> {
 }
 
 /// Hand a buffer that is no longer playing back to the UI for deallocation.
-fn retire(slot: &Mutex<Option<Vec<f32>>>, old: Vec<f32>) {
+fn retire(slot: &Mutex<Option<Arc<Vec<f32>>>>, old: Arc<Vec<f32>>) {
     if old.capacity() == 0 {
         return;
     }
@@ -190,7 +191,7 @@ pub struct AudioEngine {
     playing: Arc<AtomicBool>,
     /// Source-frame cursor published by the callback once per buffer.
     position: Arc<AtomicU64>,
-    retired: Arc<Mutex<Option<Vec<f32>>>>,
+    retired: Arc<Mutex<Option<Arc<Vec<f32>>>>>,
     device_errors: Arc<AtomicU64>,
     underruns: Arc<AtomicU64>,
     alive: Arc<AtomicBool>,
@@ -280,6 +281,18 @@ impl AudioEngine {
     /// Start playing interleaved `samples` (rendered at [`PREVIEW_RATE`]) at
     /// `start_frame`. `channels` is 1 for mono or 2 for stereo.
     pub fn play(&self, samples: Vec<f32>, channels: usize, start_frame: usize, looping: bool) {
+        self.play_shared(Arc::new(samples), channels, start_frame, looping);
+    }
+
+    /// Same as [`Self::play`] but reuses an existing `Arc` (the preview cache)
+    /// instead of copying the whole buffer on every Play.
+    pub fn play_shared(
+        &self,
+        samples: Arc<Vec<f32>>,
+        channels: usize,
+        start_frame: usize,
+        looping: bool,
+    ) {
         if samples.is_empty() {
             self.stop();
             return;
@@ -422,7 +435,7 @@ mod tests {
     fn looping_wraps_without_duplicating_the_first_sample() {
         let playing = AtomicBool::new(true);
         let mut playback = Playback {
-            samples: vec![0.0, 1.0, 2.0],
+            samples: Arc::new(vec![0.0, 1.0, 2.0]),
             looping: true,
             fade: 1.0,
             fade_target: 1.0,
@@ -440,7 +453,7 @@ mod tests {
     fn non_looping_fades_out_and_stops() {
         let playing = AtomicBool::new(true);
         let mut playback = Playback {
-            samples: vec![1.0],
+            samples: Arc::new(vec![1.0]),
             fade: 1.0,
             fade_target: 1.0,
             ..Playback::default()
@@ -456,7 +469,7 @@ mod tests {
         let playing = AtomicBool::new(true);
         let mut playback = Playback::default();
         playback.apply(Command::Play {
-            samples: vec![0.0, 1.0, 2.0],
+            samples: Arc::new(vec![0.0, 1.0, 2.0]),
             channels: 1,
             start: 1,
             looping: true,
@@ -471,7 +484,7 @@ mod tests {
         let playing = AtomicBool::new(true);
         let mut playback = Playback::default();
         playback.apply(Command::Play {
-            samples: vec![1.0; 8],
+            samples: Arc::new(vec![1.0; 8]),
             channels: 1,
             start: 0,
             looping: false,
@@ -493,7 +506,7 @@ mod tests {
     fn resamples_48k_frames_to_the_device_ratio() {
         let playing = AtomicBool::new(true);
         let mut playback = Playback {
-            samples: vec![0.0, 1.0],
+            samples: Arc::new(vec![0.0, 1.0]),
             fade: 1.0,
             fade_target: 1.0,
             ..Playback::default()
@@ -510,7 +523,7 @@ mod tests {
         let playing = AtomicBool::new(true);
         let mut playback = Playback::default();
         playback.apply(Command::Play {
-            samples: vec![0.25, -0.5, 0.75, -1.0],
+            samples: Arc::new(vec![0.25, -0.5, 0.75, -1.0]),
             channels: 2,
             start: 0,
             looping: false,
@@ -529,9 +542,9 @@ mod tests {
     #[test]
     fn retired_buffers_are_handed_back_to_the_ui() {
         let slot = Mutex::new(None);
-        retire(&slot, vec![0.0; 16]);
+        retire(&slot, Arc::new(vec![0.0; 16]));
         assert!(slot.lock().unwrap().take().is_some());
-        retire(&slot, Vec::new());
+        retire(&slot, Arc::new(Vec::new()));
         assert!(slot.lock().unwrap().is_none());
     }
 }

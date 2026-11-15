@@ -89,9 +89,13 @@ cargo run -- --demo-reel --out reel.wav
   `<project>/presets/.favorites.json`. With a preset selected, `MENU → EXPORT
   WAV` (or `⌘/Ctrl+E`) renders it directly to a 48 kHz / 24-bit stereo WAV
   without adding it to the project. Space auditions the selected audio/preset
-  instead of the project patch. PRESET/AUDIO/MUSIC selections are read-only:
-  the right inspector shows the selected summary and project-edit controls are
-  disabled. An empty preset bank offers `INSTALL BUILTIN PRESETS`;
+  instead of the project patch. PRESET rows are read-only: the right inspector
+  shows the selected summary and project-edit controls are disabled, while
+  document commands (SAVE / OPEN / BAKE GODOT / EXPORT .TRES) stay available.
+  AUDIO/MUSIC rows are project assets and do not lock the document; clicking a
+  layer/clip/parameter returns focus to SOUND. Changing the type filter only
+  changes the visible rows — a MUSIC file is loaded by an explicit click. An
+  empty preset bank offers `INSTALL BUILTIN PRESETS`;
   `MENU → SAVE AS PRESET` adds the current project sound to the same library,
   while `RENAME PRESET` / `DELETE PRESET` manage the selected row. Delete moves
   the JSON to `presets/.trash/` instead of destroying it; `RESTORE LAST PRESET`
@@ -182,8 +186,13 @@ project plus an internal preset library:
 └── ...
 ```
 
-PRESET, AUDIO and MUSIC rows are read-only with respect to sound parameters.
-PRESETS support favourites, rename, delete and export; the preset bank always
+PRESET rows are read-only with respect to sound parameters. AUDIO/MUSIC
+inspection does not disable project editing; clicking a timeline/layer returns
+focus to SOUND, and menu edits reclaim the document focus before running.
+AUDIO and MUSIC rows can be renamed/deleted from `MENU`; delete moves the file
+into `audio/.trash/` or `music/.trash/` instead of destroying it, and
+`RESTORE AUDIO/MUSIC` brings the newest backup back. PRESETS
+support favourites, rename, delete and export; the preset bank always
 reflects the currently open project, so switching projects switches the
 library. AUDIO lists the WAV files already inside the project (the `LOAD WAV`
 command copies external files there); dragging one to the timeline creates a

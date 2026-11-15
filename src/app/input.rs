@@ -2,14 +2,10 @@
 
 use super::*;
 
-impl AppLogic for SfxLogic {
-    fn init(&mut self, ctx: &InitContext<'_>) {
-        if let Some(measurer) = ctx.service::<Rc<dyn TextMeasurer>>() {
-            self.measurer = Some(measurer.clone());
-        }
-    }
-
-    fn event(&mut self, _ctx: &EventContext<'_>, event: &InputEvent) -> EventResult {
+impl SfxLogic {
+    /// Testable input entry point. `AppLogic::event` delegates here; tests can
+    /// drive pointer/key sequences without constructing an `EventContext`.
+    pub(super) fn handle_event(&mut self, event: &InputEvent) -> EventResult {
         if let InputEvent::ModifiersChanged(modifiers) = event {
             self.state.view.modifiers = *modifiers;
             return EventResult::Ignored;
@@ -54,7 +50,8 @@ impl AppLogic for SfxLogic {
             }
         }
 
-        let layout = ui::Layout::new(&self.state, self.state.view.viewport);
+        let layout_rc = self.layout();
+        let layout = layout_rc.as_ref();
         match event {
             InputEvent::KeyDown { key } => {
                 let cmd = self.state.view.modifiers.meta || self.state.view.modifiers.ctrl;
@@ -64,25 +61,18 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::Tab => {
-                        self.state.view.tab = match self.state.view.tab {
+                        let next = match self.state.view.tab {
                             Tab::Patches => Tab::Music,
                             Tab::Music => Tab::Patches,
                         };
-                        self.state.bump_view();
+                        self.switch_tab(next);
                         return EventResult::Handled;
                     }
                     Key::Escape => {
                         if matches!(self.state.view.drag, Drag::LibraryItem { .. }) {
                             self.state.view.drag = Drag::None;
                             self.state.bump_view();
-                        } else if self.state.view.kind_menu_open {
-                            self.state.view.kind_menu_open = false;
-                            self.state.bump_view();
-                        } else if self.state.view.category_menu_open {
-                            self.state.view.category_menu_open = false;
-                            self.state.bump_view();
-                        } else if self.state.view.menu_open {
-                            self.state.view.menu_open = false;
+                        } else if self.state.view.overlays.close_top().is_some() {
                             self.state.bump_view();
                         } else {
                             self.stop();
@@ -90,9 +80,20 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Key::Delete => {
-                        if self.state.view.library_mode == LibraryMode::Presets {
+                        // Delete acts on the focused object. When an asset row
+                        // is focused there is no deletable document object, and
+                        // silently deleting a layer/automation point would
+                        // violate the read-only library boundary.
+                        if matches!(
+                            self.state.selected_library_kind(),
+                            Some(
+                                crate::library::LibraryKind::Audio
+                                    | crate::library::LibraryKind::Preset
+                                    | crate::library::LibraryKind::Music
+                            )
+                        ) {
                             self.state
-                                .toast("PRESETS library is read-only · switch to PROJECT to edit");
+                                .toast("选中的是资源条目 · 先点击图层或 SOUND 再编辑");
                             return EventResult::Handled;
                         }
                         if self.state.view.tab == Tab::Patches {
@@ -145,14 +146,12 @@ impl AppLogic for SfxLogic {
                         self.state.view.search_focus = true;
                         return EventResult::Handled;
                     }
-                    Key::Character('r') if !cmd => {
-                        self.activate(ui::Action::Randomize);
-                        return EventResult::Handled;
-                    }
                     Key::Character('f') if !cmd => {
                         match self.state.view.selected_library {
-                            Some(crate::library::LibraryKey::Preset(index)) => {
-                                self.toggle_preset_favorite(index)
+                            Some(crate::library::LibraryKey::Preset(id)) => {
+                                if let Some(index) = self.state.presets.index_of(id) {
+                                    self.toggle_preset_favorite(index);
+                                }
                             }
                             Some(crate::library::LibraryKey::Sound(_)) | None => {
                                 self.activate(ui::Action::Favorite)
@@ -161,115 +160,74 @@ impl AppLogic for SfxLogic {
                         }
                         return EventResult::Handled;
                     }
-                    Key::Character('v') if !cmd => {
-                        self.activate(ui::Action::Vary);
-                        return EventResult::Handled;
-                    }
-                    Key::Character('c') if !cmd => {
-                        self.activate(ui::Action::CategoryCycle);
-                        return EventResult::Handled;
-                    }
-                    Key::Character('l') if !cmd => {
-                        self.state.playback.loop_play = !self.state.playback.loop_play;
-                        return EventResult::Handled;
-                    }
-                    Key::Character('z') if cmd => {
-                        if self.state.view.modifiers.shift {
-                            self.state.redo();
-                        } else {
-                            self.state.undo();
-                        }
-                        return EventResult::Handled;
-                    }
-                    Key::Character('y') if cmd => {
-                        self.state.redo();
-                        return EventResult::Handled;
-                    }
-                    Key::Character('s') if cmd => {
-                        self.save();
-                        return EventResult::Handled;
-                    }
-                    Key::Character('o') if cmd => {
-                        self.open();
-                        return EventResult::Handled;
-                    }
-                    Key::Character('b') if cmd => {
-                        self.activate(ui::Action::Bake);
-                        return EventResult::Handled;
-                    }
-                    Key::Character('e') if cmd => {
-                        self.activate(ui::Action::ExportWav);
-                        return EventResult::Handled;
-                    }
                     _ => {}
+                }
+                if let Some(action) = ui::shortcut_action(*key, self.state.view.modifiers) {
+                    self.activate(action);
+                    return EventResult::Handled;
                 }
             }
             InputEvent::PointerDown { position, button } if *button == PointerButton::Left => {
                 self.state.view.cursor = *position;
-                let pointer_hit = ui::hit(&self.state, &layout, *position);
+                let pointer_hit = ui::hit(&self.state, layout, *position);
                 self.state.view.hover_hit = pointer_hit;
                 if pointer_hit != Some(ui::Hit::Search) {
                     self.state.view.search_focus = false;
                 }
-                if self.state.view.menu_open {
-                    match pointer_hit {
-                        Some(ui::Hit::MenuToggle) => {
-                            self.state.view.menu_open = false;
-                        }
-                        Some(ui::Hit::MenuItem(action)) => {
-                            self.state.view.menu_open = false;
-                            self.activate(action);
-                        }
-                        Some(ui::Hit::MenuPanel) => {}
-                        _ => {
-                            // Click outside closes the menu without also
-                            // activating whatever is underneath it.
-                            self.state.view.menu_open = false;
-                        }
+                if let Some(overlay) = self.state.view.overlays.top() {
+                    match overlay {
+                        Overlay::Menu => match pointer_hit {
+                            Some(ui::Hit::MenuToggle) => {
+                                self.state.view.overlays.close(overlay);
+                            }
+                            Some(ui::Hit::MenuItem(action)) => {
+                                self.state.view.overlays.close(overlay);
+                                self.activate(action);
+                            }
+                            Some(ui::Hit::MenuPanel) => {}
+                            _ => {
+                                // Outside click closes the menu and is consumed.
+                                self.state.view.overlays.close(overlay);
+                            }
+                        },
+                        Overlay::KindFilter => match pointer_hit {
+                            Some(ui::Hit::MenuToggle) => {
+                                self.state.view.overlays.open(Overlay::Menu)
+                            }
+                            Some(ui::Hit::CategoryFilter) => {
+                                self.state.view.overlays.open(Overlay::CategoryFilter)
+                            }
+                            Some(ui::Hit::KindPick(kind)) => self.pick_kind(kind),
+                            Some(ui::Hit::KindMenu | ui::Hit::KindFilter) => {
+                                self.state.view.overlays.close(overlay);
+                            }
+                            _ => {
+                                self.state.view.overlays.close(overlay);
+                            }
+                        },
+                        Overlay::CategoryFilter => match pointer_hit {
+                            Some(ui::Hit::MenuToggle) => {
+                                self.state.view.overlays.open(Overlay::Menu)
+                            }
+                            Some(ui::Hit::KindFilter) => {
+                                self.state.view.overlays.open(Overlay::KindFilter)
+                            }
+                            Some(ui::Hit::CategoryPick(category)) => self.pick_category(category),
+                            Some(ui::Hit::CategoryMenu | ui::Hit::CategoryFilter) => {
+                                self.state.view.overlays.close(overlay);
+                            }
+                            _ => {
+                                self.state.view.overlays.close(overlay);
+                            }
+                        },
                     }
                     self.state.bump_view();
                     return EventResult::Handled;
                 }
                 if pointer_hit == Some(ui::Hit::MenuToggle) {
-                    self.state.view.menu_open = true;
-                    self.state.view.category_menu_open = false;
-                    self.state.view.kind_menu_open = false;
+                    self.state.view.overlays.open(Overlay::Menu);
                     self.state.bump_view();
                     return EventResult::Handled;
-                }
-                if self.state.view.kind_menu_open {
-                    match pointer_hit {
-                        Some(ui::Hit::KindPick(kind)) => {
-                            self.pick_kind(kind);
-                            return EventResult::Handled;
-                        }
-                        Some(ui::Hit::KindMenu | ui::Hit::KindFilter) => {
-                            self.state.view.kind_menu_open = false;
-                            self.state.bump_view();
-                            return EventResult::Handled;
-                        }
-                        _ => {
-                            self.state.view.kind_menu_open = false;
-                            self.state.bump_view();
-                        }
-                    }
-                }
-                if self.state.view.category_menu_open {
-                    match pointer_hit {
-                        Some(ui::Hit::CategoryPick(category)) => {
-                            self.pick_category(category);
-                            return EventResult::Handled;
-                        }
-                        Some(ui::Hit::CategoryMenu | ui::Hit::CategoryFilter) => {
-                            self.state.view.category_menu_open = false;
-                            self.state.bump_view();
-                            return EventResult::Handled;
-                        }
-                        _ => {
-                            self.state.view.category_menu_open = false;
-                            self.state.bump_view();
-                        }
-                    }
                 }
                 match pointer_hit {
                     Some(ui::Hit::Search) => {
@@ -281,8 +239,9 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::Curve(kind)) => {
+                        self.state.focus_document();
                         self.state.begin_edit();
-                        self.set_curve_from_pos(kind, *position, &layout);
+                        self.set_curve_from_pos(kind, *position, layout);
                         self.state.view.drag = Drag::Curve { kind };
                         return EventResult::Handled;
                     }
@@ -292,9 +251,7 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::KindFilter) => {
-                        self.state.view.kind_menu_open = !self.state.view.kind_menu_open;
-                        self.state.view.category_menu_open = false;
-                        self.state.view.menu_open = false;
+                        self.state.view.overlays.toggle(Overlay::KindFilter);
                         self.state.bump_view();
                         return EventResult::Handled;
                     }
@@ -310,9 +267,7 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::CategoryFilter) => {
-                        self.state.view.category_menu_open = !self.state.view.category_menu_open;
-                        self.state.view.kind_menu_open = false;
-                        self.state.view.menu_open = false;
+                        self.state.view.overlays.toggle(Overlay::CategoryFilter);
                         self.state.bump_view();
                         return EventResult::Handled;
                     }
@@ -350,8 +305,10 @@ impl AppLogic for SfxLogic {
                     }
                     Some(ui::Hit::LibraryFavorite(key)) => {
                         match key {
-                            crate::library::LibraryKey::Preset(index) => {
-                                self.toggle_preset_favorite(index)
+                            crate::library::LibraryKey::Preset(id) => {
+                                if let Some(index) = self.state.presets.index_of(id) {
+                                    self.toggle_preset_favorite(index);
+                                }
                             }
                             crate::library::LibraryKey::Sound(id) => {
                                 if let Some(index) = self
@@ -374,8 +331,9 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::LayerField(field)) => {
+                        self.state.focus_document();
                         self.state.begin_edit();
-                        self.set_param_from_x(*position, ui::Hit::LayerField(field), &layout);
+                        self.set_param_from_x(*position, ui::Hit::LayerField(field), layout);
                         self.state.view.drag = Drag::Layer {
                             field,
                             last_x: position.x,
@@ -383,8 +341,9 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::PatchField(field)) => {
+                        self.state.focus_document();
                         self.state.begin_edit();
-                        self.set_param_from_x(*position, ui::Hit::PatchField(field), &layout);
+                        self.set_param_from_x(*position, ui::Hit::PatchField(field), layout);
                         self.state.view.drag = Drag::PatchField {
                             field,
                             last_x: position.x,
@@ -392,8 +351,9 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::MusicField(field)) => {
+                        self.state.focus_document();
                         self.state.begin_edit();
-                        self.set_param_from_x(*position, ui::Hit::MusicField(field), &layout);
+                        self.set_param_from_x(*position, ui::Hit::MusicField(field), layout);
                         self.state.view.drag = Drag::Music {
                             field,
                             last_x: position.x,
@@ -404,8 +364,9 @@ impl AppLogic for SfxLogic {
                         if let (Some(index), Some(layer)) =
                             (self.state.clip_index(), self.state.layer_index())
                         {
+                            self.state.focus_document();
                             self.state.begin_edit();
-                            self.set_param_from_x(*position, ui::Hit::ClipField(field), &layout);
+                            self.set_param_from_x(*position, ui::Hit::ClipField(field), layout);
                             self.state.view.drag = Drag::ClipField {
                                 layer,
                                 clip: index,
@@ -458,18 +419,19 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::Ruler(time)) => {
+                        self.state.focus_document();
                         self.state.view.drag = Drag::Seek { waveform: false };
                         self.seek(time);
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::Waveform(time)) => {
+                        self.state.focus_document();
                         self.state.view.drag = Drag::Seek { waveform: true };
                         self.seek(time);
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::LibraryScrollbar) => {
                         self.state.view.drag = Drag::LibraryScroll {
-                            mode: self.state.view.library_mode,
                             start_y: position.y,
                             start_scroll: self.state.library_scroll(),
                             travel: (layout.library_scrollbar.size.height
@@ -487,6 +449,7 @@ impl AppLogic for SfxLogic {
                         return EventResult::Handled;
                     }
                     Some(ui::Hit::Pattern(row, step)) => {
+                        self.state.focus_document();
                         self.push_undo();
                         toggle_pattern(&mut self.state.doc.project.music, row, step);
                         self.state.mark_dirty();
@@ -496,6 +459,7 @@ impl AppLogic for SfxLogic {
                         if let (Some(clip), Some(layer)) =
                             (self.state.clip_index(), self.state.layer_index())
                         {
+                            self.state.focus_document();
                             self.state.begin_edit();
                             self.state.view.selected_env_point = Some(index);
                             self.state.view.drag = Drag::AutomationPoint { layer, clip, index };
@@ -511,6 +475,7 @@ impl AppLogic for SfxLogic {
                         if let (Some(clip_index), Some(layer_index)) =
                             (self.state.clip_index(), self.state.layer_index())
                         {
+                            self.state.focus_document();
                             self.state.begin_edit();
                             let kind = self.state.view.automation_lane;
                             let mut added = None;
@@ -534,13 +499,13 @@ impl AppLogic for SfxLogic {
             }
             InputEvent::PointerMove { position } => {
                 self.state.view.cursor = *position;
-                let pointer_hit = ui::hit(&self.state, &layout, *position);
+                let pointer_hit = ui::hit(&self.state, layout, *position);
                 self.state.view.hover_hit = pointer_hit;
                 self.state.view.hover = match pointer_hit {
                     Some(ui::Hit::Action(action)) => Some(action),
                     _ => None,
                 };
-                self.handle_drag(*position, &layout);
+                self.handle_drag(*position, layout);
                 return EventResult::Handled;
             }
             InputEvent::PointerLeave => {
@@ -554,7 +519,7 @@ impl AppLogic for SfxLogic {
                 return EventResult::Handled;
             }
             InputEvent::DoubleClick { position } => {
-                let hit = ui::hit(&self.state, &layout, *position);
+                let hit = ui::hit(&self.state, layout, *position);
                 match hit {
                     Some(ui::Hit::LibraryRow(LibraryKey::Sound(id))) => {
                         if let Some(index) = self
@@ -576,6 +541,7 @@ impl AppLogic for SfxLogic {
                         }
                     }
                     Some(ui::Hit::LayerField(field)) => {
+                        self.state.focus_document();
                         self.push_undo();
                         let default = Layer::default();
                         if let Some(layer) = self.state.layer_mut() {
@@ -584,6 +550,7 @@ impl AppLogic for SfxLogic {
                         }
                     }
                     Some(ui::Hit::PatchField(field)) => {
+                        self.state.focus_document();
                         self.push_undo();
                         let default = Patch::default();
                         if let Some(patch) = self.state.patch_mut() {
@@ -593,6 +560,7 @@ impl AppLogic for SfxLogic {
                     }
                     Some(ui::Hit::ClipField(field)) => {
                         if self.state.clip_index().is_some() {
+                            self.state.focus_document();
                             self.push_undo();
                             let max_duration = self
                                 .state
@@ -608,6 +576,7 @@ impl AppLogic for SfxLogic {
                         }
                     }
                     Some(ui::Hit::Curve(kind)) => {
+                        self.state.focus_document();
                         self.push_undo();
                         if let Some(layer) = self.state.layer_mut() {
                             match kind {
@@ -618,6 +587,7 @@ impl AppLogic for SfxLogic {
                         self.state.mark_dirty();
                     }
                     Some(ui::Hit::MusicField(field)) => {
+                        self.state.focus_document();
                         self.push_undo();
                         let default = model::Music::default();
                         field.set(&mut self.state.doc.project.music, field.get(&default));
@@ -632,13 +602,13 @@ impl AppLogic for SfxLogic {
                 self.state.view.timeline_pin = None;
                 if let Drag::LibraryItem { key, moved, .. } = drag {
                     if moved {
-                        self.drop_library_item(key, *position, &layout);
+                        self.drop_library_item(key, *position, layout);
                     } else {
                         self.activate_library_row(key);
                     }
                 }
                 self.state.commit_edit();
-                self.state.view.hover_hit = ui::hit(&self.state, &layout, *position);
+                self.state.view.hover_hit = ui::hit(&self.state, layout, *position);
                 return EventResult::Handled;
             }
             InputEvent::Wheel {
@@ -659,7 +629,7 @@ impl AppLogic for SfxLogic {
                 }
                 if layout.right.contains(*position) {
                     self.state.view.inspector_scroll =
-                        inspector_wheel_scroll(self.state.view.inspector_scroll, delta.y, &layout);
+                        inspector_wheel_scroll(self.state.view.inspector_scroll, delta.y, layout);
                     return EventResult::Handled;
                 }
                 if layout.timeline.contains(*position) {
@@ -707,11 +677,38 @@ impl AppLogic for SfxLogic {
         }
         EventResult::Ignored
     }
+}
+
+impl AppLogic for SfxLogic {
+    fn init(&mut self, ctx: &InitContext<'_>) {
+        if let Some(measurer) = ctx.service::<Rc<dyn TextMeasurer>>() {
+            self.measurer = Some(measurer.clone());
+        }
+    }
+
+    fn event(&mut self, _ctx: &EventContext<'_>, event: &InputEvent) -> EventResult {
+        self.handle_event(event)
+    }
 
     fn update(&mut self, ctx: &FrameContext<'_>) {
         self.state.view.viewport = ctx.viewport().logical_size();
         if matches!(self.state.view.drag, Drag::None) {
             self.state.view.timeline_pin = None;
+        }
+        // A patch switch, tab switch or undo invalidates the preview cache with
+        // version 0. Do not keep playing the old buffer while the UI shows the
+        // new document. Asset auditions are excluded via `preset_playing`.
+        let stale_project_playback = self.audio.as_ref().is_some_and(|audio| {
+            project_playback_is_stale(
+                self.state.view.tab,
+                self.state.playback.cache_version,
+                self.state.playback.music_cache_version,
+                audio.is_playing(),
+                self.state.playback.preset_playing,
+            )
+        });
+        if stale_project_playback {
+            self.stop();
         }
         if let Some((_, deadline)) = &self.state.ui.toast {
             if Instant::now() > *deadline {
@@ -755,16 +752,18 @@ impl AppLogic for SfxLogic {
                     self.state.playback.seeked = false;
                 }
                 self.state.playback.preset_playing = false;
+                self.state.playback.source = None;
             }
             self.state.playback.was_playing = playing;
         }
     }
 
     fn paint(&mut self, _ctx: &FrameContext<'_>, paint: &mut PaintContext) {
-        let Some(measurer) = &self.measurer else {
+        let Some(measurer) = self.measurer.clone() else {
             return;
         };
-        ui::paint(&self.state, measurer.as_ref(), paint);
+        let layout = self.layout();
+        ui::paint_with_layout(&self.state, measurer.as_ref(), paint, layout.as_ref());
     }
 
     fn needs_frame(&self) -> bool {
@@ -840,6 +839,42 @@ impl AppLogic for SfxLogic {
             None => Some(Cursor::Default),
         }
     }
+}
+
+impl SfxLogic {
+    /// Build (or reuse) the frame layout. Input and paint share the same
+    /// `Rc<Layout>` so library rows and inspector rows are only rebuilt when a
+    /// relevant state field changes.
+    fn layout(&mut self) -> Rc<ui::Layout> {
+        let key = LayoutKey::of(&self.state);
+        if let Some((cached_key, layout)) = &self.layout {
+            if *cached_key == key {
+                return layout.clone();
+            }
+        }
+        let layout = Rc::new(ui::Layout::new(&self.state, self.state.view.viewport));
+        self.layout = Some((key, layout.clone()));
+        layout
+    }
+}
+
+/// A patch/tab/undo switch invalidates the preview cache with version 0.
+/// Project playback must stop so the old buffer cannot keep sounding while the
+/// UI shows the new document. Asset auditions keep their own flag and are not
+/// affected by document cache versions.
+fn project_playback_is_stale(
+    tab: Tab,
+    patch_cache: u64,
+    music_cache: u64,
+    playing: bool,
+    preset_playing: bool,
+) -> bool {
+    playing
+        && !preset_playing
+        && match tab {
+            Tab::Patches => patch_cache == 0,
+            Tab::Music => music_cache == 0,
+        }
 }
 
 /// Core wheel convention: positive `delta.y` scrolls down.
@@ -1084,7 +1119,6 @@ impl SfxLogic {
                 self.state.view.drag = Drag::Seek { waveform };
             }
             Drag::LibraryScroll {
-                mode,
                 start_y,
                 start_scroll,
                 travel,
@@ -1096,7 +1130,6 @@ impl SfxLogic {
                     .clamp(0.0, max_start as f32) as usize;
                 self.state.set_library_scroll(value);
                 self.state.view.drag = Drag::LibraryScroll {
-                    mode,
                     start_y,
                     start_scroll,
                     travel,
@@ -1215,5 +1248,196 @@ impl SfxLogic {
                 };
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_logic() -> SfxLogic {
+        SfxLogic {
+            state: State::demo(),
+            measurer: None,
+            audio: None,
+            render: None,
+            layout: None,
+        }
+    }
+
+    fn click(logic: &mut SfxLogic, position: Vec2) {
+        logic.handle_event(&InputEvent::PointerDown {
+            position,
+            button: PointerButton::Left,
+        });
+        logic.handle_event(&InputEvent::PointerUp {
+            position,
+            button: PointerButton::Left,
+        });
+    }
+
+    #[test]
+    fn clicking_a_layer_reclaims_focus_from_a_preset_row() {
+        let mut logic = test_logic();
+        logic.state.select_preset(0);
+        assert!(logic.state.preset_focus());
+        let layout = logic.layout();
+        let row = layout.layer_rows[0].1;
+        click(
+            &mut logic,
+            Vec2::new(layout.timeline.left() + 4.0, row.center().y),
+        );
+        assert!(!logic.state.preset_focus());
+        assert_eq!(
+            logic.state.selected_library_kind(),
+            Some(crate::library::LibraryKind::Sound)
+        );
+    }
+
+    #[test]
+    fn clicking_the_music_tab_reclaims_preset_focus() {
+        let mut logic = test_logic();
+        logic.state.select_preset(0);
+        let layout = logic.layout();
+        let tab = layout
+            .tab_buttons
+            .iter()
+            .find(|button| button.action == ui::Action::TabMusic)
+            .expect("music tab")
+            .rect
+            .center();
+        click(&mut logic, tab);
+        assert_eq!(logic.state.view.tab, Tab::Music);
+        assert!(!logic.state.preset_focus());
+        assert!(logic.state.view.selected_library.is_none());
+    }
+
+    #[test]
+    fn outside_click_closes_the_overlay_and_is_consumed() {
+        let mut logic = test_logic();
+        let layout = logic.layout();
+        click(&mut logic, layout.kind_rect.center());
+        assert!(logic
+            .state
+            .view
+            .overlays
+            .is_open(crate::app::Overlay::KindFilter));
+
+        let before = logic.state.view.selected_library;
+        let layout = logic.layout();
+        let row = layout
+            .library_rows
+            .iter()
+            .rev()
+            .find_map(|(row, rect)| match row {
+                LibraryListRow::Entry(_) => Some(*rect),
+                LibraryListRow::Folder { .. } => None,
+            })
+            .expect("entry row");
+        click(&mut logic, row.center());
+        assert!(!logic
+            .state
+            .view
+            .overlays
+            .is_open(crate::app::Overlay::KindFilter));
+        assert_eq!(
+            logic.state.view.selected_library, before,
+            "outside click must not activate the row underneath"
+        );
+    }
+
+    #[test]
+    fn cmd_z_shortcut_runs_through_the_command_table() {
+        let mut logic = test_logic();
+        logic.state.push_undo();
+        let before = logic.state.doc.undo.len();
+        logic.handle_event(&InputEvent::ModifiersChanged(Modifiers {
+            meta: true,
+            ..Modifiers::NONE
+        }));
+        logic.handle_event(&InputEvent::KeyDown {
+            key: Key::Character('z'),
+        });
+        assert_eq!(logic.state.doc.undo.len(), before - 1);
+    }
+
+    #[test]
+    fn wheel_zoom_updates_the_timeline_scale() {
+        let mut logic = test_logic();
+        let layout = logic.layout();
+        let position = layout.timeline.center();
+        logic.handle_event(&InputEvent::ModifiersChanged(Modifiers {
+            meta: true,
+            ..Modifiers::NONE
+        }));
+        logic.handle_event(&InputEvent::Wheel {
+            position,
+            delta: Vec2::new(0.0, 1.0),
+            phase: igui_core::TouchPhase::Moved,
+            device: igui_core::ScrollDevice::Wheel,
+        });
+        assert!(logic.state.view.timeline_zoom > 1.0);
+        assert!(logic.state.view.timeline_offset >= 0.0);
+    }
+
+    #[test]
+    fn dragging_a_clip_moves_it_and_commits_one_undo() {
+        let mut logic = test_logic();
+        logic.state.layer_mut().expect("layer").ensure_clips();
+        logic.state.mark_dirty();
+        let layout = logic.layout();
+        let row = layout.layer_rows[0].1;
+        let clip = logic.state.layer().expect("layer").clips[0].clone();
+        let start_x = layout.time_x(clip.start + clip.duration * 0.5);
+        let position = Vec2::new(start_x, row.center().y);
+        let undo_before = logic.state.doc.undo.len();
+
+        logic.handle_event(&InputEvent::PointerDown {
+            position,
+            button: PointerButton::Left,
+        });
+        logic.handle_event(&InputEvent::PointerMove {
+            position: Vec2::new(start_x + 24.0, row.center().y),
+        });
+        logic.handle_event(&InputEvent::PointerUp {
+            position: Vec2::new(start_x + 24.0, row.center().y),
+            button: PointerButton::Left,
+        });
+
+        let moved = logic.state.layer().expect("layer").clips[0].start;
+        assert!(moved > clip.start, "clip did not move: {moved}");
+        assert_eq!(logic.state.doc.undo.len(), undo_before + 1);
+    }
+
+    #[test]
+    fn layout_is_reused_until_relevant_state_changes() {
+        let mut logic = SfxLogic {
+            state: State::demo(),
+            measurer: None,
+            audio: None,
+            render: None,
+            layout: None,
+        };
+        let first = logic.layout();
+        let second = logic.layout();
+        assert!(Rc::ptr_eq(&first, &second));
+
+        logic.state.view.kind_filter = Some(crate::library::LibraryKind::Preset);
+        let third = logic.layout();
+        assert!(!Rc::ptr_eq(&first, &third));
+
+        logic.state.view.library_scroll = 1;
+        let fourth = logic.layout();
+        assert!(!Rc::ptr_eq(&third, &fourth));
+    }
+
+    #[test]
+    fn stale_project_playback_is_detected_but_auditions_are_kept() {
+        assert!(project_playback_is_stale(Tab::Patches, 0, 7, true, false));
+        assert!(project_playback_is_stale(Tab::Music, 7, 0, true, false));
+        assert!(!project_playback_is_stale(Tab::Patches, 7, 0, true, false));
+        assert!(!project_playback_is_stale(Tab::Patches, 0, 7, false, false));
+        // A preset/audio audition is not tied to the project preview cache.
+        assert!(!project_playback_is_stale(Tab::Patches, 0, 7, true, true));
     }
 }

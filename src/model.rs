@@ -54,6 +54,183 @@ pub enum Wave {
     Clap,
 }
 
+/// Voice family used by DSP and the inspector registry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WaveFamily {
+    Tone,
+    Noise,
+    Arp,
+    Fm,
+    Pluck,
+    Curve,
+    Sample,
+    Drum,
+}
+
+/// Metadata that used to be spread across `label` / `desc` / `is_tone` /
+/// `is_drum` / `godot_id` matches. DSP still dispatches on the family, but
+/// adding a wave now means adding one definition plus its renderer.
+pub struct WaveDef {
+    pub wave: Wave,
+    pub label: &'static str,
+    pub desc: &'static str,
+    pub family: WaveFamily,
+    /// Godot `SfxLayer.Wave` integer. `Curve` has no native enum and is baked
+    /// on export; it aliases `Pluck` so a rendered `.tres` still contains a
+    /// valid layer value.
+    pub godot_id: u32,
+    /// Export alias when Godot has no native enum (Curve → Pluck).
+    pub godot_alias: Option<Wave>,
+    /// Import mapping when a native Godot id is represented differently on the
+    /// Rust side (Godot SAMPLE 9 → Pluck + embedded AudioStreamWAV).
+    pub godot_import: Option<Wave>,
+}
+
+pub static WAVE_DEFS: &[WaveDef] = &[
+    WaveDef {
+        wave: Wave::Sine,
+        label: "SINE",
+        desc: "正弦 · 纯净柔和，适合提示音、UI、低频",
+        family: WaveFamily::Tone,
+        godot_id: 0,
+        godot_alias: None,
+        godot_import: None,
+    },
+    WaveDef {
+        wave: Wave::Triangle,
+        label: "TRI",
+        desc: "三角 · 圆润带少量谐波，木管/轻提示",
+        family: WaveFamily::Tone,
+        godot_id: 1,
+        godot_alias: None,
+        godot_import: None,
+    },
+    WaveDef {
+        wave: Wave::Saw,
+        label: "SAW",
+        desc: "锯齿 · 明亮富谐波，激光/合成器主音",
+        family: WaveFamily::Tone,
+        godot_id: 2,
+        godot_alias: None,
+        godot_import: None,
+    },
+    WaveDef {
+        wave: Wave::Pulse,
+        label: "PULSE",
+        desc: "脉冲 · 可变占空比，复古芯片/弦乐感",
+        family: WaveFamily::Tone,
+        godot_id: 3,
+        godot_alias: None,
+        godot_import: None,
+    },
+    WaveDef {
+        wave: Wave::Square,
+        label: "SQR",
+        desc: "方波 · 空洞强谐波，警报/8-bit 低音",
+        family: WaveFamily::Tone,
+        godot_id: 4,
+        godot_alias: None,
+        godot_import: None,
+    },
+    WaveDef {
+        wave: Wave::Noise,
+        label: "NOISE",
+        desc: "噪声 · 风、爆炸、摩擦等非音高素材",
+        family: WaveFamily::Noise,
+        godot_id: 5,
+        godot_alias: None,
+        godot_import: None,
+    },
+    WaveDef {
+        wave: Wave::Arp,
+        label: "ARP",
+        desc: "琶音 · ARP 1-4 频率快速轮流发声",
+        family: WaveFamily::Arp,
+        godot_id: 6,
+        godot_alias: None,
+        godot_import: None,
+    },
+    WaveDef {
+        wave: Wave::Fm,
+        label: "FM",
+        desc: "FM · 频率调制，钟声/金属/硬质音色",
+        family: WaveFamily::Fm,
+        godot_id: 7,
+        godot_alias: None,
+        godot_import: None,
+    },
+    WaveDef {
+        wave: Wave::Pluck,
+        label: "PLUCK",
+        desc: "拨弦 · Karplus-Strong，吉他式衰减",
+        family: WaveFamily::Pluck,
+        godot_id: 8,
+        godot_alias: None,
+        godot_import: None,
+    },
+    WaveDef {
+        wave: Wave::Curve,
+        label: "CURVE",
+        desc: "曲线 · 自绘单周期波形，可再画音量包络",
+        family: WaveFamily::Curve,
+        godot_id: 8,
+        godot_alias: Some(Wave::Pluck),
+        godot_import: None,
+    },
+    WaveDef {
+        wave: Wave::Sample,
+        label: "SAMPLE",
+        desc: "采样 · 载入 WAV，按音高/起点/循环播放",
+        family: WaveFamily::Sample,
+        godot_id: 9,
+        godot_alias: None,
+        godot_import: Some(Wave::Pluck),
+    },
+    WaveDef {
+        wave: Wave::Kick,
+        label: "KICK",
+        desc: "底鼓 · 低频冲击 + 点击瞬态",
+        family: WaveFamily::Drum,
+        godot_id: 10,
+        godot_alias: None,
+        godot_import: None,
+    },
+    WaveDef {
+        wave: Wave::Snare,
+        label: "SNARE",
+        desc: "军鼓 · 噪声 + 鼓腔，短促打击",
+        family: WaveFamily::Drum,
+        godot_id: 11,
+        godot_alias: None,
+        godot_import: None,
+    },
+    WaveDef {
+        wave: Wave::Hat,
+        label: "HAT",
+        desc: "踩镲 · 高频噪声，短促金属感",
+        family: WaveFamily::Drum,
+        godot_id: 12,
+        godot_alias: None,
+        godot_import: None,
+    },
+    WaveDef {
+        wave: Wave::Clap,
+        label: "CLAP",
+        desc: "拍手 · 多次噪声脉冲叠加",
+        family: WaveFamily::Drum,
+        godot_id: 13,
+        godot_alias: None,
+        godot_import: None,
+    },
+];
+
+pub fn wave_def(wave: Wave) -> &'static WaveDef {
+    WAVE_DEFS
+        .iter()
+        .find(|definition| definition.wave == wave)
+        .unwrap_or(&WAVE_DEFS[0])
+}
+
 impl Wave {
     pub const ALL: [Wave; 15] = [
         Wave::Sine,
@@ -74,98 +251,40 @@ impl Wave {
     ];
 
     pub fn label(self) -> &'static str {
-        match self {
-            Wave::Sine => "SINE",
-            Wave::Triangle => "TRI",
-            Wave::Saw => "SAW",
-            Wave::Pulse => "PULSE",
-            Wave::Square => "SQR",
-            Wave::Noise => "NOISE",
-            Wave::Arp => "ARP",
-            Wave::Fm => "FM",
-            Wave::Pluck => "PLUCK",
-            Wave::Curve => "CURVE",
-            Wave::Sample => "SAMPLE",
-            Wave::Kick => "KICK",
-            Wave::Snare => "SNARE",
-            Wave::Hat => "HAT",
-            Wave::Clap => "CLAP",
-        }
+        wave_def(self).label
     }
 
     /// One-line Chinese guide shown in the inspector.
     pub fn desc(self) -> &'static str {
-        match self {
-            Wave::Sine => "正弦 · 纯净柔和，适合提示音、UI、低频",
-            Wave::Triangle => "三角 · 圆润带少量谐波，木管/轻提示",
-            Wave::Saw => "锯齿 · 明亮富谐波，激光/合成器主音",
-            Wave::Pulse => "脉冲 · 可变占空比，复古芯片/弦乐感",
-            Wave::Square => "方波 · 空洞强谐波，警报/8-bit 低音",
-            Wave::Noise => "噪声 · 风、爆炸、摩擦等非音高素材",
-            Wave::Arp => "琶音 · ARP 1-4 频率快速轮流发声",
-            Wave::Fm => "FM · 频率调制，钟声/金属/硬质音色",
-            Wave::Pluck => "拨弦 · Karplus-Strong，吉他式衰减",
-            Wave::Curve => "曲线 · 自绘单周期波形，可再画音量包络",
-            Wave::Sample => "采样 · 载入 WAV，按音高/起点/循环播放",
-            Wave::Kick => "底鼓 · 低频冲击 + 点击瞬态",
-            Wave::Snare => "军鼓 · 噪声 + 鼓腔，短促打击",
-            Wave::Hat => "踩镲 · 高频噪声，短促金属感",
-            Wave::Clap => "拍手 · 多次噪声脉冲叠加",
-        }
+        wave_def(self).desc
     }
 
+    pub fn family(self) -> WaveFamily {
+        wave_def(self).family
+    }
+
+    /// True when the wave uses the shared tone oscillator path. `Curve` is a
+    /// tone-family voice for DSP/randomize purposes even though the inspector
+    /// gives it its own `Curve` section.
     pub fn is_tone(self) -> bool {
-        matches!(
-            self,
-            Wave::Sine | Wave::Triangle | Wave::Saw | Wave::Pulse | Wave::Square | Wave::Curve
-        )
-    }
-
-    pub fn is_drum(self) -> bool {
-        matches!(self, Wave::Kick | Wave::Snare | Wave::Hat | Wave::Clap)
+        matches!(self.family(), WaveFamily::Tone | WaveFamily::Curve)
     }
 
     /// Godot `SfxLayer.Wave` integer (their enum order).
     pub fn godot_id(self) -> u32 {
-        match self {
-            Wave::Sine => 0,
-            Wave::Triangle => 1,
-            Wave::Saw => 2,
-            Wave::Pulse => 3,
-            Wave::Square => 4,
-            Wave::Noise => 5,
-            Wave::Arp => 6,
-            Wave::Fm => 7,
-            Wave::Pluck => 8,
-            Wave::Curve => 8,
-            Wave::Sample => 9,
-            Wave::Kick => 10,
-            Wave::Snare => 11,
-            Wave::Hat => 12,
-            Wave::Clap => 13,
-        }
+        wave_def(self).godot_id
+    }
+
+    /// A documented Godot id alias, if this wave has no native enum value.
+    pub fn godot_alias(self) -> Option<Wave> {
+        wave_def(self).godot_alias
     }
 
     pub fn from_godot_id(id: u32) -> Option<Self> {
-        Some(match id {
-            0 => Wave::Sine,
-            1 => Wave::Triangle,
-            2 => Wave::Saw,
-            3 => Wave::Pulse,
-            4 => Wave::Square,
-            5 => Wave::Noise,
-            6 => Wave::Arp,
-            7 => Wave::Fm,
-            8 => Wave::Pluck,
-            // Godot SAMPLE layers embed an AudioStreamWAV; the Rust client
-            // imports them as Pluck (see docs/PARITY.md D4).
-            9 => Wave::Pluck,
-            10 => Wave::Kick,
-            11 => Wave::Snare,
-            12 => Wave::Hat,
-            13 => Wave::Clap,
-            _ => return None,
-        })
+        WAVE_DEFS
+            .iter()
+            .find(|definition| definition.godot_id == id)
+            .map(|definition| definition.godot_import.unwrap_or(definition.wave))
     }
 }
 
@@ -1490,6 +1609,23 @@ fn patch_with_layers(name: &str, category: Category, layers: Vec<Layer>) -> Patc
     }
 }
 
+/// A Unicode-preserving file stem for user-renamed audio/music assets.
+/// Exports still use [`sanitize`] for ASCII-safe names; this only removes path
+/// separators/control characters so `音频 01` stays readable on disk.
+pub fn safe_file_stem(name: &str, fallback: &str) -> String {
+    let cleaned: String = name
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control() && !matches!(ch, '/' | '\\' | ':'))
+        .collect();
+    let cleaned = cleaned.trim_matches('.').trim();
+    if cleaned.is_empty() {
+        fallback.into()
+    } else {
+        cleaned.chars().take(48).collect()
+    }
+}
+
 pub fn sanitize(name: &str) -> String {
     let mut out = String::new();
     for ch in name.chars() {
@@ -2441,20 +2577,15 @@ static DRUM_SECTIONS: &[LayerSectionSpec] = &[LayerSectionSpec {
 /// Inspector layout for a wave family. This is the single source of truth for
 /// which fields a layer exposes; `ui::inspector_items` only renders it.
 pub fn layer_sections(wave: Wave) -> &'static [LayerSectionSpec] {
-    if wave == Wave::Curve {
-        CURVE_SECTIONS
-    } else if wave.is_tone() {
-        TONE_SECTIONS
-    } else {
-        match wave {
-            Wave::Noise => NOISE_SECTIONS,
-            Wave::Arp => ARP_SECTIONS,
-            Wave::Fm => FM_SECTIONS,
-            Wave::Pluck => PLUCK_SECTIONS,
-            Wave::Sample => SAMPLE_SECTIONS,
-            _ if wave.is_drum() => DRUM_SECTIONS,
-            _ => TONE_SECTIONS,
-        }
+    match wave.family() {
+        WaveFamily::Tone => TONE_SECTIONS,
+        WaveFamily::Curve => CURVE_SECTIONS,
+        WaveFamily::Noise => NOISE_SECTIONS,
+        WaveFamily::Arp => ARP_SECTIONS,
+        WaveFamily::Fm => FM_SECTIONS,
+        WaveFamily::Pluck => PLUCK_SECTIONS,
+        WaveFamily::Sample => SAMPLE_SECTIONS,
+        WaveFamily::Drum => DRUM_SECTIONS,
     }
 }
 
@@ -3046,6 +3177,37 @@ mod tests {
         let back: Project = serde_json::from_str(&text).unwrap();
         assert_eq!(back.patches[0].layers[0].tone_env, ToneEnv::Exp);
         assert!((back.patches[0].layers[0].exp_decay - 7.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn wave_registry_covers_every_wave_and_documents_godot_aliases() {
+        let mut native_ids = HashSet::new();
+        for wave in Wave::ALL {
+            let definition = wave_def(wave);
+            assert_eq!(definition.wave, wave);
+            assert!(!definition.label.is_empty());
+            assert!(!definition.desc.is_empty());
+            if let Some(alias) = wave.godot_alias() {
+                assert_eq!(wave_def(alias).godot_id, wave.godot_id());
+            } else {
+                assert!(
+                    native_ids.insert(wave.godot_id()),
+                    "duplicate native Godot id for {wave:?}"
+                );
+            }
+        }
+        assert_eq!(Wave::Curve.godot_alias(), Some(Wave::Pluck));
+        assert_eq!(Wave::Sample.godot_alias(), None);
+        assert_eq!(
+            Wave::from_godot_id(9),
+            Some(Wave::Pluck),
+            "Godot SAMPLE import is Pluck"
+        );
+        for id in 0..=13 {
+            assert!(Wave::from_godot_id(id).is_some(), "missing Godot id {id}");
+        }
+        assert_eq!(Wave::from_godot_id(14), None);
+        assert_eq!(WAVE_DEFS.len(), Wave::ALL.len());
     }
 }
 

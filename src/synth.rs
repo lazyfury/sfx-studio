@@ -1239,6 +1239,15 @@ pub fn peak(samples: &[f32]) -> f32 {
     samples.iter().fold(0.0f32, |acc, s| acc.max(s.abs()))
 }
 
+/// Peak of interleaved `channels` data without splitting it into per-channel
+/// scratch vectors. For stereo this equals `max(peak(left), peak(right))`.
+pub fn peak_interleaved(samples: &[f32], channels: usize) -> f32 {
+    let channels = channels.max(1);
+    samples.chunks_exact(channels).fold(0.0f32, |acc, frame| {
+        frame.iter().fold(acc, |acc, sample| acc.max(sample.abs()))
+    })
+}
+
 /// Min/max buckets for fast waveform painting. Rendering a multi-second cache
 /// every frame is wasteful, so the UI reads this small envelope instead.
 #[derive(Clone, Debug, Default)]
@@ -1278,6 +1287,43 @@ pub fn envelope(samples: &[f32], bins: usize) -> Envelope {
             if value.is_finite() {
                 min = min.min(*value);
                 max = max.max(*value);
+            }
+        }
+        *lo = min;
+        *hi = max;
+    }
+    envelope
+}
+
+/// Envelope of interleaved `channels` data. Channels are averaged on the fly,
+/// so the render worker no longer allocates a full mono copy just to feed the
+/// waveform painter.
+pub fn envelope_interleaved(samples: &[f32], channels: usize, bins: usize) -> Envelope {
+    let channels = channels.max(1);
+    let frames = samples.len() / channels;
+    let bins = bins.max(1);
+    if frames == 0 {
+        return Envelope::default();
+    }
+    let mut envelope = Envelope {
+        min: vec![0.0; bins],
+        max: vec![0.0; bins],
+    };
+    for (bin, (lo, hi)) in envelope
+        .min
+        .iter_mut()
+        .zip(envelope.max.iter_mut())
+        .enumerate()
+    {
+        let first = bin * frames / bins;
+        let last = (((bin + 1) * frames) / bins).max(first + 1).min(frames);
+        let mut min = 0.0f32;
+        let mut max = 0.0f32;
+        for frame in samples[first * channels..last * channels].chunks_exact(channels) {
+            let value = frame.iter().sum::<f32>() / channels as f32;
+            if value.is_finite() {
+                min = min.min(value);
+                max = max.max(value);
             }
         }
         *lo = min;
@@ -1851,5 +1897,34 @@ mod tests {
         assert_eq!(buckets.min, vec![0.0, -1.0]);
         assert_eq!(buckets.max, vec![1.0, 0.5]);
         assert!(envelope(&[], 8).is_empty());
+    }
+
+    #[test]
+    fn interleaved_envelope_matches_the_downmixed_copy() {
+        let stereo: Vec<f32> = (0..500)
+            .flat_map(|index| {
+                let left = (index as f32 * 0.013).sin() * 0.8;
+                let right = (index as f32 * 0.029).cos() * 0.4;
+                [left, right]
+            })
+            .collect();
+        let mono: Vec<f32> = stereo
+            .chunks_exact(2)
+            .map(|frame| (frame[0] + frame[1]) * 0.5)
+            .collect();
+        let expected = envelope(&mono, 16);
+        let actual = envelope_interleaved(&stereo, 2, 16);
+        assert_eq!(actual.min, expected.min);
+        assert_eq!(actual.max, expected.max);
+        assert!(envelope_interleaved(&[], 2, 8).is_empty());
+    }
+
+    #[test]
+    fn interleaved_peak_uses_both_channels() {
+        assert_eq!(peak_interleaved(&[0.2, -0.9, 0.4, -0.3], 2), 0.9);
+        assert_eq!(peak_interleaved(&[-0.7, 0.2, 0.3, 0.1], 2), 0.7);
+        assert_eq!(peak_interleaved(&[], 2), 0.0);
+        // Mono data keeps the same result as the plain peak helper.
+        assert_eq!(peak_interleaved(&[0.1, -0.5], 1), peak(&[0.1, -0.5]));
     }
 }

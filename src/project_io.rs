@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::app::{LibraryMode, State, Tab};
+use crate::app::{Overlay, State, Tab};
 use crate::model::{self, Project};
 use crate::music_bank::MusicBank;
 use crate::presets::PresetBank;
@@ -23,14 +23,10 @@ pub(crate) fn open_folder(state: &mut State, folder: PathBuf) -> Result<Vec<Stri
     state.view.selected_clip = None;
     state.view.selected_env_point = None;
     state.view.inspector_scroll = 0.0;
-    state.view.patch_scroll = 0;
-    state.view.preset_scroll = 0;
     state.view.layer_scroll = 0;
-    state.view.library_mode = LibraryMode::Project;
-    state.view.selected_preset = None;
     state.view.selected_library = None;
     state.view.kind_filter = None;
-    state.view.kind_menu_open = false;
+    state.view.overlays.close(Overlay::KindFilter);
     state.view.library_scroll = 0;
     state.view.folded_folders.clear();
     state.view.kind_filter = None;
@@ -38,7 +34,7 @@ pub(crate) fn open_folder(state: &mut State, folder: PathBuf) -> Result<Vec<Stri
     state.view.favorites_only = false;
     state.view.search.clear();
     state.view.search_focus = false;
-    state.view.menu_open = false;
+    state.view.overlays.close(Overlay::Menu);
     state.view.tab = Tab::Patches;
     state.playback.playhead = 0.0;
     state.playback.seeked = false;

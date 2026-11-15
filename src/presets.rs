@@ -5,13 +5,14 @@
 //! opened, so switching projects switches the internal preset library too.
 //! Favourites live beside the presets in `<project>/presets/.favorites.json`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::library::AssetId;
 use crate::model::{self, Patch, Project};
 
 pub const PRESETS_DIR: &str = "presets";
@@ -24,6 +25,9 @@ pub struct PresetBank {
     paths: Vec<Option<PathBuf>>,
     /// Folder relative to `<project>/presets/`, e.g. `impact`.
     folders: Vec<Option<String>>,
+    /// Stable identity per preset, reused across rescans by source path.
+    ids: Vec<AssetId>,
+    path_ids: HashMap<PathBuf, AssetId>,
     root: Option<PathBuf>,
     favorites: HashSet<String>,
 }
@@ -33,10 +37,12 @@ impl PresetBank {
     pub fn from_patches(presets: Vec<Patch>) -> Self {
         let paths = vec![None; presets.len()];
         let folders = vec![None; presets.len()];
+        let ids: Vec<AssetId> = (0..presets.len() as AssetId).collect();
         Self {
             presets,
             paths,
             folders,
+            ids,
             ..Default::default()
         }
     }
@@ -48,6 +54,7 @@ impl PresetBank {
         self.presets.clear();
         self.paths.clear();
         self.folders.clear();
+        self.ids.clear();
         self.favorites.clear();
 
         let dir = root.join(PRESETS_DIR);
@@ -58,10 +65,25 @@ impl PresetBank {
         let mut presets = Vec::new();
         let mut sources = Vec::new();
         let mut folders = Vec::new();
+        let mut ids = Vec::new();
+        let mut path_ids = HashMap::new();
+        let mut next_id = self
+            .path_ids
+            .values()
+            .copied()
+            .max()
+            .map_or(0, |id| id.saturating_add(1));
         for path in paths {
             match std::fs::read_to_string(&path) {
                 Ok(text) => match serde_json::from_str::<Patch>(&text) {
                     Ok(patch) => {
+                        let id = self.path_ids.get(&path).copied().unwrap_or_else(|| {
+                            let id = next_id;
+                            next_id += 1;
+                            id
+                        });
+                        path_ids.insert(path.clone(), id);
+                        ids.push(id);
                         presets.push(patch);
                         folders.push(preset_folder(&path, &dir));
                         sources.push(Some(path));
@@ -84,7 +106,9 @@ impl PresetBank {
             self.presets = project.patches;
             self.paths = sources.into_iter().take(self.presets.len()).collect();
             self.folders = folders.into_iter().take(self.presets.len()).collect();
+            self.ids = ids.into_iter().take(self.presets.len()).collect();
         }
+        self.path_ids = path_ids;
         if let Ok(favorites) = read_favorites(&dir.join(FAVORITES_FILE)) {
             self.favorites = favorites;
         }
@@ -180,6 +204,14 @@ impl PresetBank {
 
     pub fn get(&self, index: usize) -> Option<&Patch> {
         self.presets.get(index)
+    }
+
+    pub fn asset_id(&self, index: usize) -> Option<AssetId> {
+        self.ids.get(index).copied()
+    }
+
+    pub fn index_of(&self, id: AssetId) -> Option<usize> {
+        self.ids.iter().position(|candidate| *candidate == id)
     }
 
     pub fn path(&self, index: usize) -> Option<&Path> {
@@ -325,10 +357,14 @@ impl PresetBank {
             preset.name = new_name.to_string();
         }
         if index < self.paths.len() {
-            self.paths[index] = Some(target);
+            self.paths[index] = Some(target.clone());
         } else {
             self.paths.resize(index + 1, None);
-            self.paths[index] = Some(target);
+            self.paths[index] = Some(target.clone());
+        }
+        if let Some(id) = self.ids.get(index).copied() {
+            self.path_ids.remove(&source);
+            self.path_ids.insert(target, id);
         }
         if self.favorites.remove(&old_name) {
             self.favorites.insert(new_name.to_string());
@@ -387,6 +423,10 @@ impl PresetBank {
         if index < self.folders.len() {
             self.folders.remove(index);
         }
+        if index < self.ids.len() {
+            self.ids.remove(index);
+        }
+        self.path_ids.remove(&source);
         if self.favorites.remove(&name) {
             self.save_favorites();
         }
@@ -808,6 +848,32 @@ mod tests {
         reloaded.load_project(&root);
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded.folder(0), Some("impact"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn preset_ids_are_stable_across_rescans() {
+        let root = temp_dir("preset-ids");
+        let dir = root.join(PRESETS_DIR);
+        std::fs::create_dir_all(&dir).expect("preset dir");
+        let b = Patch::new_layer("b", Wave::Sine);
+        std::fs::write(dir.join("b.json"), serde_json::to_string(&b).expect("json"))
+            .expect("write");
+        let mut bank = PresetBank::default();
+        bank.load_project(&root);
+        let id_b = bank.asset_id(0).expect("id");
+
+        let a = Patch::new_layer("a", Wave::Sine);
+        std::fs::write(dir.join("a.json"), serde_json::to_string(&a).expect("json"))
+            .expect("write");
+        bank.load_project(&root);
+        let index_b = bank
+            .presets
+            .iter()
+            .position(|patch| patch.name == "b")
+            .expect("b loaded");
+        assert_eq!(bank.asset_id(index_b), Some(id_b));
+        assert_ne!(bank.asset_id(0), Some(id_b));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

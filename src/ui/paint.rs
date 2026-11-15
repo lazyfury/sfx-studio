@@ -3,8 +3,21 @@
 use super::layout::{automation_tabs, pattern_on, pattern_rows};
 use super::*;
 
+#[cfg(test)]
 pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext) {
     let layout = Layout::new(state, state.view.viewport);
+    paint_with_layout(state, measurer, ctx, &layout);
+}
+
+/// Paint using an already-built layout. `SfxLogic` shares one layout between
+/// input hit-testing and paint so large libraries are not rebuilt twice per
+/// frame.
+pub fn paint_with_layout(
+    state: &State,
+    measurer: &dyn TextMeasurer,
+    ctx: &mut PaintContext,
+    layout: &Layout,
+) {
     fill(ctx, Rect::from_min_size(Vec2::ZERO, layout.viewport), BG);
 
     // Top bar
@@ -53,7 +66,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         "MENU",
         icons::document(Icon::Menu),
         state.view.hover_hit == Some(Hit::MenuToggle),
-        state.view.menu_open,
+        state.view.overlays.is_open(Overlay::Menu),
     );
     for button in &layout.tab_buttons {
         paint_button(state, measurer, ctx, button);
@@ -144,7 +157,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
     text_right(
         ctx,
         measurer,
-        &format!("{:02}", state.visible_library_entries().len()),
+        &format!("{:02}", layout.library_visible),
         layout.favorite_rect.left() - 6.0,
         layout.category_rect.center().y,
         SMALL,
@@ -248,12 +261,12 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             },
         );
     }
-    if state.visible_library_entries().is_empty() {
+    if layout.library_visible == 0 {
         let empty = if state.view.kind_filter == Some(LibraryKind::Preset)
             && state.presets.presets.is_empty()
         {
             "NO PRESETS"
-        } else if state.all_library_entries().is_empty() {
+        } else if layout.library_total == 0 {
             "NO ITEMS"
         } else {
             "NO MATCHES"
@@ -280,11 +293,11 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         );
     }
     // Center header
-    paint_header(state, measurer, ctx, &layout);
+    paint_header(state, measurer, ctx, layout);
 
     if state.view.tab == Tab::Patches {
-        paint_timeline(state, measurer, ctx, &layout);
-        paint_automation(state, measurer, ctx, &layout);
+        paint_timeline(state, measurer, ctx, layout);
+        paint_automation(state, measurer, ctx, layout);
         paint_waveform(
             state,
             measurer,
@@ -299,7 +312,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             },
         );
     } else {
-        paint_patterns(state, measurer, ctx, &layout);
+        paint_patterns(state, measurer, ctx, layout);
         paint_waveform(
             state,
             measurer,
@@ -359,7 +372,7 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
     );
     ctx.save();
     ctx.clip_rect(layout.inspector);
-    paint_inspector(state, measurer, ctx, &layout);
+    paint_inspector(state, measurer, ctx, layout);
     ctx.restore();
 
     if layout.inspector_scrollbar.size.height > 0.0 {
@@ -404,20 +417,23 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
             DIM
         },
     );
-    let info = if let Some(entry) = state
-        .selected_library_entry()
-        .filter(|entry| matches!(entry.kind, LibraryKind::Audio | LibraryKind::Music))
-    {
+    // Asset details only apply to AUDIO/MUSIC rows; skip the lookup entirely
+    // while a SOUND/PRESET row or the document is selected.
+    let asset_entry = match state.selected_library_kind() {
+        Some(LibraryKind::Audio | LibraryKind::Music) => state.selected_library_entry(),
+        _ => None,
+    };
+    let info = if let Some(entry) = asset_entry {
         format!(
             "{}  ·  {}  ·  {}",
             entry.kind.label(),
             entry.name,
             entry.detail
         )
-    } else if state.view.library_mode == LibraryMode::Presets {
+    } else if state.preset_library_focus() {
         format!(
             "PROJECT PRESETS  ·  {}  ·  drag to timeline  ·  ⌘E export WAV",
-            state.visible_presets().len()
+            layout.preset_visible
         )
     } else if state.doc.root.is_none() {
         if state.doc.project.patches.is_empty() {
@@ -460,19 +476,19 @@ pub fn paint(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext)
         FAINT,
     );
 
-    paint_menu(state, measurer, ctx, &layout);
-    paint_category_menu(state, measurer, ctx, &layout);
-    paint_kind_menu(state, measurer, ctx, &layout);
+    paint_menu(state, measurer, ctx, layout);
+    paint_category_menu(state, measurer, ctx, layout);
+    paint_kind_menu(state, measurer, ctx, layout);
     if let Drag::LibraryItem {
         key, moved: true, ..
     } = &state.view.drag
     {
-        paint_library_drag(state, measurer, ctx, &layout, *key);
+        paint_library_drag(state, measurer, ctx, layout, *key);
     }
 
     if state.view.modal.is_some() {
-        paint_modal(state, measurer, ctx, &layout);
-    } else if matches!(state.view.drag, Drag::None) && !state.view.menu_open {
+        paint_modal(state, measurer, ctx, layout);
+    } else if matches!(state.view.drag, Drag::None) && !state.view.overlays.is_open(Overlay::Menu) {
         paint_hover_tip(state, measurer, ctx);
     }
 }
@@ -744,7 +760,7 @@ fn paint_menu(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintContext
             && *action == Action::Favorite
             && state.patch().is_some_and(|patch| patch.favorite);
         let mut text_x = item.left() + 10.0;
-        if let Some(icon) = action_icon(*action) {
+        if let Some(icon) = action_meta(*action).icon {
             icons::paint(
                 ctx,
                 icon,
@@ -795,7 +811,7 @@ fn paint_hover_tip(state: &State, measurer: &dyn TextMeasurer, ctx: &mut PaintCo
     let tip = match state.view.hover_hit {
         Some(Hit::Action(action)) => {
             if action_available(state, action) {
-                action_tip(action)
+                action_meta(action).tip
             } else {
                 action_unavailable_message(state, action)
             }
@@ -1660,8 +1676,13 @@ fn paint_modal(
     }
     let hint = if modal.is_input() {
         "ENTER CONFIRM   ESC CANCEL"
-    } else if matches!(modal.action, crate::app::ModalAction::ConfirmDeletePreset) {
-        "ENTER DELETE → presets/.trash/   ESC CANCEL"
+    } else if matches!(
+        modal.action,
+        crate::app::ModalAction::ConfirmDeletePreset
+            | crate::app::ModalAction::ConfirmDeleteAudio
+            | crate::app::ModalAction::ConfirmDeleteMusic
+    ) {
+        "ENTER DELETE → .trash/   ESC CANCEL"
     } else if matches!(modal.action, crate::app::ModalAction::ConfirmNewProject(_)) {
         "ENTER DISCARD & CREATE   ESC CANCEL"
     } else {
@@ -1699,7 +1720,7 @@ fn audio_inspector_items(state: &State) -> Vec<RawItem> {
 
 fn preset_inspector_items(state: &State) -> Vec<RawItem> {
     let mut items = vec![RawItem::Section("PRESET LIBRARY".into())];
-    let Some(index) = state.view.selected_preset else {
+    let Some(index) = state.selected_preset_index() else {
         items.push(RawItem::Note("SELECT A PRESET".into()));
         items.push(RawItem::Note(
             "click a row to audition · drag to timeline or left panel".into(),
@@ -1765,7 +1786,7 @@ pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
     if let Some(LibraryKey::Audio(_)) = state.view.selected_library {
         return audio_inspector_items(state);
     }
-    if state.view.library_mode == LibraryMode::Presets {
+    if state.preset_library_focus() {
         return preset_inspector_items(state);
     }
     let mut items = Vec::new();
@@ -2499,7 +2520,7 @@ fn hover_info(state: &State) -> Option<String> {
             if !action_available(state, action) {
                 return Some(action_unavailable_message(state, action).into());
             }
-            let tip = action_tip(action);
+            let tip = action_meta(action).tip;
             if tip.is_empty() {
                 None
             } else {
@@ -2525,7 +2546,7 @@ fn hover_info(state: &State) -> Option<String> {
             if !action_available(state, action) {
                 return Some(action_unavailable_message(state, action).into());
             }
-            let tip = action_tip(action);
+            let tip = action_meta(action).tip;
             if tip.is_empty() {
                 None
             } else {

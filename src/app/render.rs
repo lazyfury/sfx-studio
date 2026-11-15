@@ -145,24 +145,8 @@ fn worker_loop(jobs: Receiver<RenderJob>, results: Sender<RenderOutcome>, latest
         if latest.load(Ordering::Acquire) != job.seq {
             continue;
         }
-        let mono = if channels == 2 {
-            downmix(&samples)
-        } else {
-            samples.clone()
-        };
-        let envelope = synth::envelope(&mono, synth::ENVELOPE_BINS);
-        let peak = if channels == 2 {
-            let left = samples.iter().step_by(2).copied().collect::<Vec<_>>();
-            let right = samples
-                .iter()
-                .skip(1)
-                .step_by(2)
-                .copied()
-                .collect::<Vec<_>>();
-            synth::peak(&left).max(synth::peak(&right))
-        } else {
-            synth::peak(&mono)
-        };
+        let envelope = synth::envelope_interleaved(&samples, channels, synth::ENVELOPE_BINS);
+        let peak = synth::peak_interleaved(&samples, channels);
         if results
             .send(RenderOutcome {
                 seq: job.seq,
@@ -177,13 +161,6 @@ fn worker_loop(jobs: Receiver<RenderJob>, results: Sender<RenderOutcome>, latest
             break;
         }
     }
-}
-
-fn downmix(samples: &[f32]) -> Vec<f32> {
-    samples
-        .chunks_exact(2)
-        .map(|frame| (frame[0] + frame[1]) * 0.5)
-        .collect()
 }
 
 impl SfxLogic {
@@ -256,7 +233,7 @@ impl SfxLogic {
     fn apply_render(&mut self, outcome: RenderOutcome) {
         match outcome.key.tab {
             Tab::Patches => {
-                self.state.playback.cache = outcome.samples;
+                self.state.playback.cache = std::sync::Arc::new(outcome.samples);
                 self.state.playback.cache_channels = outcome.channels;
                 self.state.playback.cache_peak = outcome.peak;
                 self.state.playback.cache_envelope = outcome.envelope;
@@ -264,7 +241,7 @@ impl SfxLogic {
                 self.state.playback.cache_rate = outcome.key.rate;
             }
             Tab::Music => {
-                self.state.playback.music_cache = outcome.samples;
+                self.state.playback.music_cache = std::sync::Arc::new(outcome.samples);
                 self.state.playback.music_cache_peak = outcome.peak;
                 self.state.playback.music_envelope = outcome.envelope;
                 self.state.playback.music_cache_version = outcome.key.music_version;

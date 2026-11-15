@@ -1,10 +1,10 @@
 //! Immediate-mode layout, paint and hit-testing for the compact studio shell.
 
-use igui_core::{Color, Rect, Size, Vec2};
+use igui_core::{Color, Key, Modifiers, Rect, Size, Vec2};
 use igui_render::PaintContext;
 use igui_ui::TextMeasurer;
 
-use crate::app::{Drag, LibraryMode, State, Tab, TimelineDrag};
+use crate::app::{Drag, Overlay, State, Tab, TimelineDrag};
 use crate::icons::{self, Icon};
 use crate::library::{LibraryKey, LibraryKind, LibraryListRow};
 use crate::model::{
@@ -43,6 +43,12 @@ pub enum Action {
     RenamePreset,
     DeletePreset,
     RestorePreset,
+    RenameAudio,
+    DeleteAudio,
+    RestoreAudio,
+    RenameMusic,
+    DeleteMusic,
+    RestoreMusic,
     ExportWav,
     Bake,
     Tres,
@@ -83,6 +89,95 @@ pub enum Action {
     Undo,
     Redo,
     AutomationLane(AutomationKind),
+}
+
+/// Everything a command needs to participate in menu availability, undo and
+/// focus handling without duplicating `matches!` lists in the call sites.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ActionScope {
+    /// File/document lifecycle; never disabled by an asset selection.
+    Document,
+    /// Mutates the current project document.
+    ProjectEdit,
+    /// Operates on the selected read-only asset (preset lifecycle).
+    AssetEdit,
+    /// Playback transport.
+    Transport,
+    /// Pure view state (tabs, filters, automation lane).
+    View,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ActionMeta {
+    pub scope: ActionScope,
+    /// `Some(label)` means `activate` pushes one undo snapshot before running.
+    /// Commands that open a modal or handle their own transaction use `None`.
+    pub undo: Option<&'static str>,
+    /// Menu/button label. The menu only stores order + section membership.
+    pub label: &'static str,
+    /// Status-line / tooltip explanation.
+    pub tip: &'static str,
+    pub icon: Option<Icon>,
+}
+
+pub fn action_meta(action: Action) -> ActionMeta {
+    use Action as A;
+    use ActionScope::{AssetEdit, Document, ProjectEdit, Transport, View};
+    let label = action_label(action);
+    let tip = action_tip(action);
+    let icon = action_icon(action);
+    let meta = |scope, undo| ActionMeta {
+        scope,
+        undo,
+        label,
+        tip,
+        icon,
+    };
+    match action {
+        A::NewProject | A::Open | A::Save | A::InstallPresets | A::Bake | A::Tres => {
+            meta(Document, None)
+        }
+        // Target-driven: availability checks `export_patch()`.
+        A::ExportWav => meta(Document, None),
+        A::RenamePreset
+        | A::DeletePreset
+        | A::RestorePreset
+        | A::RenameAudio
+        | A::DeleteAudio
+        | A::RestoreAudio
+        | A::RenameMusic
+        | A::DeleteMusic
+        | A::RestoreMusic => meta(AssetEdit, None),
+        A::SavePreset => meta(ProjectEdit, None),
+        A::Randomize => meta(ProjectEdit, Some("randomize")),
+        A::Vary => meta(ProjectEdit, Some("create variations")),
+        A::Favorite => meta(ProjectEdit, Some("favorite")),
+        A::CategoryCycle | A::FavoriteFilter | A::TabPatches | A::TabMusic => meta(View, None),
+        A::AutomationLane(_) => meta(View, None),
+        A::NewPatch | A::RenamePatch => meta(ProjectEdit, None),
+        A::DeletePatch => meta(ProjectEdit, Some("delete sound")),
+        A::DuplicatePatch => meta(ProjectEdit, Some("duplicate sound")),
+        A::Play | A::Stop | A::Loop | A::Undo | A::Redo => meta(Transport, None),
+        A::AddLayer => meta(ProjectEdit, Some("add layer")),
+        A::DuplicateLayer => meta(ProjectEdit, Some("duplicate layer")),
+        A::DeleteLayer => meta(ProjectEdit, Some("delete layer")),
+        A::SetWave(_) => meta(ProjectEdit, Some("change wave")),
+        A::SetFilter(_) => meta(ProjectEdit, Some("change filter")),
+        A::SetEnv(_) => meta(ProjectEdit, Some("change envelope")),
+        A::SetToneEnv(_) => meta(ProjectEdit, Some("change tone envelope")),
+        A::BassWave(_) | A::ArpWave(_) => meta(ProjectEdit, Some("change music instrument")),
+        A::TogglePatterns => meta(ProjectEdit, Some("toggle patterns")),
+        A::ChordPreset(_) => meta(ProjectEdit, Some("chord preset")),
+        A::DemoTrack(_) => meta(ProjectEdit, Some("load demo track")),
+        A::Transpose(_) => meta(ProjectEdit, Some("transpose")),
+        A::ResetPatterns => meta(ProjectEdit, Some("reset patterns")),
+        A::AddClip => meta(ProjectEdit, Some("add clip")),
+        A::DeleteClip => meta(ProjectEdit, Some("delete clip")),
+        A::LoadSample => meta(ProjectEdit, None),
+        A::ToggleSampleLoop => meta(ProjectEdit, Some("sample loop")),
+        A::ToggleSampleReverse => meta(ProjectEdit, Some("sample reverse")),
+        A::UpgradeDsp => meta(ProjectEdit, None),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -236,33 +331,43 @@ pub struct Button {
 #[derive(Clone, Copy)]
 pub enum MenuEntry {
     Section(&'static str),
-    Item(&'static str, Action),
+    /// The label comes from `action_meta`; this table only declares order and
+    /// grouping so a command cannot have two different menu labels.
+    Item(Action),
 }
 
 /// Top-bar actions are grouped into one system menu instead of a row of
 /// buttons. Keyboard shortcuts remain available.
 pub const MENU_ENTRIES: &[MenuEntry] = &[
     MenuEntry::Section("FILE"),
-    MenuEntry::Item("NEW PROJECT…", Action::NewProject),
-    MenuEntry::Item("OPEN…", Action::Open),
-    MenuEntry::Item("SAVE", Action::Save),
-    MenuEntry::Item("NEW SOUND", Action::NewPatch),
-    MenuEntry::Item("RENAME", Action::RenamePatch),
-    MenuEntry::Item("DUPLICATE", Action::DuplicatePatch),
-    MenuEntry::Item("DELETE", Action::DeletePatch),
+    MenuEntry::Item(Action::NewProject),
+    MenuEntry::Item(Action::Open),
+    MenuEntry::Item(Action::Save),
+    MenuEntry::Item(Action::NewPatch),
+    MenuEntry::Item(Action::RenamePatch),
+    MenuEntry::Item(Action::DuplicatePatch),
+    MenuEntry::Item(Action::DeletePatch),
     MenuEntry::Section("SOUND"),
-    MenuEntry::Item("RANDOMIZE", Action::Randomize),
-    MenuEntry::Item("VARY A/B/C", Action::Vary),
-    MenuEntry::Item("FAVORITE", Action::Favorite),
+    MenuEntry::Item(Action::Randomize),
+    MenuEntry::Item(Action::Vary),
+    MenuEntry::Item(Action::Favorite),
     MenuEntry::Section("PRESETS"),
-    MenuEntry::Item("SAVE AS PRESET", Action::SavePreset),
-    MenuEntry::Item("RENAME PRESET", Action::RenamePreset),
-    MenuEntry::Item("DELETE PRESET", Action::DeletePreset),
-    MenuEntry::Item("RESTORE LAST PRESET", Action::RestorePreset),
+    MenuEntry::Item(Action::SavePreset),
+    MenuEntry::Item(Action::RenamePreset),
+    MenuEntry::Item(Action::DeletePreset),
+    MenuEntry::Item(Action::RestorePreset),
+    MenuEntry::Section("AUDIO"),
+    MenuEntry::Item(Action::RenameAudio),
+    MenuEntry::Item(Action::DeleteAudio),
+    MenuEntry::Item(Action::RestoreAudio),
+    MenuEntry::Section("MUSIC"),
+    MenuEntry::Item(Action::RenameMusic),
+    MenuEntry::Item(Action::DeleteMusic),
+    MenuEntry::Item(Action::RestoreMusic),
     MenuEntry::Section("EXPORT"),
-    MenuEntry::Item("EXPORT WAV", Action::ExportWav),
-    MenuEntry::Item("BAKE GODOT", Action::Bake),
-    MenuEntry::Item("EXPORT .TRES", Action::Tres),
+    MenuEntry::Item(Action::ExportWav),
+    MenuEntry::Item(Action::Bake),
+    MenuEntry::Item(Action::Tres),
 ];
 
 pub enum RawItem {
@@ -325,14 +430,195 @@ pub enum Item {
     },
 }
 
+pub fn action_label(action: Action) -> &'static str {
+    match action {
+        Action::NewProject => "NEW PROJECT…",
+        Action::Open => "OPEN…",
+        Action::Save => "SAVE",
+        Action::InstallPresets => "INSTALL BUILTIN PRESETS",
+        Action::SavePreset => "SAVE AS PRESET",
+        Action::RenamePreset => "RENAME PRESET",
+        Action::DeletePreset => "DELETE PRESET",
+        Action::RestorePreset => "RESTORE LAST PRESET",
+        Action::RenameAudio => "RENAME AUDIO",
+        Action::DeleteAudio => "DELETE AUDIO",
+        Action::RestoreAudio => "RESTORE AUDIO",
+        Action::RenameMusic => "RENAME MUSIC",
+        Action::DeleteMusic => "DELETE MUSIC",
+        Action::RestoreMusic => "RESTORE MUSIC",
+        Action::ExportWav => "EXPORT WAV",
+        Action::Bake => "BAKE GODOT",
+        Action::Tres => "EXPORT .TRES",
+        Action::Randomize => "RANDOMIZE",
+        Action::Vary => "VARY A/B/C",
+        Action::Favorite => "FAVORITE",
+        Action::CategoryCycle => "CATEGORY",
+        Action::FavoriteFilter => "FAVORITES",
+        Action::TabPatches => "SOUND",
+        Action::TabMusic => "MUSIC",
+        Action::NewPatch => "NEW SOUND",
+        Action::RenamePatch => "RENAME",
+        Action::DuplicatePatch => "DUPLICATE",
+        Action::DeletePatch => "DELETE",
+        Action::Play => "PLAY",
+        Action::Stop => "STOP",
+        Action::Loop => "LOOP",
+        Action::AddLayer => "LAYER",
+        Action::DuplicateLayer => "DUP",
+        Action::DeleteLayer => "DEL",
+        Action::SetWave(_) => "WAVE",
+        Action::SetFilter(_) => "FILTER",
+        Action::SetEnv(_) => "ENV",
+        Action::SetToneEnv(_) => "TONE ENV",
+        Action::BassWave(_) => "BASS",
+        Action::ArpWave(_) => "ARP",
+        Action::TogglePatterns => "PATTERN",
+        Action::ChordPreset(_) => "CHORDS",
+        Action::DemoTrack(_) => "TRACK",
+        Action::Transpose(_) => "TRANSPOSE",
+        Action::ResetPatterns => "RESET",
+        Action::AddClip => "CLIP",
+        Action::DeleteClip => "DEL CLIP",
+        Action::LoadSample => "LOAD WAV…",
+        Action::ToggleSampleLoop => "LOOP",
+        Action::ToggleSampleReverse => "REVERSE",
+        Action::UpgradeDsp => "UPGRADE TO HD",
+        Action::Undo => "UNDO",
+        Action::Redo => "REDO",
+        Action::AutomationLane(kind) => kind.label(),
+    }
+}
+
+/// One keyboard binding. `shift: None` means "ignore Shift"; `Some` makes the
+/// binding shift-sensitive (Undo/Redo share Cmd+Z).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shortcut {
+    pub key: Key,
+    pub cmd: bool,
+    pub shift: Option<bool>,
+}
+
+pub const SHORTCUTS: &[(Shortcut, Action)] = &[
+    (
+        Shortcut {
+            key: Key::Character('s'),
+            cmd: true,
+            shift: None,
+        },
+        Action::Save,
+    ),
+    (
+        Shortcut {
+            key: Key::Character('o'),
+            cmd: true,
+            shift: None,
+        },
+        Action::Open,
+    ),
+    (
+        Shortcut {
+            key: Key::Character('e'),
+            cmd: true,
+            shift: None,
+        },
+        Action::ExportWav,
+    ),
+    (
+        Shortcut {
+            key: Key::Character('b'),
+            cmd: true,
+            shift: None,
+        },
+        Action::Bake,
+    ),
+    (
+        Shortcut {
+            key: Key::Character('z'),
+            cmd: true,
+            shift: Some(false),
+        },
+        Action::Undo,
+    ),
+    (
+        Shortcut {
+            key: Key::Character('z'),
+            cmd: true,
+            shift: Some(true),
+        },
+        Action::Redo,
+    ),
+    (
+        Shortcut {
+            key: Key::Character('y'),
+            cmd: true,
+            shift: None,
+        },
+        Action::Redo,
+    ),
+    (
+        Shortcut {
+            key: Key::Character('r'),
+            cmd: false,
+            shift: None,
+        },
+        Action::Randomize,
+    ),
+    (
+        Shortcut {
+            key: Key::Character('v'),
+            cmd: false,
+            shift: None,
+        },
+        Action::Vary,
+    ),
+    (
+        Shortcut {
+            key: Key::Character('c'),
+            cmd: false,
+            shift: None,
+        },
+        Action::CategoryCycle,
+    ),
+    (
+        Shortcut {
+            key: Key::Character('l'),
+            cmd: false,
+            shift: None,
+        },
+        Action::Loop,
+    ),
+];
+
+/// Resolve a key chord for the actions that are a straight 1:1 binding.
+/// Space/Tab/Delete/arrows/search/pads stay explicit in `input.rs` because
+/// they have gesture or focus semantics beyond a command dispatch.
+pub fn shortcut_action(key: Key, modifiers: Modifiers) -> Option<Action> {
+    let cmd = modifiers.meta || modifiers.ctrl;
+    SHORTCUTS.iter().find_map(|(shortcut, action)| {
+        let key_matches = match (shortcut.key, key) {
+            (Key::Character(bound), Key::Character(actual)) => bound.eq_ignore_ascii_case(&actual),
+            _ => shortcut.key == key,
+        };
+        if key_matches
+            && shortcut.cmd == cmd
+            && shortcut.shift.is_none_or(|shift| shift == modifiers.shift)
+        {
+            Some(*action)
+        } else {
+            None
+        }
+    })
+}
+
 fn action_icon(action: Action) -> Option<Icon> {
     match action {
         Action::NewProject => Some(Icon::FilePlus),
         Action::Open => Some(Icon::FolderOpen),
         Action::Save => Some(Icon::Save),
         Action::InstallPresets | Action::SavePreset => Some(Icon::FilePlus),
-        Action::RenamePreset => Some(Icon::Pencil),
-        Action::DeletePreset => Some(Icon::Trash),
+        Action::RenamePreset | Action::RenameAudio | Action::RenameMusic => Some(Icon::Pencil),
+        Action::DeletePreset | Action::DeleteAudio | Action::DeleteMusic => Some(Icon::Trash),
+        Action::RestoreAudio | Action::RestoreMusic => Some(Icon::Undo),
         Action::RestorePreset => Some(Icon::Undo),
         Action::NewPatch => Some(Icon::FilePlus),
         Action::RenamePatch => Some(Icon::Pencil),
@@ -365,6 +651,12 @@ fn action_tip(action: Action) -> &'static str {
         Action::RenamePreset => "重命名选中预设 · Rename preset（PRESETS）",
         Action::DeletePreset => "删除选中预设（移到 presets/.trash/）· Delete preset",
         Action::RestorePreset => "从 presets/.trash/ 恢复最近删除的预设 · Restore",
+        Action::RenameAudio => "重命名选中音频文件 · Rename audio",
+        Action::DeleteAudio => "把选中音频移到 audio/.trash/ · Delete audio",
+        Action::RestoreAudio => "恢复 audio/.trash/ 中最近的音频 · Restore audio",
+        Action::RenameMusic => "重命名选中 music 文件 · Rename music",
+        Action::DeleteMusic => "把选中 music 移到 music/.trash/ · Delete music",
+        Action::RestoreMusic => "恢复 music/.trash/ 中最近的 music · Restore music",
         Action::ExportWav => "导出 48 kHz WAV · 预设模式导出选中预设（⌘E）",
         Action::Bake => "烘焙 Godot 音频资源 · Bake（⌘B）",
         Action::Tres => "导出 Godot .tres 参数 · Resource",
@@ -419,87 +711,66 @@ pub enum DropTarget {
     ProjectLibrary,
 }
 
-/// Project-only commands are disabled while the PRESETS source is active so
-/// the selected row and the command target cannot silently disagree. WAV
-/// export stays available, but it needs a selected preset to write.
+/// Commands that mutate the project document. They are disabled while a
+/// PRESET row owns the focus (the preset library is read-only) but remain
+/// available when inspecting an AUDIO/MUSIC row: those rows are project
+/// assets, not a different editing mode.
+pub fn is_project_edit(action: Action) -> bool {
+    action_meta(action).scope == ActionScope::ProjectEdit
+}
+
+/// Project-only commands are disabled while a PRESET row is focused so the
+/// selected row and the command target cannot silently disagree. Document-level
+/// commands (Save/Open/Bake/TRES/New Project) stay available; AUDIO/MUSIC
+/// inspection never disables project editing.
+///
+/// WAV export is target-driven: it needs a project patch or a selected preset.
 pub fn action_available(state: &State, action: Action) -> bool {
-    let selected_preset = state
-        .view
-        .selected_preset
-        .and_then(|index| state.presets.get(index))
-        .is_some();
-    if matches!(action, Action::RenamePreset | Action::DeletePreset) {
-        return state.view.library_mode == LibraryMode::Presets && selected_preset;
+    match action {
+        Action::RenamePreset | Action::DeletePreset => state.selected_preset_index().is_some(),
+        Action::RenameAudio | Action::DeleteAudio => state.selected_audio_index().is_some(),
+        Action::RestoreAudio | Action::RestoreMusic => state.doc.root.is_some(),
+        Action::RenameMusic | Action::DeleteMusic => state.selected_music().is_some(),
+        Action::RestorePreset => state.preset_library_focus(),
+        Action::ExportWav => state.export_patch().is_some(),
+        _ if is_project_edit(action) => !state.preset_focus(),
+        _ => true,
     }
-    if action == Action::RestorePreset {
-        return state.view.library_mode == LibraryMode::Presets;
-    }
-    let focused_read_only = matches!(
-        state.selected_library_kind(),
-        Some(crate::library::LibraryKind::Audio | crate::library::LibraryKind::Music)
-    );
-    if state.view.library_mode != LibraryMode::Presets && !focused_read_only {
-        return true;
-    }
-    if action == Action::ExportWav {
-        return matches!(
-            state.view.selected_library,
-            Some(crate::library::LibraryKey::Preset(_))
-        );
-    }
-    !matches!(
-        action,
-        Action::NewPatch
-            | Action::RenamePatch
-            | Action::DeletePatch
-            | Action::DuplicatePatch
-            | Action::Randomize
-            | Action::Vary
-            | Action::Favorite
-            | Action::SavePreset
-            | Action::Bake
-            | Action::Tres
-            | Action::AddLayer
-            | Action::DuplicateLayer
-            | Action::DeleteLayer
-            | Action::AddClip
-            | Action::DeleteClip
-            | Action::LoadSample
-            | Action::ToggleSampleLoop
-            | Action::ToggleSampleReverse
-            | Action::UpgradeDsp
-    )
 }
 
 /// Human-readable reason for a greyed-out action, used by the tooltip and the
 /// status line. Keeps the PRESETS read-only boundary separate from the benign
 /// "select a preset first" case.
 pub fn action_unavailable_message(state: &State, action: Action) -> &'static str {
-    if matches!(
-        action,
-        Action::RenamePreset | Action::DeletePreset | Action::RestorePreset
-    ) && state.view.library_mode != LibraryMode::Presets
-    {
-        return "切到 PRESETS 后管理预设 · switch to PRESETS";
-    }
-    if matches!(
-        state.selected_library_kind(),
-        Some(crate::library::LibraryKind::Audio | crate::library::LibraryKind::Music)
-    ) && state.view.library_mode != LibraryMode::Presets
-    {
-        return "AUDIO/MUSIC 只读 · 选 SOUND 编辑";
-    }
-    if state.view.library_mode == LibraryMode::Presets {
-        if matches!(
-            action,
-            Action::ExportWav | Action::RenamePreset | Action::DeletePreset
-        ) {
+    if action == Action::ExportWav {
+        if state.preset_focus() {
             return "先选中一个预设 · select a preset";
         }
-        if action == Action::SavePreset {
-            return "切回 PROJECT 保存当前音效为预设 · switch to PROJECT";
+        if matches!(
+            state.selected_library_kind(),
+            Some(crate::library::LibraryKind::Audio | crate::library::LibraryKind::Music)
+        ) {
+            return "AUDIO/MUSIC 不能导出为音效 · 选 SOUND 或 PRESET";
         }
-        return "PRESETS 只读 · 切回 PROJECT 编辑";
+        return "没有可导出的音效";
+    }
+    if matches!(action, Action::RenameAudio | Action::DeleteAudio) {
+        return "先选中一个音频文件 · select AUDIO";
+    }
+    if matches!(action, Action::RenameMusic | Action::DeleteMusic) {
+        return "先选中一个 music 文件 · select MUSIC";
+    }
+    if matches!(action, Action::RestoreAudio | Action::RestoreMusic) {
+        return "先打开一个工程目录 · open a project";
+    }
+    if matches!(action, Action::RenamePreset | Action::DeletePreset) {
+        return "先选中一个预设 · select a preset";
+    }
+    if action == Action::RestorePreset {
+        return "没有可恢复的预设 · select PRESETS";
+    }
+    if is_project_edit(action) && state.preset_focus() {
+        return "PRESETS 只读 · 选 SOUND 后编辑";
     }
     "action unavailable"
 }
@@ -508,7 +779,9 @@ pub use hit::hit;
 pub use layout::{
     drop_target, layer_capacity, library_capacity, param_track, patch_star_rect, snap_time, Layout,
 };
+#[cfg(test)]
 pub use paint::paint;
+pub use paint::paint_with_layout;
 
 #[cfg(test)]
 mod tests {
@@ -530,7 +803,7 @@ mod tests {
     #[test]
     fn layout_exposes_library_filters_and_system_menu() {
         let mut state = State::demo();
-        state.view.menu_open = true;
+        state.view.overlays.open(Overlay::Menu);
         let layout = Layout::new(&state, state.view.viewport);
         assert!(layout.search_rect.size.width > 0.0);
         assert!(layout.category_rect.size.width > 0.0);
@@ -548,12 +821,17 @@ mod tests {
             .menu_items
             .iter()
             .any(|(action, _, _)| *action == Action::ExportWav));
+        // Badge counts are cached with the layout so paint never rescans the
+        // library on idle frames.
+        assert_eq!(layout.library_visible, state.visible_library_count());
+        assert_eq!(layout.library_total, state.library_total_count());
+        assert_eq!(layout.preset_visible, state.visible_preset_count());
     }
 
     #[test]
     fn system_menu_paints_and_hit_tests_actions() {
         let mut state = State::demo();
-        state.view.menu_open = true;
+        state.view.overlays.open(Overlay::Menu);
         let layout = Layout::new(&state, state.view.viewport);
         let open = layout
             .menu_items
@@ -788,7 +1066,6 @@ mod tests {
     #[test]
     fn preset_filter_swaps_rows_and_hit_targets() {
         let mut state = State::demo();
-        state.view.library_mode = LibraryMode::Presets;
         state.view.kind_filter = Some(LibraryKind::Preset);
         let layout = Layout::new(&state, state.view.viewport);
         assert!(!layout.library_rows.is_empty());
@@ -810,7 +1087,6 @@ mod tests {
     fn empty_presets_offer_an_install_action() {
         let mut state = State::empty();
         state.doc.root = Some(std::path::PathBuf::from("/tmp/sfx-studio-install"));
-        state.view.library_mode = LibraryMode::Presets;
         state.view.kind_filter = Some(LibraryKind::Preset);
         let layout = Layout::new(&state, state.view.viewport);
         let button = layout.install_presets.expect("install button");
@@ -827,7 +1103,6 @@ mod tests {
     #[test]
     fn preset_mode_inspector_describes_the_selected_preset() {
         let mut state = State::demo();
-        state.view.library_mode = LibraryMode::Presets;
         state.select_preset(1);
         let name = state.preset(1).expect("preset").name.clone();
         let items = inspector_items(&state);
@@ -843,9 +1118,69 @@ mod tests {
     }
 
     #[test]
-    fn preset_mode_disables_project_only_actions() {
+    fn shortcuts_and_menu_labels_are_centralized() {
+        use igui_core::Modifiers;
+        let cmd = Modifiers {
+            meta: true,
+            ..Modifiers::NONE
+        };
+        let cmd_shift = Modifiers {
+            meta: true,
+            shift: true,
+            ..Modifiers::NONE
+        };
+        let plain = Modifiers::NONE;
+        assert_eq!(
+            shortcut_action(Key::Character('s'), cmd),
+            Some(Action::Save)
+        );
+        assert_eq!(
+            shortcut_action(Key::Character('z'), cmd),
+            Some(Action::Undo)
+        );
+        assert_eq!(
+            shortcut_action(Key::Character('z'), cmd_shift),
+            Some(Action::Redo)
+        );
+        assert_eq!(
+            shortcut_action(Key::Character('r'), plain),
+            Some(Action::Randomize)
+        );
+        assert_eq!(
+            shortcut_action(Key::Character('R'), plain),
+            Some(Action::Randomize)
+        );
+        // F has mode-specific behavior (preset vs sound) and stays explicit.
+        assert_eq!(shortcut_action(Key::Character('f'), plain), None);
+        assert_eq!(action_meta(Action::Bake).label, "BAKE GODOT");
+        assert_eq!(action_meta(Action::DeleteLayer).label, "DEL");
+        for entry in MENU_ENTRIES {
+            if let MenuEntry::Item(action) = entry {
+                assert_eq!(action_meta(*action).label, action_label(*action));
+                assert!(!action_label(*action).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn action_meta_is_the_single_scope_and_undo_source() {
+        use ActionScope::{AssetEdit, Document, ProjectEdit, Transport, View};
+        assert_eq!(action_meta(Action::Bake).scope, Document);
+        assert_eq!(action_meta(Action::RenamePreset).scope, AssetEdit);
+        assert_eq!(action_meta(Action::Randomize).scope, ProjectEdit);
+        assert_eq!(action_meta(Action::Randomize).undo, Some("randomize"));
+        assert_eq!(action_meta(Action::NewPatch).undo, None);
+        assert_eq!(action_meta(Action::LoadSample).undo, None);
+        assert_eq!(action_meta(Action::Play).scope, Transport);
+        assert_eq!(action_meta(Action::TabMusic).scope, View);
+        assert!(is_project_edit(Action::AddLayer));
+        assert!(!is_project_edit(Action::Bake));
+    }
+
+    #[test]
+    fn preset_focus_disables_project_edits_but_not_document_commands() {
         let mut state = State::demo();
-        state.view.library_mode = LibraryMode::Presets;
+        state.select_preset(0);
         for action in [
             Action::NewPatch,
             Action::RenamePatch,
@@ -855,8 +1190,6 @@ mod tests {
             Action::Vary,
             Action::Favorite,
             Action::SavePreset,
-            Action::Bake,
-            Action::Tres,
             Action::AddLayer,
             Action::DuplicateLayer,
             Action::DeleteLayer,
@@ -866,26 +1199,24 @@ mod tests {
             Action::ToggleSampleLoop,
             Action::ToggleSampleReverse,
             Action::UpgradeDsp,
-            Action::RenamePreset,
-            Action::DeletePreset,
         ] {
             assert!(!action_available(&state, action), "{action:?}");
         }
+        // Document-level commands are not project edits: baking/exporting the
+        // project while auditioning a preset is valid.
         assert!(action_available(&state, Action::Save));
         assert!(action_available(&state, Action::Open));
+        assert!(action_available(&state, Action::Bake));
+        assert!(action_available(&state, Action::Tres));
         assert!(action_available(&state, Action::InstallPresets));
 
-        // WAV export is the one project-style command that stays useful in
-        // PRESETS mode; it targets the selected preset and needs a selection.
-        assert!(!action_available(&state, Action::ExportWav));
-        assert!(action_unavailable_message(&state, Action::ExportWav).contains("先选中一个预设"));
-        state.select_preset(0);
+        // WAV export targets the selected preset.
         assert!(action_available(&state, Action::ExportWav));
         assert!(action_available(&state, Action::RenamePreset));
         assert!(action_available(&state, Action::DeletePreset));
         assert!(action_available(&state, Action::RestorePreset));
 
-        state.view.library_mode = LibraryMode::Project;
+        state.focus_document();
         assert!(action_available(&state, Action::ExportWav));
         assert!(!action_available(&state, Action::RenamePreset));
         assert!(!action_available(&state, Action::DeletePreset));
@@ -893,9 +1224,53 @@ mod tests {
     }
 
     #[test]
+    fn audio_and_music_lifecycle_actions_need_a_selection() {
+        let mut state = State::demo();
+        for action in [
+            Action::RenameAudio,
+            Action::DeleteAudio,
+            Action::RenameMusic,
+            Action::DeleteMusic,
+        ] {
+            assert!(!action_available(&state, action), "{action:?}");
+            assert!(!action_unavailable_message(&state, action).is_empty());
+        }
+        assert!(!action_available(&state, Action::RestoreAudio));
+        state.doc.root = Some(std::path::PathBuf::from("/tmp/sfx-studio-audio"));
+        assert!(action_available(&state, Action::RestoreAudio));
+        assert!(action_available(&state, Action::RestoreMusic));
+    }
+
+    #[test]
+    fn audio_focus_does_not_disable_document_commands() {
+        let mut state = State::demo();
+        state.view.selected_library = Some(LibraryKey::Audio(0));
+
+        for action in [
+            Action::Bake,
+            Action::Tres,
+            Action::SavePreset,
+            Action::Randomize,
+            Action::AddLayer,
+            Action::DeleteLayer,
+            Action::Favorite,
+        ] {
+            assert!(action_available(&state, action), "{action:?}");
+        }
+        // There is no patch target for an AUDIO row.
+        assert!(!action_available(&state, Action::ExportWav));
+        assert!(action_unavailable_message(&state, Action::ExportWav).contains("AUDIO/MUSIC"));
+        assert!(!action_available(&state, Action::RenamePreset));
+        assert!(!action_available(&state, Action::DeletePreset));
+
+        let patch_id = state.patch().expect("patch").id;
+        state.view.selected_library = Some(LibraryKey::Sound(patch_id));
+        assert!(action_available(&state, Action::ExportWav));
+    }
+
+    #[test]
     fn preset_mode_paints_rows_and_the_drag_ghost() {
         let mut state = State::demo();
-        state.view.library_mode = LibraryMode::Presets;
         let layout = Layout::new(&state, state.view.viewport);
         let row = layout.layer_rows[0].1;
         state.view.cursor = Vec2::new(layout.time_x(0.3), row.center().y);
@@ -949,7 +1324,7 @@ mod tests {
     #[test]
     fn category_menu_lists_and_hits_every_category() {
         let mut state = State::demo();
-        state.view.category_menu_open = true;
+        state.view.overlays.open(Overlay::CategoryFilter);
         let layout = Layout::new(&state, state.view.viewport);
         let menu = layout.category_menu.expect("menu open");
         assert_eq!(layout.category_items.len(), Category::ALL.len() + 1);
@@ -1260,7 +1635,7 @@ mod tests {
     #[test]
     fn kind_menu_lists_every_resource_and_clear_is_clickable() {
         let mut state = State::demo();
-        state.view.kind_menu_open = true;
+        state.view.overlays.open(Overlay::KindFilter);
         let layout = Layout::new(&state, state.view.viewport);
         assert_eq!(layout.kind_items.len(), LibraryKind::ALL.len() + 1);
         for (kind, rect) in &layout.kind_items {

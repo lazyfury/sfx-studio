@@ -782,3 +782,332 @@ cargo run -- --selfcheck
 - `cargo test` 174 passed；`--new` 生成 22 presets + 3 music + baked audio。
 - 左栏 MUSIC 只显示 `music/` 下的真实文件；点击后右侧进入 MUSIC 检查器。
 - 空目录在 GUI `OPEN` 下自动创建工程/预设/music；不再要求命令行初始化。
+
+## 35. 本轮修复（0035）— 架构 P0：焦点 / 命令作用域 / 导出元数据
+
+目标：先修 0034 审查发现的跨控件交互缺陷，不改变 schema、不重写模型。
+对应 `docs/reviews/0034-architecture-audit.md` 的 P0 清单。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0035-1 | 焦点归位 | 新增 `State::focus_document()`；点击图层/Clip/参数/自动化/波形/pattern 时清掉 AUDIO/PRESET/MUSIC 行焦点 | `document_clicks_reclaim_asset_focus` |
+| 0035-2 | Tab 归位 | `SfxLogic::switch_tab()` 停播、切 tab、归位焦点；`Tab` 键与菜单共用 | `switching_tabs_reclaims_asset_focus` |
+| 0035-3 | 命令作用域 | `ui::is_project_edit` + 新的 `action_available`：PRESET 焦点只禁用工程编辑；AUDIO/MUSIC 不再禁用 Bake/TRES/SavePreset/编辑；WAV 导出按目标可用性判定 | `preset_focus_disables_project_edits_but_not_document_commands`、`audio_focus_does_not_disable_document_commands` |
+| 0035-4 | 筛选无副作用 | `pick_kind` 只选中首个可见行，不再 `activate_library_row`（MUSIC 不会自动载入）；筛选清空选中时同步退出 PRESETS 模式 | `filtering_by_music_selects_without_loading` |
+| 0035-5 | Undo 事务 | `A::LoadSample` 移出手写 snapshot 白名单；对话框取消不再压栈；`apply_sample` 用 `begin_edit`/`commit_edit` 只压一次；菜单 Favorite 与星标行为统一 | `applying_a_sample_is_a_single_undo` |
+| 0035-6 | 导出元数据 | manifest `duration` 使用实际烘焙率；`.tres` 的 `rate` 使用 `bake_rate()` | `bake_manifest_duration_matches_the_written_wav`、导出测试中的 `rate = 48000` 断言 |
+| 0035-7 | 旧播放停止 | patch/tab/undo 将 cache 版本置 0 后，`update` 停止项目播放；资产试听不受影响 | `stale_project_playback_is_detected_but_auditions_are_kept` |
+
+语义变化：
+
+- PRESET 焦点仍是只读，但 SAVE / OPEN / BAKE GODOT / EXPORT .TRES 等文档级命令可用。
+- AUDIO/MUSIC 焦点不再锁住工程编辑；菜单编辑会先归位到文档焦点。
+- 库类型筛选只改变可见集，不再自动载入 music。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-16）：
+
+- `cargo test` 181 passed；`--selfcheck` 2 frames / 3937 commands / 179 text runs。
+- `--demo` 临时工程：manifest duration 与 WAV 帧数一致（`pickup_coin` 0.328 s，
+  `explosion_burst` 1.407 s），`.tres` 的 `rate = 48000`。
+- 本轮不包含：删 `LibraryMode`、稳定资产 ID、Command 表、Layout 缓存、
+  Transport 重构（仍属 0034 的 P1–P4）。
+
+## 36. 本轮重构（0036）— 架构 P1：单一焦点 / 稳定资产 ID
+
+目标：删除统一 Library 之后遗留的第二套焦点状态，并让 AUDIO/PRESET/MUSIC
+的选中项在重扫、增删文件后仍指向同一资产。不改变 schema、DSP 或导出格式。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0036-1 | 删除 `LibraryMode` | 只读/预设面板改由 `selected_library` 派生：`preset_focus()` / `preset_library_focus()` | 无 `LibraryMode` 引用 |
+| 0036-2 | 删除 `selected_preset` | 新增 `selected_preset_index()`，从 `LibraryKey::Preset(id)` 反查；重命名/删除/导出共用 | 预设相关测试 |
+| 0036-3 | 删除旧滚动 | 移除 `patch_scroll` / `preset_scroll` / `ensure_preset_visible`，只保留统一 `library_scroll` | 列表滚动测试 |
+| 0036-4 | 稳定资产 ID | `AssetId = u32`；`AudioBank` / `PresetBank` / `MusicBank` 按相对路径复用 ID，`LibraryKey` 改存 ID | `audio_ids_are_stable_across_rescans`、`preset_ids_are_stable_across_rescans`、`music_ids_are_stable_across_rescans` |
+| 0036-5 | 选择跨重扫 | 重扫后 `selected_library` 不变，`selected_audio` / `selected_preset_index` 仍解析到同一文件 | `audio_selection_survives_a_rescan_with_new_files`、`preset_selection_survives_a_rescan_with_new_files` |
+| 0036-6 | 单一过滤谓词 | `filters_match()` 同时服务统一条目与 `patch_visible` / `preset_visible` | 既有搜索/分类/收藏测试 |
+
+语义变化：
+
+- 左栏不再有“PROJECT / PRESETS 模式”状态；只读由当前选中行是否为 PRESET 决定。
+- 选中项保存的是会话内稳定资产 ID，不再随文件排序/增删改变指向。
+- `AssetId` 仅在会话内稳定；保存格式仍是路径/JSON，不写入工程 schema。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-16）：
+
+- `cargo test` 186 passed；`--selfcheck` 2 frames / 3937 commands / 179 text runs。
+- 新增 5 条 ID/选择回归测试；`./scripts/preflight.sh` 通过。
+- 本轮不包含：Command 表、Layout 缓存、Transport 重构（仍属 0034 的 P2–P4）。
+
+## 37. 本轮重构（0037）— 架构 P2a：命令元数据 / revision 事务
+
+目标：把命令的“作用域 + 撤销策略”从 `activate` 的局部白名单收敛到一张表，
+并让指针手势的 undo 判定不再深比较整个 `Project`（避免扫描采样 PCM）。
+不改变命令行为、schema 或 DSP。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0037-1 | 命令元数据 | `ui::ActionScope` / `ActionMeta` / `action_meta()`；`Document/ProjectEdit/AssetEdit/Transport/View` 五类 | `action_meta_is_the_single_scope_and_undo_source` |
+| 0037-2 | 可用性 | `action_available` 只保留目标特例（预设生命周期 / WAV 导出），其余由 scope 派生 | 既有可用性测试 |
+| 0037-3 | 撤销策略 | `activate` 用 `action_meta(action).undo` 压一次带标签的快照；删除手写 `snapshot` 白名单 | 既有 undo 测试 + 标签可读 |
+| 0037-4 | 指针事务 | `PendingEdit { project, version, music_version }`；`commit_edit` 比较 revision，不再 `before != project` | `undo_transactions_ignore_noop_gestures` |
+| 0037-5 | 单一谓词 | `is_project_edit` 由 `action_meta.scope` 派生，命令表新增项由编译器强制分类 | `action_meta_*` 测试 |
+
+语义变化：
+
+- 菜单/快捷键/按钮的“是否可用”和“是否可撤销”来自同一张表。
+- 指针拖动松手时不再逐样本比较 `Arc<SampleData>`，只比较文档 revision。
+- 命令标签从统一 `"edit"` 变为 `"randomize"` / `"delete layer"` 等。
+
+非目标：把 `MENU_ENTRIES` 标签、快捷键映射、tooltip 也合并进同一结构
+（P2b）；新增 `Action` 仍需要补一次 `action_meta`（编译器会提示）。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-16）：
+
+- `cargo test` 187 passed；`--selfcheck` 2 frames / 3937 commands / 179 text runs。
+- `./scripts/preflight.sh` 通过。
+
+## 38. 本轮重构（0038）— 架构 P2b：菜单 / 快捷键 / tooltip 单一来源
+
+目标：让命令的 label、tooltip、icon、菜单分组和 1:1 快捷键都从命令元数据
+派生，避免菜单文案与快捷键行为各写一份。不改变命令语义。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0038-1 | ActionMeta 扩展 | 增加 `label` / `tip` / `icon`；`action_meta()` 统一提供 | `shortcuts_and_menu_labels_are_centralized` |
+| 0038-2 | 菜单 | `MENU_ENTRIES` 只保留 Section 与 `Item(Action)`；label 由元数据提供 | 菜单测试 + `--selfcheck` |
+| 0038-3 | 顶栏/标签页 | header/tab Button 的 label/icon 从 `action_meta` 取 | 既有布局/绘制测试 |
+| 0038-4 | 快捷键 | 新增 `Shortcut` / `SHORTCUTS` / `shortcut_action()`；1:1 绑定走表，Space/Tab/Delete/方向键/搜索/1–8/F 保留显式手势 | `shortcuts_and_menu_labels_are_centralized` |
+| 0038-5 | tooltip | `paint` 使用 `action_meta(action).tip`；菜单/按钮 icon 同源 | 既有 hover/selfcheck |
+
+语义变化：
+
+- `Cmd+S/O/E/B/Z/Y`、`R/V/C/L` 统一走 `activate`，因此会经过可用性检查、
+  `commit_edit` 与 toast；`Shift+R` 等大写字符也能匹配。
+- `F` 仍保留“预设收藏 / 音效收藏”的上下文分支；Space/Tab/Delete/方向键/
+  搜索/1–8 仍是显式手势，不进 1:1 快捷键表。
+- 菜单文案、顶栏按钮 label、tooltip、icon 不再在 layout/paint 中重复。
+
+非目标：`App::edit` 字段级封装（P2c）；菜单顺序仍由 `MENU_ENTRIES`
+显式声明；inspector 内部的小按钮文案仍由各 presenter 决定。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-16）：
+
+- `cargo test` 188 passed；`--selfcheck` 2 frames / 3937 commands / 179 text runs。
+- `./scripts/preflight.sh` 通过。
+
+## 39. 本轮重构（0039）— P2c：revision 不变量守卫
+
+目标：在 revision 事务之上增加开发期守卫，防止“改了文档但忘记 mark_dirty”的
+静默 undo/预览失效。不改变发布行为。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0039-1 | 守卫 | `commit_edit` 在 test + debug 下，revision 未变但工程 JSON（`sample_data` 被 serde skip）不同时 `debug_assert!` | `forgotten_revision_bump_is_caught_in_debug` |
+| 0039-2 | 发布开销 | 守卫只在 `cfg(all(test, debug_assertions))` 启用；开发/发布不序列化工程 | `cargo test --release` 通过 |
+
+非目标：完整的 `App::edit` 字段级 API（留到模型 v5 / 后续重构）。
+
+## 40. 本轮重构（0040）— P3：Overlay 栈 / 布局缓存
+
+目标：把三个独立菜单布尔值收成统一 Overlay 栈，并让输入命中与绘制共享同一份
+`Layout`，避免大库下每帧/每次指针移动重复构建库行与检查器行。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0040-1 | Overlay 栈 | `Overlay::{Menu,KindFilter,CategoryFilter}` + `OverlayStack`（互斥打开、LIFO 关闭） | `overlay_stack_is_exclusive_and_lifo` |
+| 0040-2 | 点击语义 | 菜单/下拉外部点击统一“关闭并消费”；打开另一个菜单会替换当前栈顶 | 现有 UI 测试 + selfcheck |
+| 0040-3 | Layout 共享 | `SfxLogic::layout()` 返回 `Rc<Layout>`；输入与 `paint_with_layout` 共用 | `layout_is_reused_until_relevant_state_changes` |
+| 0040-4 | 缓存键 | `LayoutKey` 覆盖 viewport/view/document/music/selection/filters/search/scroll/zoom/pin/overlay/loop/asset counts | 同上 + selfcheck |
+| 0040-5 | 绘制去重 | `ui::paint_with_layout` 接收已有 Layout；测试仍走 `ui::paint` 包装 | 既有绘制测试 |
+
+语义变化：
+
+- 下拉菜单外部点击不再穿透到下层控件（统一为主菜单行为）。
+- 菜单/下拉之间切换会替换栈顶，不会叠加。
+
+## 41. 本轮重构（0041）— P4：Transport / 共享播放缓冲
+
+目标：让“播放什么”显式化，并让 Play 复用已渲染的 `Arc` 缓冲，避免整段
+patch 复制。DSP/导出不变。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0041-1 | 播放源 | `PlaybackSource { Patch, Music, Preset, Audio }`；`play`/`audition` 设置，`stop`/`seek`/自然结束清空 | 代码路径 + `switching_tabs_reclaims_asset_focus` |
+| 0041-2 | Space/PLAY | 新增 `play_focused()`：资产焦点试听资产，否则播放当前 tab 文档；Space 与头 PLAY 共用 | 既有播放测试 + 手测清单 |
+| 0041-3 | 共享缓冲 | `PlaybackState.cache/music_cache` 改为 `Arc<Vec<f32>>`；`AudioEngine::play_shared` 接收 Arc | `cargo test` / selfcheck |
+| 0041-4 | 音频回调 | `Playback` / `Command` / retired 槽改用 Arc；music 音量仍在播放时复制应用 | 音频单测（Arc 适配） |
+
+非目标：实时 voice 引擎、音频线程内的 buffer 池、music 免拷贝音量（需要把
+volume 纳入渲染缓存）。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo test --release
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-16）：
+
+- `cargo test` 191 passed；`cargo test --release` 190 passed（debug-only 守卫测试排除）。
+- `--selfcheck` 2 frames / 3937 commands / 179 text runs。
+- `--demo`：manifest duration 与 WAV 一致；release selfcheck 同上。
+
+## 42. 本轮增量（0042）— P5 安全项：Wave 注册表 / 手势测试 / 资产生命周期
+
+目标：完成 P5 中不需要改变工程 schema 与 Godot 导出的部分；把
+Sound/Arrangement 拆分明确为下一轮迁移，不在本轮冒险改格式。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0042-1 | Wave 注册表 | `WaveDef` / `WaveFamily` / `WAVE_DEFS`；label/desc/family/godot_id 从表派生；`layer_sections` 按 family 分派 | `wave_registry_covers_every_wave_and_documents_godot_aliases` |
+| 0042-2 | Godot 别名契约 | `Curve` 显式 `godot_alias = Pluck`；native id 唯一性测试；导出 debug 断言 | 同上 + `export` 测试 |
+| 0042-3 | 手势测试入口 | `SfxLogic::handle_event()`；`AppLogic::event` 只委托 | `clicking_a_layer_reclaims_focus_from_a_preset_row` 等 4 条 |
+| 0042-4 | AUDIO 生命周期 | `AudioBank::rename` / `delete`（`audio/.trash/`），稳定 ID、Unicode 文件名 | `audio_rename_and_delete_keep_ids_and_use_trash` |
+| 0042-5 | MUSIC 生命周期 | `MusicBank::rename` / `delete`（`music/.trash/`），`MusicAsset.path` | `music_rename_and_delete_keep_ids_and_use_trash` |
+| 0042-6 | 菜单/模态 | RENAME/DELETE AUDIO/MUSIC、AssetEdit scope、删除提示、引用音频警告 | 可用性 + modal 绘制测试 |
+
+语义变化：
+
+- AUDIO/MUSIC 行有真正的文件生命周期；删除进入隐藏 `.trash/`，扫描器跳过。
+- 删除被 SAMPLE 层引用的音频时，确认文本会提示“被 SAMPLE 层引用”。
+- `Wave::Curve` 的 Godot id 8 是显式别名，不再是隐式巧合。
+
+**明确未完成（下一轮独立迁移）**：
+
+- `Sound` 与 `Arrangement` 分离（schema v5）：需要同步 Rust、Godot 插件、
+  `.tres` 解析/导出与 parity golden，不能作为本轮低风险增量。
+- 多 music 同时编排/播放；实时 voice 引擎（边拖边听）。
+- 资产 `.trash` 恢复 UI（文件可手工恢复）。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo test --release
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-16）：
+
+- `cargo test` 199 passed；`cargo test --release` 198 passed。
+- `--selfcheck` 2 frames / 3937 commands / 179 text runs。
+- `./scripts/preflight.sh` 通过。
+
+## 43. 本轮收尾（0043）— P5 残留项 / v5 设计
+
+目标：补齐 0042 审查提出的安全残留项，并把 Sound/Arrangement v5 迁移写成
+可执行设计，而不是在本轮硬改格式。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0043-1 | Wave 导入映射 | `WaveDef.godot_import`；`from_godot_id` 从表派生；Godot 9→Pluck 显式化 | registry 测试 |
+| 0043-2 | AUDIO/MUSIC 恢复 | `restore_latest` + `RESTORE AUDIO/MUSIC` 菜单；`.trash` 递归找最新 | bank 测试 |
+| 0043-3 | 手势覆盖 | Cmd+wheel 缩放、clip 拖动 + 单次 undo | 2 条手势测试 |
+| 0043-4 | v5 设计 | `docs/design/ARRANGEMENT_V5.md`：Sound/SoundLayer/ArrangementClip、迁移 7 步、Godot/parity 验收 | 设计文档 |
+
+**v5 仍为设计，未改代码/schema**：原因见设计文档第 1、6 节。下一步建议单独开
+迁移分支，只做 v5，不混 UI 功能。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo test --release
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-16）：
+
+- `cargo test` 201 passed；`cargo test --release` 200 passed。
+- `--selfcheck` 2 frames / 3937 commands / 179 text runs。
+- `./scripts/preflight.sh` 通过。
+
+## 44. 本轮增量（0045）— 性能：库查询去分配 / 渲染缓冲
+
+目标：消除 `paint` 每帧对统一库的全量物化，以及后台渲染 worker 每帧的
+临时缓冲分配。行为、布局和像素输出保持不变，只减少分配与扫描。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0045-1 | paint 每帧物化整库 | `State::visible_library_count` / `library_total_count` / `visible_preset_count` 走借用视图 `LibrarySource`，不再为每行分配 `name/detail/folder` 字符串 | `library_counts_and_single_lookup_match_the_materialised_list` |
+| 0045-2 | 单行查询 O(n)+分配 | `State::library_entry(key)` 只物化命中的那一行；hover / drag / 状态栏不再构建全库 | 同上 |
+| 0045-3 | 计数随布局缓存 | `Layout` 增加 `library_visible` / `library_total` / `preset_visible`，`paint` 直接读缓存字段 | `layout_exposes_library_filters_and_system_menu` |
+| 0045-4 | 搜索串每行 lowercase | `search_lower()` 每次查询只计算一次；`visible_presets` / `visible_patches` 复用 | 既有筛选测试 + 同上 |
+| 0045-5 | 渲染 worker 临时 Vec | 新增 `synth::envelope_interleaved` / `peak_interleaved`；删除 `downmix` 与左右声道 `collect` | `interleaved_envelope_matches_the_downmixed_copy`、`interleaved_peak_uses_both_channels` |
+| 0045-6 | SOUND/PRESET 选中仍查资产 | 仅 AUDIO/MUSIC 选中时才做 `selected_library_entry()` | 状态栏既有测试 |
+
+实测（release，512 个 SOUND + demo 预设，2000 次循环）：
+
+- `visible_library_entries()` 30.9 µs/次 → `visible_library_count()` 2.3 µs/次 →
+  `library_entry(key)` 1.5 µs/次。
+- paint 原先每帧调用全量物化 2–3 次（计数、空态、选中资产、hover），
+  现在计数读 `Layout` 缓存，单行查询只在 hover/drag/资产选中时发生。
+- 音频渲染 worker 不再为波形包络复制整段 mono 缓冲，也不再为 peak 复制左右声道。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo test --release
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-16）：
+
+- `cargo test` 204 passed；`cargo test --release` 203 passed。
+- `--selfcheck` 2 frames / 3937 commands / 179 text runs。
+- `./scripts/preflight.sh` 通过。
