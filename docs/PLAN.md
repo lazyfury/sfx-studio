@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节、0022 预设直接导出 WAV 见第 24 节、0023 预设可用性 / 读-编辑边界 / 采样内存见第 25 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节、0022 预设直接导出 WAV 见第 24 节、0023 预设可用性 / 读-编辑边界 / 采样内存见第 25 节、0024 预设文件生命周期 / 采样预设 / 和弦高亮见第 26 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -477,4 +477,42 @@ cargo run -- --selfcheck
   且不覆盖同名预设。
 - `Layer.sample_data` 的 clone 通过 `Arc::ptr_eq` 验证共享；60 秒帧上限与 64MB
   源文件上限均有单测。
+- 工程 schema 仍为 v4；DSP / bake / `.tres` 导出路径未改。
+
+## 26. 本轮增量（0024）— 预设文件生命周期 / 采样预设
+
+目标：把 PRESETS 从“只读展示”补成可管理的工程内资产：预设采样能按工程
+目录解析，预设可重命名/删除，并且删除进入隐藏回收目录；同时修正和弦预设
+的激活高亮。不改变工程 schema、DSP 或 Godot 导出格式。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0024-1 | 预设采样 | `Patch::load_samples` 抽成共享方法；`PresetBank::load_project` 解析 `sample_path`，与工程 patch 一致 | `loads_preset_sample_layers_relative_to_the_project` |
+| 0024-2 | 预设重命名 | `PresetBank::rename` 同时改 JSON 文件名、patch name、`.favorites.json`；同名拒绝、文件不覆盖 | `rename_moves_the_file_and_favourite_key` |
+| 0024-3 | 预设删除 | `PresetBank::delete` 把 JSON 移到 `presets/.trash/<file>.<stamp>.bak`，再更新收藏与内存库 | `delete_moves_the_preset_file_into_the_trash` |
+| 0024-4 | 菜单/模态 | MENU 增加 PRESETS 段：SAVE AS PRESET / RENAME PRESET / DELETE PRESET；PRESETS 模式只对选中预设启用 | `preset_mode_disables_project_only_actions` |
+| 0024-5 | 和弦高亮 | `chord_preset_index` 对比当前 bass/chords，不再硬编码第一个 chip 为 active | `chord_preset_index_follows_the_current_progression` |
+
+非目标：批量导出、异步 Bake、退出拦截、RT buffer 归还队列；仍保留在
+Backlog。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-15）：
+
+- `cargo test` 147 passed；`--selfcheck` 2 frames / 2572 commands / 126 text runs。
+- `PresetBank::rename`：JSON 文件名、patch name、`.favorites.json` 同步更新；
+  同名拒绝、已有文件不覆盖。
+- `PresetBank::delete`：JSON 移入 `presets/.trash/`，内存库与收藏同步清理。
+- 采样预设按工程根目录解析 `sample_path`；PATCH 与 preset 共用
+  `Patch::load_samples`。
+- 和弦 chips 的 active 状态由 `chord_preset_index` 计算。
 - 工程 schema 仍为 v4；DSP / bake / `.tres` 导出路径未改。

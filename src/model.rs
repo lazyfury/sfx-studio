@@ -747,6 +747,32 @@ impl Patch {
             || self.layers.iter().any(|layer| layer.wave == Wave::Sample)
     }
 
+    /// Decode every sample layer relative to `root`. Shared by project loads
+    /// and the project-local preset bank.
+    pub fn load_samples(&mut self, root: &Path) -> Vec<String> {
+        let mut warnings = Vec::new();
+        for layer in &mut self.layers {
+            layer.sample_data = None;
+            if layer.sample_path.is_empty() {
+                continue;
+            }
+            let path = Path::new(&layer.sample_path);
+            let resolved = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                root.join(path)
+            };
+            match crate::wav::load(&resolved) {
+                Ok(data) => layer.sample_data = Some(Arc::new(data)),
+                Err(error) => warnings.push(format!(
+                    "{}: sample {} unreadable ({error})",
+                    self.name, layer.sample_path
+                )),
+            }
+        }
+        warnings
+    }
+
     /// Clone this patch's layers for insertion into another patch, anchored
     /// at `at` seconds. IDs are cleared so the target project can assign its
     /// own stable IDs through `ensure_ids()`.
@@ -1325,29 +1351,10 @@ impl Project {
     /// Decode every `sample_path` into `sample_data`. Paths are resolved
     /// relative to `root` (the project folder); absolute paths still work.
     pub fn load_samples(&mut self, root: &Path) -> Vec<String> {
-        let mut warnings = Vec::new();
-        for patch in &mut self.patches {
-            for layer in &mut patch.layers {
-                layer.sample_data = None;
-                if layer.sample_path.is_empty() {
-                    continue;
-                }
-                let path = Path::new(&layer.sample_path);
-                let resolved = if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    root.join(path)
-                };
-                match crate::wav::load(&resolved) {
-                    Ok(data) => layer.sample_data = Some(Arc::new(data)),
-                    Err(error) => warnings.push(format!(
-                        "{}: sample {} unreadable ({error})",
-                        patch.name, layer.sample_path
-                    )),
-                }
-            }
-        }
-        warnings
+        self.patches
+            .iter_mut()
+            .flat_map(|patch| patch.load_samples(root))
+            .collect()
     }
 
     pub fn next_patch_name(&self) -> String {

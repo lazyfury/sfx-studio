@@ -1534,6 +1534,8 @@ fn paint_modal(
     }
     let hint = if modal.is_input() {
         "ENTER CONFIRM   ESC CANCEL"
+    } else if matches!(modal.action, crate::app::ModalAction::ConfirmDeletePreset) {
+        "ENTER DELETE → presets/.trash/   ESC CANCEL"
     } else if matches!(modal.action, crate::app::ModalAction::ConfirmNewProject(_)) {
         "ENTER DISCARD & CREATE   ESC CANCEL"
     } else {
@@ -1552,19 +1554,27 @@ fn paint_modal(
 
 fn preset_inspector_items(state: &State) -> Vec<RawItem> {
     let mut items = vec![RawItem::Section("PRESET LIBRARY".into())];
-    let Some(patch) = state
-        .view
-        .selected_preset
-        .and_then(|index| state.presets.get(index))
-    else {
+    let Some(index) = state.view.selected_preset else {
         items.push(RawItem::Note("SELECT A PRESET".into()));
         items.push(RawItem::Note(
             "click a row to audition · drag to timeline or left panel".into(),
         ));
         return items;
     };
+    let Some(patch) = state.presets.get(index) else {
+        items.push(RawItem::Note("SELECT A PRESET".into()));
+        return items;
+    };
 
     items.push(RawItem::Note(format!("NAME  {}", patch.name)));
+    if let Some(file) = state
+        .presets
+        .path(index)
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+    {
+        items.push(RawItem::Note(format!("FILE  {file}")));
+    }
     items.push(RawItem::Note(format!(
         "CATEGORY  {}",
         patch.category.label()
@@ -1825,15 +1835,18 @@ pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
                             })
                             .collect(),
                     }),
-                    MusicRowSpec::ChordPresets => items.push(RawItem::Options {
-                        label: "CHORDS".into(),
-                        columns: 3,
-                        options: vec![
-                            ("Am F C G".into(), Action::ChordPreset(0), true),
-                            ("Cmaj7".into(), Action::ChordPreset(1), false),
-                            ("Em C G D".into(), Action::ChordPreset(2), false),
-                        ],
-                    }),
+                    MusicRowSpec::ChordPresets => {
+                        let active = crate::app::chord_preset_index(music);
+                        items.push(RawItem::Options {
+                            label: "CHORDS".into(),
+                            columns: 3,
+                            options: vec![
+                                ("Am F C G".into(), Action::ChordPreset(0), active == Some(0)),
+                                ("Cmaj7".into(), Action::ChordPreset(1), active == Some(1)),
+                                ("Em C G D".into(), Action::ChordPreset(2), active == Some(2)),
+                            ],
+                        });
+                    }
                     MusicRowSpec::TransposeOptions => items.push(RawItem::Options {
                         label: "TRANSPOSE".into(),
                         columns: 2,

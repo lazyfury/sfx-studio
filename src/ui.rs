@@ -38,6 +38,8 @@ pub enum Action {
     Save,
     InstallPresets,
     SavePreset,
+    RenamePreset,
+    DeletePreset,
     ExportWav,
     Bake,
     Tres,
@@ -155,8 +157,11 @@ pub const MENU_ENTRIES: &[MenuEntry] = &[
     MenuEntry::Section("SOUND"),
     MenuEntry::Item("RANDOMIZE", Action::Randomize),
     MenuEntry::Item("VARY A/B/C", Action::Vary),
-    MenuEntry::Item("SAVE AS PRESET", Action::SavePreset),
     MenuEntry::Item("FAVORITE", Action::Favorite),
+    MenuEntry::Section("PRESETS"),
+    MenuEntry::Item("SAVE AS PRESET", Action::SavePreset),
+    MenuEntry::Item("RENAME PRESET", Action::RenamePreset),
+    MenuEntry::Item("DELETE PRESET", Action::DeletePreset),
     MenuEntry::Section("EXPORT"),
     MenuEntry::Item("EXPORT WAV", Action::ExportWav),
     MenuEntry::Item("BAKE GODOT", Action::Bake),
@@ -219,6 +224,8 @@ fn action_icon(action: Action) -> Option<Icon> {
         Action::Open => Some(Icon::FolderOpen),
         Action::Save => Some(Icon::Save),
         Action::InstallPresets | Action::SavePreset => Some(Icon::FilePlus),
+        Action::RenamePreset => Some(Icon::Pencil),
+        Action::DeletePreset => Some(Icon::Trash),
         Action::NewPatch => Some(Icon::FilePlus),
         Action::RenamePatch => Some(Icon::Pencil),
         Action::DuplicatePatch | Action::DuplicateLayer => Some(Icon::Copy),
@@ -247,6 +254,8 @@ fn action_tip(action: Action) -> &'static str {
         Action::Save => "保存工程 · Save（⌘S）",
         Action::InstallPresets => "安装内置预设到当前工程 · Install builtin presets",
         Action::SavePreset => "把当前音效保存到工程预设库 · Save as preset",
+        Action::RenamePreset => "重命名选中预设 · Rename preset（PRESETS）",
+        Action::DeletePreset => "删除选中预设（移到 presets/.trash/）· Delete preset",
         Action::ExportWav => "导出 48 kHz WAV · 预设模式导出选中预设（⌘E）",
         Action::Bake => "烘焙 Godot 音频资源 · Bake（⌘B）",
         Action::Tres => "导出 Godot .tres 参数 · Resource",
@@ -305,15 +314,19 @@ pub enum DropTarget {
 /// the selected row and the command target cannot silently disagree. WAV
 /// export stays available, but it needs a selected preset to write.
 pub fn action_available(state: &State, action: Action) -> bool {
+    let selected_preset = state
+        .view
+        .selected_preset
+        .and_then(|index| state.presets.get(index))
+        .is_some();
+    if matches!(action, Action::RenamePreset | Action::DeletePreset) {
+        return state.view.library_mode == LibraryMode::Presets && selected_preset;
+    }
     if state.view.library_mode != LibraryMode::Presets {
         return true;
     }
     if action == Action::ExportWav {
-        return state
-            .view
-            .selected_preset
-            .and_then(|index| state.presets.get(index))
-            .is_some();
+        return selected_preset;
     }
     !matches!(
         action,
@@ -343,9 +356,20 @@ pub fn action_available(state: &State, action: Action) -> bool {
 /// status line. Keeps the PRESETS read-only boundary separate from the benign
 /// "select a preset first" case.
 pub fn action_unavailable_message(state: &State, action: Action) -> &'static str {
+    if matches!(action, Action::RenamePreset | Action::DeletePreset)
+        && state.view.library_mode != LibraryMode::Presets
+    {
+        return "切到 PRESETS 后管理预设 · switch to PRESETS";
+    }
     if state.view.library_mode == LibraryMode::Presets {
-        if action == Action::ExportWav {
-            return "先选中一个预设再导出 WAV · select a preset";
+        if matches!(
+            action,
+            Action::ExportWav | Action::RenamePreset | Action::DeletePreset
+        ) {
+            return "先选中一个预设 · select a preset";
+        }
+        if action == Action::SavePreset {
+            return "切回 PROJECT 保存当前音效为预设 · switch to PROJECT";
         }
         return "PRESETS 只读 · 切回 PROJECT 编辑";
     }
@@ -612,6 +636,8 @@ mod tests {
             Action::ToggleSampleLoop,
             Action::ToggleSampleReverse,
             Action::UpgradeDsp,
+            Action::RenamePreset,
+            Action::DeletePreset,
         ] {
             assert!(!action_available(&state, action), "{action:?}");
         }
@@ -625,9 +651,13 @@ mod tests {
         assert!(action_unavailable_message(&state, Action::ExportWav).contains("先选中一个预设"));
         state.select_preset(0);
         assert!(action_available(&state, Action::ExportWav));
+        assert!(action_available(&state, Action::RenamePreset));
+        assert!(action_available(&state, Action::DeletePreset));
 
         state.view.library_mode = LibraryMode::Project;
         assert!(action_available(&state, Action::ExportWav));
+        assert!(!action_available(&state, Action::RenamePreset));
+        assert!(!action_available(&state, Action::DeletePreset));
     }
 
     #[test]

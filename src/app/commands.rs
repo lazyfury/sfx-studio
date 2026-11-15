@@ -73,6 +73,8 @@ impl SfxLogic {
             A::Save => self.save(),
             A::InstallPresets => self.install_presets(),
             A::SavePreset => self.save_as_preset(),
+            A::RenamePreset => self.open_rename_preset(),
+            A::DeletePreset => self.open_delete_preset(),
             A::Bake => self.bake(),
             A::Tres => self.export_tres(),
             A::ExportWav => self.export_wav(),
@@ -426,7 +428,7 @@ impl SfxLogic {
             Ok(0) => {
                 let warnings = self.state.presets.load_project(&root);
                 self.state.bump_view();
-                if self.state.presets.presets.is_empty() {
+                if self.state.presets.is_empty() {
                     self.state
                         .toast("no usable presets in presets/ · check the JSON files");
                 } else if warnings.is_empty() {
@@ -472,12 +474,15 @@ impl SfxLogic {
             Ok(0) => self.state.toast(format!("preset '{name}' already exists")),
             Ok(_) => {
                 let warnings = self.state.presets.load_project(&root);
-                self.state.view.selected_preset = self
+                if let Some(index) = self
                     .state
                     .presets
                     .presets
                     .iter()
-                    .position(|preset| preset.name == name);
+                    .position(|preset| preset.name == name)
+                {
+                    self.state.select_preset(index);
+                }
                 self.state.bump_view();
                 self.state.toast(if warnings.is_empty() {
                     format!("saved preset '{name}'")
@@ -487,6 +492,38 @@ impl SfxLogic {
             }
             Err(error) => self.state.toast(format!("save preset failed: {error}")),
         }
+    }
+
+    fn selected_preset(&self) -> Option<(usize, String)> {
+        let index = self.state.view.selected_preset?;
+        let name = self.state.presets.get(index)?.name.clone();
+        Some((index, name))
+    }
+
+    fn open_rename_preset(&mut self) {
+        let Some((_, name)) = self.selected_preset() else {
+            self.state.toast("select a preset first");
+            return;
+        };
+        self.state.view.modal = Some(Modal {
+            title: "RENAME PRESET".into(),
+            text: name,
+            action: ModalAction::RenamePreset,
+        });
+        self.state.bump_view();
+    }
+
+    fn open_delete_preset(&mut self) {
+        let Some((_, name)) = self.selected_preset() else {
+            self.state.toast("select a preset first");
+            return;
+        };
+        self.state.view.modal = Some(Modal {
+            title: "DELETE PRESET?".into(),
+            text: format!("{name} → presets/.trash/"),
+            action: ModalAction::ConfirmDeletePreset,
+        });
+        self.state.bump_view();
     }
 
     pub(super) fn bake(&mut self) {
@@ -983,6 +1020,67 @@ impl SfxLogic {
                 if let Some(patch) = self.state.patch_mut() {
                     patch.name = name;
                     self.state.mark_dirty();
+                }
+            }
+            ModalAction::RenamePreset => {
+                let Some((index, old_name)) = self.selected_preset() else {
+                    self.state.toast("select a preset first");
+                    return;
+                };
+                if old_name == name {
+                    return;
+                }
+                match self.state.presets.rename(index, &name) {
+                    Ok(()) => {
+                        let root = self.state.doc.root.clone();
+                        let warnings = root
+                            .as_deref()
+                            .map(|root| self.state.presets.load_project(root))
+                            .unwrap_or_default();
+                        if let Some(index) = self
+                            .state
+                            .presets
+                            .presets
+                            .iter()
+                            .position(|preset| preset.name == name)
+                        {
+                            self.state.select_preset(index);
+                        }
+                        self.state.bump_view();
+                        self.state.toast(if warnings.is_empty() {
+                            format!("renamed preset to '{name}'")
+                        } else {
+                            format!("renamed preset to '{name}' · {}", warnings.join("; "))
+                        });
+                    }
+                    Err(error) => self.state.toast(format!("rename preset failed: {error}")),
+                }
+            }
+            ModalAction::ConfirmDeletePreset => {
+                let Some((index, name)) = self.selected_preset() else {
+                    self.state.toast("select a preset first");
+                    return;
+                };
+                match self.state.presets.delete(index) {
+                    Ok(()) => {
+                        let root = self.state.doc.root.clone();
+                        let warnings = root
+                            .as_deref()
+                            .map(|root| self.state.presets.load_project(root))
+                            .unwrap_or_default();
+                        self.state.view.selected_preset = None;
+                        self.state.view.preset_scroll = 0;
+                        self.state.bump_view();
+                        self.state.toast(if warnings.is_empty() {
+                            format!("moved preset '{name}' to presets/.trash/")
+                        } else {
+                            format!(
+                                "moved preset '{name}' to presets/.trash/ · {}",
+                                warnings.join("; ")
+                            )
+                        });
+                    }
+                    Err(error) => self.state.toast(format!("delete preset failed: {error}")),
                 }
             }
         }

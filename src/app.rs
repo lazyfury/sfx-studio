@@ -53,6 +53,8 @@ impl LibraryMode {
 pub enum ModalAction {
     NewPatch,
     RenamePatch,
+    RenamePreset,
+    ConfirmDeletePreset,
     /// Discard the current dirty project and open this folder.
     ConfirmOpen(PathBuf),
     /// Discard the current dirty project and create a new one here.
@@ -69,7 +71,7 @@ impl Modal {
     pub fn is_input(&self) -> bool {
         matches!(
             self.action,
-            ModalAction::NewPatch | ModalAction::RenamePatch
+            ModalAction::NewPatch | ModalAction::RenamePatch | ModalAction::RenamePreset
         )
     }
 }
@@ -939,6 +941,16 @@ fn apply_chord_preset(music: &mut model::Music, index: usize) {
     }
 }
 
+/// Which built-in chord preset (if any) matches the current progression.
+/// Used by the MUSIC inspector so the active chip reflects the document.
+pub(crate) fn chord_preset_index(music: &model::Music) -> Option<usize> {
+    (0..3).find(|index| {
+        let mut expected = model::Music::default();
+        apply_chord_preset(&mut expected, *index);
+        expected.bass_notes == music.bass_notes && expected.chords == music.chords
+    })
+}
+
 fn toggle_pattern(music: &mut model::Music, row: ui::PatternRow, step: usize) {
     if step >= 16 {
         return;
@@ -1119,6 +1131,15 @@ mod tests {
         assert_eq!(logic.state.patch().unwrap().dsp_version, model::DSP_VERSION);
         assert!(logic.state.doc.dirty);
         assert_eq!(logic.state.doc.undo.len(), 1);
+    }
+
+    #[test]
+    fn chord_preset_index_follows_the_current_progression() {
+        let mut music = model::Music::default();
+        apply_chord_preset(&mut music, 1);
+        assert_eq!(chord_preset_index(&music), Some(1));
+        music.bass_notes.push(999.0);
+        assert_eq!(chord_preset_index(&music), None);
     }
 
     #[test]
@@ -1387,6 +1408,42 @@ mod tests {
         assert_eq!(logic.state.presets.presets[0].name, name);
         assert!(logic.state.ui.status.contains("saved preset"));
         assert!(root.join("presets").is_dir());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deleting_a_preset_goes_through_the_confirmation_modal() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "sfx-studio-delete-preset-{}-{stamp}",
+            std::process::id()
+        ));
+        let dir = root.join("presets");
+        std::fs::create_dir_all(&dir).unwrap();
+        let patch = Patch::new_layer("one", Wave::Sine);
+        std::fs::write(dir.join("one.json"), serde_json::to_string(&patch).unwrap()).unwrap();
+        let mut logic = SfxLogic {
+            state: State::empty(),
+            measurer: None,
+            audio: None,
+            render: None,
+        };
+        logic.state.doc.root = Some(root.clone());
+        logic.state.presets.load_project(&root);
+        logic.state.set_library_mode(LibraryMode::Presets);
+        logic.state.select_preset(0);
+        logic.activate(ui::Action::DeletePreset);
+        assert!(logic.state.view.modal.is_some());
+
+        assert!(logic.handle_modal(&InputEvent::KeyDown {
+            key: igui_core::Key::Enter
+        }));
+        assert!(logic.state.presets.is_empty());
+        assert!(!dir.join("one.json").exists());
+        assert!(dir.join(".trash").is_dir());
         let _ = std::fs::remove_dir_all(&root);
     }
 
