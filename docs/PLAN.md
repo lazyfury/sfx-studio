@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节、0022 预设直接导出 WAV 见第 24 节、0023 预设可用性 / 读-编辑边界 / 采样内存见第 25 节、0024 预设文件生命周期 / 采样预设 / 和弦高亮见第 26 节、0025 预设采样懒加载 / .trash 恢复见第 27 节、0026 右侧检查器滚动修复 / 0027 滚轮方向对齐见第 28/29 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节、0022 预设直接导出 WAV 见第 24 节、0023 预设可用性 / 读-编辑边界 / 采样内存见第 25 节、0024 预设文件生命周期 / 采样预设 / 和弦高亮见第 26 节、0025 预设采样懒加载 / .trash 恢复见第 27 节、0026 右侧检查器滚动修复 / 0027 滚轮方向对齐见第 28/29 节、0028 参数中文副标题 / 波形指南见第 30 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -612,4 +612,36 @@ cargo run -- --selfcheck
 - `wheel_steps(1.0) == 1`、`wheel_steps(-1.0) == -1`；`inspector_wheel_scroll`
   在 `delta.y > 0` 时增大，在 `delta.y < 0` 时减小。
 - 左侧库、右侧 inspector、时间线图层滚动统一使用同一方向约定。
+- `./scripts/preflight.sh` 通过；工程 schema / DSP / 导出路径未改。
+
+## 30. 本轮增量（0028）— 参数中文副标题 / 波形指南
+
+目标：让右侧参数面板自解释。每个滑块显示中文副标题；WAVE 行显示当前波形
+解释，并在面板底部提供 14 种波形的中文指南。不改变参数范围、默认值或 DSP。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0028-1 | 参数副标题 | `FieldSpec` 的调用方（Layer/Patch/Clip/MusicField）新增 `desc()`；`RawItem::Param`/`Item::Param` 携带副标题，行高 26→38px | `inspector_parameters_have_chinese_subtitles` |
+| 0028-2 | 滑块位置 | `param_track` 下移到 `top+30`，与双行文字不重叠；点击/拖动/复位仍用同一命中区 | 现有参数测试 + layout 命中 |
+| 0028-3 | 当前波形解释 | WAVE 选项下方插入 `SINE：...` 一行，内容来自 `Wave::desc()` | 代码路径 |
+| 0028-4 | 波形指南 | PATCHES 面板底部新增 `WAVE TYPES`，列出 14 种波形及中文说明 | `wave_guide_lists_every_wave_type` |
+| 0028-5 | Hover 提示 | `Action::SetWave(wave)` 的 tooltip 直接显示该波形说明 | 现有 tooltip 路径 |
+
+非目标：参数分组折叠、搜索参数、i18n 资源化；中文文案暂写在代码中。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-15）：
+
+- `cargo test` 152 passed；`--selfcheck` 2 frames / 2581 commands / 137 text runs。
+- 参数行高 38px，滑块轨道在 `top+30`；副标题使用 SMALL/FAINT。
+- WAVE 选项下方显示当前波形解释；PATCHES 底部列出 14 种 `WAVE TYPES`。
 - `./scripts/preflight.sh` 通过；工程 schema / DSP / 导出路径未改。

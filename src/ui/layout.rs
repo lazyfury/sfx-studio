@@ -46,7 +46,7 @@ pub fn patch_star_rect(row: Rect) -> Rect {
 /// Hit/drag area for a parameter slider row (shared by paint and input).
 pub fn param_track(rect: Rect) -> Rect {
     Rect::from_min_size(
-        Vec2::new(rect.left() + 4.0, rect.top() + 16.0),
+        Vec2::new(rect.left() + 4.0, rect.top() + 30.0),
         Size::new((rect.size.width - 8.0).max(1.0), 4.0),
     )
 }
@@ -413,17 +413,19 @@ impl Layout {
                 RawItem::Param {
                     label,
                     value,
+                    desc,
                     hit,
                     norm,
                 } => {
                     items.push(Item::Param {
                         label,
                         value,
+                        desc,
                         hit,
                         norm,
-                        rect: inner_rect(y, 26.0),
+                        rect: inner_rect(y, 38.0),
                     });
-                    y += 26.0;
+                    y += 38.0;
                 }
                 RawItem::Options {
                     label,

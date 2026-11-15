@@ -1362,6 +1362,7 @@ fn paint_inspector(
             Item::Param {
                 label,
                 value,
+                desc,
                 hit,
                 norm,
                 rect,
@@ -1387,6 +1388,15 @@ fn paint_inspector(
                     rect.top() + 9.0,
                     SMALL,
                     if hovered { TEXT } else { DIM },
+                );
+                text_top(
+                    ctx,
+                    measurer,
+                    &ellipsis(measurer, desc, SMALL, rect.size.width - 8.0),
+                    rect.left() + 2.0,
+                    rect.top() + 16.0,
+                    SMALL,
+                    FAINT,
                 );
                 let track = param_track(*rect);
                 ctx.fill_rounded_rect(track, 2.0, BORDER);
@@ -1645,6 +1655,11 @@ pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
                 })
                 .collect(),
         });
+        items.push(RawItem::Note(format!(
+            "{}：{}",
+            layer.wave.label(),
+            layer.wave.desc()
+        )));
         items.push(RawItem::Options {
             label: "LAYER".into(),
             columns: 3,
@@ -1785,6 +1800,10 @@ pub(crate) fn inspector_items(state: &State) -> Vec<RawItem> {
                 ));
             }
         }
+        items.push(RawItem::Section("WAVE TYPES".into()));
+        for wave in Wave::ALL {
+            items.push(RawItem::Note(format!("{}：{}", wave.label(), wave.desc())));
+        }
     } else {
         let music = &state.doc.project.music;
         for section in music_sections() {
@@ -1889,6 +1908,7 @@ fn layer_param(field: LayerField, layer: &crate::model::Layer) -> RawItem {
     RawItem::Param {
         label: field.label().into(),
         value: field.format(value),
+        desc: field.desc().into(),
         hit: Hit::LayerField(field),
         norm: field.norm(value),
     }
@@ -1899,6 +1919,7 @@ fn patch_param(field: PatchField, patch: &crate::model::Patch) -> RawItem {
     RawItem::Param {
         label: field.label().into(),
         value: field.format(value),
+        desc: field.desc().into(),
         hit: Hit::PatchField(field),
         norm: field.norm(value),
     }
@@ -1909,6 +1930,7 @@ fn clip_param(field: ClipField, clip: &crate::model::Clip) -> RawItem {
     RawItem::Param {
         label: field.label().into(),
         value: field.format(value),
+        desc: field.desc().into(),
         hit: Hit::ClipField(field),
         norm: field.norm(value),
     }
@@ -1919,6 +1941,7 @@ fn music_param(field: MusicField, music: &crate::model::Music) -> RawItem {
     RawItem::Param {
         label: field.label().into(),
         value: field.format(value),
+        desc: field.desc().into(),
         hit: Hit::MusicField(field),
         norm: field.norm(value),
     }

@@ -102,18 +102,21 @@ cargo run -- --demo-reel --out reel.wav
   `UPGRADE TO HD`.
 - **Timeline** — drag clips to move/trim (5 ms snap, hold Shift for free
   placement); ⌘/Ctrl+wheel zooms around the cursor and Shift+wheel pans.
-- **Parameters** — scrollable panel; click a slider to jump, drag to adjust,
-  Shift/Alt for fine control, double-click to reset. `PAN` sits in the MIX
-  block; the `SPACE` block holds the per-sound reverb amount/size and the
-  legacy `UPGRADE TO HD` button. Waveform/ruler can be dragged to scrub the
-  playhead.
+- **Parameters** — scrollable panel; every slider has a Chinese subtitle that
+  explains what it does. Click a slider to jump, drag to adjust, Shift/Alt for
+  fine control, double-click to reset. `PAN` sits in the MIX block; the `SPACE`
+  block holds the per-sound reverb amount/size and the legacy `UPGRADE TO HD`
+  button. Waveform/ruler can be dragged to scrub the playhead. A `WAVE TYPES`
+  section lists all 14 oscillator/drum/sample modes with a one-line Chinese
+  description; hovering a WAVE button shows the same tip.
 - **Menu** — `MENU` holds Open/Save/New/Rename/Duplicate/Delete, Randomize/Vary/Save as Preset/Favorite, Export WAV/Bake/TRES.
 - **Export** — `EXPORT WAV` writes 48 kHz · 24-bit stereo (TPDF dither);
   `BAKE GODOT` writes 48 kHz · 16-bit stereo WAVs + manifest (v3; legacy
   patches keep `Patch.rate`); `.tres` export bakes any v3 / automated / sampled
   patch so the resource plays exactly as previewed.
-- **Hover tips** — abbreviated buttons explain themselves in Chinese in the
-  status line and a small tooltip; labels keep the English key terms.
+- **Hover tips** — abbreviated buttons and wave chips explain themselves in
+  Chinese in the status line and a small tooltip; labels keep the English key
+  terms.
 
 ## Keyboard
 

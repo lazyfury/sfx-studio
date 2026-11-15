@@ -90,6 +90,26 @@ impl Wave {
         }
     }
 
+    /// One-line Chinese guide shown in the inspector.
+    pub fn desc(self) -> &'static str {
+        match self {
+            Wave::Sine => "正弦 · 纯净柔和，适合提示音、UI、低频",
+            Wave::Triangle => "三角 · 圆润带少量谐波，木管/轻提示",
+            Wave::Saw => "锯齿 · 明亮富谐波，激光/合成器主音",
+            Wave::Pulse => "脉冲 · 可变占空比，复古芯片/弦乐感",
+            Wave::Square => "方波 · 空洞强谐波，警报/8-bit 低音",
+            Wave::Noise => "噪声 · 风、爆炸、摩擦等非音高素材",
+            Wave::Arp => "琶音 · ARP 1-4 频率快速轮流发声",
+            Wave::Fm => "FM · 频率调制，钟声/金属/硬质音色",
+            Wave::Pluck => "拨弦 · Karplus-Strong，吉他式衰减",
+            Wave::Sample => "采样 · 载入 WAV，按音高/起点/循环播放",
+            Wave::Kick => "底鼓 · 低频冲击 + 点击瞬态",
+            Wave::Snare => "军鼓 · 噪声 + 鼓腔，短促打击",
+            Wave::Hat => "踩镲 · 高频噪声，短促金属感",
+            Wave::Clap => "拍手 · 多次噪声脉冲叠加",
+        }
+    }
+
     pub fn is_tone(self) -> bool {
         matches!(
             self,
@@ -1936,6 +1956,48 @@ impl LayerField {
     pub fn format(self, value: f32) -> String {
         self.spec().format(value)
     }
+
+    pub fn desc(self) -> &'static str {
+        match self {
+            Self::Delay => "起音前等待时间，用于错开图层",
+            Self::Duration => "声音主体持续时长",
+            Self::Gain => "图层音量，越大越响",
+            Self::Pan => "声像位置：-1 左 / 0 中 / +1 右",
+            Self::FreqStart => "起始频率，音高或扫频起点",
+            Self::FreqEnd => "结束频率，制造上滑/下滑",
+            Self::Harsh => "高频锐度与噪声质感",
+            Self::Duty => "脉冲占空比，越偏离 0.5 越空心",
+            Self::VibratoRate => "颤音速度，每秒循环次数",
+            Self::VibratoDepth => "颤音深度，音高摆动幅度",
+            Self::Attack => "起音时间，越大越柔和",
+            Self::Decay => "衰减时间，从峰值回落",
+            Self::Sustain => "延音电平，持续段音量",
+            Self::Release => "释放时间，松音后的余音",
+            Self::ExpDecay => "指数包络衰减速度",
+            Self::CutoffStart => "滤波器起始截止频率",
+            Self::CutoffEnd => "滤波器结束截止频率",
+            Self::Resonance => "截止点附近的共振峰",
+            Self::Step => "琶音每步间隔",
+            Self::LowpassFrom => "噪声初始低通量",
+            Self::LowpassTo => "噪声结束低通量",
+            Self::NoiseGain => "噪声层混入比例",
+            Self::SweepGain => "扫频噪声比例",
+            Self::FmRatio => "调制器/载波频率比",
+            Self::FmIndex => "调制深度，越大越金属",
+            Self::FmDecay => "FM 调制衰减速度",
+            Self::PluckDamping => "拨弦阻尼，越高衰减越快",
+            Self::PluckBrightness => "拨弦亮度与泛音",
+            Self::SamplePitch => "采样移调，单位半音",
+            Self::SampleStart => "采样起点，0 开头 / 1 末尾",
+            Self::DrumTone => "鼓音高/鼓腔大小",
+            Self::DrumSnap => "鼓的瞬态与敲击感",
+            Self::Seed => "随机种子，固定可复现",
+            Self::Arp0 => "琶音第 1 个音高",
+            Self::Arp1 => "琶音第 2 个音高",
+            Self::Arp2 => "琶音第 3 个音高",
+            Self::Arp3 => "琶音第 4 个音高",
+        }
+    }
 }
 
 /// Patch-level (per-sound) parameters shown in the SPACE inspector block.
@@ -1989,6 +2051,13 @@ impl PatchField {
 
     pub fn format(self, value: f32) -> String {
         self.spec().format(value)
+    }
+
+    pub fn desc(self) -> &'static str {
+        match self {
+            Self::Space => "混响量：0 干声 / 1 湿润",
+            Self::Room => "空间大小：小房间明亮，大空间偏暗",
+        }
     }
 }
 
@@ -2083,6 +2152,25 @@ impl MusicField {
             Self::KickGain => music.kick_gain = value.clamp(0.0, 1.0),
             Self::HatGain => music.hat_gain = value.clamp(0.0, 1.0),
             Self::Seed => music.seed = value.max(0.0) as u32,
+        }
+    }
+
+    pub fn desc(self) -> &'static str {
+        match self {
+            Self::Bpm => "每分钟拍数，控制整体速度",
+            Self::Bars => "编曲小节数，决定循环长度",
+            Self::Rate => "音乐烘焙采样率",
+            Self::Volume => "音乐总音量",
+            Self::Swing => "切分摆动，让节奏更自然",
+            Self::BassGain => "贝斯音量",
+            Self::BassHarsh => "贝斯波形锐度",
+            Self::BassDecay => "贝斯衰减长度",
+            Self::ArpGain => "琶音音量",
+            Self::ArpHarsh => "琶音波形锐度",
+            Self::ArpDecay => "琶音衰减长度",
+            Self::KickGain => "底鼓音量",
+            Self::HatGain => "踩镲音量",
+            Self::Seed => "音乐随机种子",
         }
     }
 
@@ -2978,6 +3066,15 @@ impl ClipField {
             Self::Duration => clip.duration = value.max(0.005),
             Self::Gain => clip.gain = value.max(0.0),
             Self::Pitch => clip.pitch = value.clamp(-24.0, 24.0),
+        }
+    }
+
+    pub fn desc(self) -> &'static str {
+        match self {
+            Self::Start => "Clip 在时间线上的起点",
+            Self::Duration => "Clip 播放长度",
+            Self::Gain => "Clip 增益倍率",
+            Self::Pitch => "Clip 移调，单位半音",
         }
     }
 

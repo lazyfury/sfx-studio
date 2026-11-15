@@ -177,6 +177,7 @@ pub enum RawItem {
     Param {
         label: String,
         value: String,
+        desc: String,
         hit: Hit,
         norm: f32,
     },
@@ -201,6 +202,7 @@ pub enum Item {
     Param {
         label: String,
         value: String,
+        desc: String,
         hit: Hit,
         norm: f32,
         rect: Rect,
@@ -290,7 +292,7 @@ fn action_tip(action: Action) -> &'static str {
         Action::ToggleSampleLoop => "采样循环 · Sample loop",
         Action::ToggleSampleReverse => "反向播放采样 · Reverse",
         Action::UpgradeDsp => "升级到 HD 立体声链路 · Upgrade DSP v3",
-        Action::SetWave(_) => "切换波形 · Wave",
+        Action::SetWave(wave) => wave.desc(),
         Action::SetFilter(_) => "切换滤波器 · Filter",
         Action::SetEnv(_) => "切换包络 · Envelope",
         Action::SetToneEnv(_) => "音调包络 · Tone envelope",
@@ -450,6 +452,50 @@ mod tests {
             .collect();
         assert!(labels.contains(&"OPEN…"), "menu labels: {labels:?}");
         assert!(labels.contains(&"EXPORT WAV"));
+    }
+
+    #[test]
+    fn inspector_parameters_have_chinese_subtitles() {
+        let state = State::demo();
+        let layout = Layout::new(&state, state.view.viewport);
+        let params: Vec<_> = layout
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Param { label, desc, .. } => Some((label, desc)),
+                _ => None,
+            })
+            .collect();
+        assert!(!params.is_empty());
+        for (label, desc) in params {
+            assert!(!desc.trim().is_empty(), "{label} has no description");
+            assert!(
+                !desc.is_ascii(),
+                "{label} description is not Chinese: {desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn wave_guide_lists_every_wave_type() {
+        let state = State::demo();
+        let items = inspector_items(&state);
+        let notes: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                RawItem::Note(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        for wave in Wave::ALL {
+            assert!(
+                notes
+                    .iter()
+                    .any(|text| text.contains(wave.label()) && text.contains(wave.desc())),
+                "missing guide for {}",
+                wave.label()
+            );
+        }
     }
 
     #[test]
