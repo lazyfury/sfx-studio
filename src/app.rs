@@ -1140,12 +1140,12 @@ mod tests {
         let layout = ui::Layout::new(&state, state.view.viewport);
         let max = layout.inspector_max_scroll();
         assert!(max > 0.0);
-        assert!(super::input::inspector_wheel_scroll(0.0, -1.0, &layout) > 0.0);
-        assert_eq!(
-            super::input::inspector_wheel_scroll(max, -1.0, &layout),
-            max
-        );
-        assert!(super::input::inspector_wheel_scroll(10.0, 1.0, &layout) < 10.0);
+        // igui_core: y > 0 scrolls down.
+        assert!(super::input::inspector_wheel_scroll(0.0, 1.0, &layout) > 0.0);
+        assert_eq!(super::input::inspector_wheel_scroll(max, 1.0, &layout), max);
+        assert!(super::input::inspector_wheel_scroll(10.0, -1.0, &layout) < 10.0);
+        assert_eq!(super::input::wheel_steps(1.0), 1);
+        assert_eq!(super::input::wheel_steps(-1.0), -1);
     }
 
     #[test]

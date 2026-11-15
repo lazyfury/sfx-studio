@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节、0022 预设直接导出 WAV 见第 24 节、0023 预设可用性 / 读-编辑边界 / 采样内存见第 25 节、0024 预设文件生命周期 / 采样预设 / 和弦高亮见第 26 节、0025 预设采样懒加载 / .trash 恢复见第 27 节、0026 右侧检查器滚动修复见第 28 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节、0022 预设直接导出 WAV 见第 24 节、0023 预设可用性 / 读-编辑边界 / 采样内存见第 25 节、0024 预设文件生命周期 / 采样预设 / 和弦高亮见第 26 节、0025 预设采样懒加载 / .trash 恢复见第 27 节、0026 右侧检查器滚动修复 / 0027 滚轮方向对齐见第 28/29 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -579,4 +579,37 @@ cargo run -- --selfcheck
 - 1024×400 窗口下 `inspector_max_scroll > 0`；滚动到底时最后一行 bottom 与
   inspector bottom 相差 < 0.01px。
 - 同尺寸下 `delta.y = -1` 使 scroll 增大，`delta.y = +1` 使 scroll 减小。
+- `./scripts/preflight.sh` 通过；工程 schema / DSP / 导出路径未改。
+
+## 29. 本轮修复（0027）— 滚轮方向对齐 igui_core
+
+目标：修正 0026 对 `delta.y` 符号的错误假设。`igui_core::InputEvent::Wheel`
+规定 **`y > 0` 表示向下滚动**（winit 适配层已对 `LineDelta` 取反），
+本项目应直接以该约定为准，而不是再取反一次。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0027-1 | 统一方向 | 新增 `wheel_steps(delta_y)`：正数返回正步进，负数返回负步进 | `inspector_wheel_scroll_moves_down_on_a_downward_wheel` 中的 `wheel_steps` 断言 |
+| 0027-2 | 右侧检查器 | `inspector_wheel_scroll` 使用 `wheel_steps`；`y > 0` 增大 scroll | 同一测试 |
+| 0027-3 | 左侧库列表 | 滚轮 `next = scroll + wheel_steps(delta.y)`，向下滚增加 index | 代码路径 + 方向 helper |
+| 0027-4 | 时间线图层/Shift 平移 | 图层滚动使用同一方向；Shift+wheel 向下平移视图向右 | 代码路径 |
+
+非目标：Cmd+wheel 缩放方向保持不变；惯性滚动 / 轨道点击跳转仍不在本轮。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-15）：
+
+- `cargo test` 150 passed；`--selfcheck` 2 frames / 2572 commands / 126 text runs。
+- `wheel_steps(1.0) == 1`、`wheel_steps(-1.0) == -1`；`inspector_wheel_scroll`
+  在 `delta.y > 0` 时增大，在 `delta.y < 0` 时减小。
+- 左侧库、右侧 inspector、时间线图层滚动统一使用同一方向约定。
 - `./scripts/preflight.sh` 通过；工程 schema / DSP / 导出路径未改。

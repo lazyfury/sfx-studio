@@ -559,8 +559,7 @@ impl AppLogic for SfxLogic {
             InputEvent::Wheel {
                 position, delta, ..
             } => {
-                let rows = (delta.y.abs() / 24.0).max(1.0) as i32;
-                let step = if delta.y > 0.0 { -rows } else { rows };
+                let step = wheel_steps(delta.y);
                 if layout.left.contains(*position) {
                     let capacity = ui::library_capacity(self.state.view.viewport);
                     let max_start = self
@@ -602,7 +601,7 @@ impl AppLogic for SfxLogic {
                     if self.state.view.modifiers.shift {
                         let view_total = layout.timeline_total + 0.08;
                         let step =
-                            layout.timeline_visible * 0.1 * if delta.y > 0.0 { -1.0 } else { 1.0 };
+                            layout.timeline_visible * 0.1 * if delta.y > 0.0 { 1.0 } else { -1.0 };
                         self.state.view.timeline_offset = (layout.timeline_offset + step)
                             .clamp(0.0, (view_total - layout.timeline_visible).max(0.0));
                         return EventResult::Handled;
@@ -611,7 +610,7 @@ impl AppLogic for SfxLogic {
                         let capacity =
                             ui::layer_capacity(self.state.view.viewport, patch.layers.len());
                         let max_start = patch.layers.len().saturating_sub(capacity);
-                        self.state.view.layer_scroll = (self.state.view.layer_scroll as i32 + rows)
+                        self.state.view.layer_scroll = (self.state.view.layer_scroll as i32 + step)
                             .clamp(0, max_start as i32)
                             as usize;
                     }
@@ -754,11 +753,21 @@ impl AppLogic for SfxLogic {
     }
 }
 
-/// One wheel notch scrolls `22px`; positive `delta.y` means “scroll up”.
+/// Core wheel convention: positive `delta.y` scrolls down.
+pub(super) fn wheel_steps(delta_y: f32) -> i32 {
+    let rows = (delta_y.abs() / 24.0).max(1.0) as i32;
+    if delta_y > 0.0 {
+        rows
+    } else if delta_y < 0.0 {
+        -rows
+    } else {
+        0
+    }
+}
+
+/// One wheel notch scrolls `22px`; positive `delta.y` scrolls toward the bottom.
 pub(super) fn inspector_wheel_scroll(current: f32, delta_y: f32, layout: &ui::Layout) -> f32 {
-    let rows = (delta_y.abs() / 24.0).max(1.0);
-    let step = if delta_y > 0.0 { -rows } else { rows };
-    (current + step * 22.0).clamp(0.0, layout.inspector_max_scroll())
+    (current + wheel_steps(delta_y) as f32 * 22.0).clamp(0.0, layout.inspector_max_scroll())
 }
 
 impl SfxLogic {
