@@ -86,11 +86,6 @@ impl PresetBank {
                 ..Project::default()
             };
             warnings.extend(project.validate());
-            // Preset layers can reference project sample files; resolve them
-            // exactly like a project patch so audition/export is not silent.
-            for patch in &mut project.patches {
-                warnings.extend(patch.load_samples(root));
-            }
             self.presets = project.patches;
             self.paths = sources.into_iter().take(self.presets.len()).collect();
         }
@@ -189,6 +184,83 @@ impl PresetBank {
 
     pub fn path(&self, index: usize) -> Option<&Path> {
         self.paths.get(index).and_then(Option::as_deref)
+    }
+
+    /// Decode sample layers for one preset on demand. Preset libraries can be
+    /// large, so project load only parses JSON; audition/export/drag call this.
+    pub fn hydrate(&mut self, index: usize) -> Vec<String> {
+        let Some(root) = self.root.clone() else {
+            return Vec::new();
+        };
+        let Some(patch) = self.presets.get_mut(index) else {
+            return Vec::new();
+        };
+        let needs_load = patch
+            .layers
+            .iter()
+            .any(|layer| !layer.sample_path.is_empty() && layer.sample_data.is_none());
+        if !needs_load {
+            return Vec::new();
+        }
+        patch.load_samples(&root)
+    }
+
+    /// Restore the newest JSON moved into `presets/.trash/`. Returns the
+    /// restored patch name when a file was moved back.
+    pub fn restore_latest(&mut self) -> io::Result<Option<String>> {
+        let Some(root) = self.root.clone() else {
+            return Ok(None);
+        };
+        let dir = root.join(PRESETS_DIR);
+        let trash = dir.join(".trash");
+        let entries = match std::fs::read_dir(&trash) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut newest: Option<(u128, PathBuf, String)> = None;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(file_name) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let Some(rest) = file_name.strip_suffix(".bak") else {
+                continue;
+            };
+            let Some((original, stamp)) = rest.rsplit_once('.') else {
+                continue;
+            };
+            if !original.ends_with(".json") {
+                continue;
+            }
+            let Ok(stamp) = stamp.parse::<u128>() else {
+                continue;
+            };
+            if newest.as_ref().is_none_or(|(best, _, _)| stamp > *best) {
+                newest = Some((stamp, path, original.to_string()));
+            }
+        }
+        let Some((_, source, original)) = newest else {
+            return Ok(None);
+        };
+        let stem = original.strip_suffix(".json").unwrap_or(&original);
+        let mut target = dir.join(format!("{stem}.json"));
+        let mut suffix = 2;
+        while target.exists() {
+            target = dir.join(format!("{stem}_{suffix}.json"));
+            suffix += 1;
+        }
+        std::fs::rename(&source, &target)?;
+        let name = std::fs::read_to_string(&target)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Patch>(&text).ok())
+            .map(|patch| patch.name)
+            .unwrap_or_else(|| stem.to_string());
+        Ok(Some(name))
     }
 
     /// Rename the preset file, patch name and favourite key together. Existing
@@ -450,6 +522,9 @@ mod tests {
         let mut bank = PresetBank::default();
         let warnings = bank.load_project(&root);
         assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(bank.presets[0].layers[0].sample_data.is_none());
+        let warnings = bank.hydrate(0);
+        assert!(warnings.is_empty(), "{warnings:?}");
         let data = bank.presets[0].layers[0]
             .sample_data
             .as_ref()
@@ -523,6 +598,31 @@ mod tests {
         let mut reloaded = PresetBank::default();
         reloaded.load_project(&root);
         assert!(reloaded.presets.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restore_latest_brings_back_a_deleted_preset() {
+        let root = temp_dir("preset-restore");
+        let dir = root.join(PRESETS_DIR);
+        std::fs::create_dir_all(&dir).expect("preset dir");
+        let one = Patch::new_layer("one", Wave::Sine);
+        std::fs::write(
+            dir.join("one.json"),
+            serde_json::to_string(&one).expect("json"),
+        )
+        .expect("write preset");
+        let mut bank = PresetBank::default();
+        bank.load_project(&root);
+        bank.delete(0).expect("delete");
+        assert!(bank.presets.is_empty());
+
+        let restored = bank.restore_latest().expect("restore").expect("name");
+        assert_eq!(restored, "one");
+        assert!(dir.join("one.json").exists());
+        let mut reloaded = PresetBank::default();
+        reloaded.load_project(&root);
+        assert_eq!(reloaded.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 

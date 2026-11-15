@@ -87,7 +87,9 @@ cargo run -- --demo-reel --out reel.wav
   library offers `INSTALL BUILTIN PRESETS`; `MENU → SAVE AS PRESET` adds the
   current project sound to the same library, while `RENAME PRESET` / `DELETE
   PRESET` manage the selected row. Delete moves the JSON to
-  `presets/.trash/` instead of destroying it.
+  `presets/.trash/` instead of destroying it; `RESTORE LAST PRESET` moves the
+  newest backup back. PRESETS sample audio is decoded lazily on audition,
+  export or drag-in, so opening a project with many sample presets stays light.
 - **Preset drag-in** — drag a preset row onto the timeline to copy its layers
   into the current patch at the drop time (5 ms snap, Shift for free
   placement); drop it on the left panel to copy it into the project library.
@@ -158,7 +160,8 @@ The PRESETS tab is read-only with respect to sound parameters but supports
 favourites, rename, delete and export; it always reflects the currently open
 project, so switching projects switches the library. Preset JSON may reference
 sample layers through `sample_path`; they are resolved relative to the project
-root on load, exactly like project patches. An old project without a preset bank
+root when a preset is auditioned, exported or dragged in, exactly like project
+patches. JSON parsing/validation stays eager, PCM decoding stays lazy. An old project without a preset bank
 can install the bundled families from the empty PRESETS view or with
 `--install-presets DIR`; nothing existing is overwritten. Dropping a preset on the timeline
 copies its layers (with fresh IDs) into the current patch and anchors its clip

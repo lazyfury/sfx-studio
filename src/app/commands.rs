@@ -75,6 +75,7 @@ impl SfxLogic {
             A::SavePreset => self.save_as_preset(),
             A::RenamePreset => self.open_rename_preset(),
             A::DeletePreset => self.open_delete_preset(),
+            A::RestorePreset => self.restore_preset(),
             A::Bake => self.bake(),
             A::Tres => self.export_tres(),
             A::ExportWav => self.export_wav(),
@@ -526,6 +527,35 @@ impl SfxLogic {
         self.state.bump_view();
     }
 
+    fn restore_preset(&mut self) {
+        let Some(root) = self.state.doc.root.clone() else {
+            self.state.toast("open a project first");
+            return;
+        };
+        match self.state.presets.restore_latest() {
+            Ok(Some(name)) => {
+                let warnings = self.state.presets.load_project(&root);
+                if let Some(index) = self
+                    .state
+                    .presets
+                    .presets
+                    .iter()
+                    .position(|preset| preset.name == name)
+                {
+                    self.state.select_preset(index);
+                }
+                self.state.bump_view();
+                self.state.toast(if warnings.is_empty() {
+                    format!("restored preset '{name}'")
+                } else {
+                    format!("restored preset '{name}' · {}", warnings.join("; "))
+                });
+            }
+            Ok(None) => self.state.toast("no deleted presets in presets/.trash/"),
+            Err(error) => self.state.toast(format!("restore preset failed: {error}")),
+        }
+    }
+
     pub(super) fn bake(&mut self) {
         let Some(root) = self.ensure_root() else {
             return;
@@ -547,6 +577,12 @@ impl SfxLogic {
     }
 
     pub(super) fn export_wav(&mut self) {
+        let mut sample_warnings = Vec::new();
+        if self.state.view.library_mode == LibraryMode::Presets {
+            if let Some(index) = self.state.view.selected_preset {
+                sample_warnings = self.state.presets.hydrate(index);
+            }
+        }
         let Some(patch) = self.state.export_patch().cloned() else {
             self.state.toast("select a sound or preset to export");
             return;
@@ -561,11 +597,18 @@ impl SfxLogic {
             return;
         };
         match export::write_patch_wav(&patch, &path) {
-            Ok(seconds) => self.state.toast(format!(
-                "exported {} · {} · {seconds:.2}s · 48 kHz / 24-bit stereo",
-                patch.name,
-                path.display()
-            )),
+            Ok(seconds) => {
+                let warnings = if sample_warnings.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", sample_warnings.join("; "))
+                };
+                self.state.toast(format!(
+                    "exported {} · {} · {seconds:.2}s · 48 kHz / 24-bit stereo{warnings}",
+                    patch.name,
+                    path.display()
+                ));
+            }
             Err(error) => self.state.toast(format!("export failed: {error}")),
         }
     }
@@ -752,6 +795,7 @@ impl SfxLogic {
 
     /// Audition a project-local preset without touching the project document.
     pub(super) fn audition_preset(&mut self, index: usize) {
+        let sample_warnings = self.state.presets.hydrate(index);
         let Some(patch) = self.state.presets.get(index).cloned() else {
             return;
         };
@@ -772,13 +816,21 @@ impl SfxLogic {
         self.state.playback.preset_playing = true;
         self.state.playback.was_playing = true;
         self.state.playback.seeked = false;
-        self.state
-            .toast(format!("preview · {} · drag to timeline", patch.name));
+        let warnings = if sample_warnings.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", sample_warnings.join("; "))
+        };
+        self.state.toast(format!(
+            "preview · {} · drag to timeline{warnings}",
+            patch.name
+        ));
     }
 
     /// Complete a library drag. Timeline drops copy the preset's layers into
     /// the current patch; left-panel drops copy the preset into the project.
     pub(super) fn drop_preset(&mut self, index: usize, position: Vec2, layout: &ui::Layout) {
+        let sample_warnings = self.state.presets.hydrate(index);
         let Some(preset) = self.state.presets.get(index).cloned() else {
             return;
         };
@@ -840,8 +892,13 @@ impl SfxLogic {
                     self.state.select_clip(0);
                 }
                 self.state.commit_edit();
+                let warnings = if sample_warnings.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", sample_warnings.join("; "))
+                };
                 self.state.toast(format!(
-                    "inserted {count} layer(s) at {time:.3}s · {preset_name}"
+                    "inserted {count} layer(s) at {time:.3}s · {preset_name}{warnings}"
                 ));
             }
             ui::DropTarget::ProjectLibrary => {
@@ -864,8 +921,13 @@ impl SfxLogic {
                     .get(index)
                     .map(|patch| patch.name.clone())
                     .unwrap_or(preset_name);
+                let warnings = if sample_warnings.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", sample_warnings.join("; "))
+                };
                 self.state
-                    .toast(format!("copied preset '{name}' into the project"));
+                    .toast(format!("copied preset '{name}' into the project{warnings}"));
             }
         }
     }

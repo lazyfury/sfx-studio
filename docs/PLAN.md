@@ -1,6 +1,6 @@
 # SFX Studio — Rust 端整改计划（v1）
 
-状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节、0022 预设直接导出 WAV 见第 24 节、0023 预设可用性 / 读-编辑边界 / 采样内存见第 25 节、0024 预设文件生命周期 / 采样预设 / 和弦高亮见第 26 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
+状态：**P0 + P1 全部完成；P2 已落地参数元数据单表、对数映射、CLI/project_io 拆分、系统菜单、首帧延迟渲染、0005 UI 打磨、0006 时间线/音频交互修复、0007 图层检查器注册表与 0008 时间线缩放/列表交互收尾与 0009 app/ui 模块拆分、0010 后台预览渲染、0011 State 字段分组、0012 稳定 ID/schema v3、0013 ID 化选区、0014 音频回调去锁、0015 48k 预览/重采样/设备重连、0016 Rust 端采样波形与 0017 Rust↔Godot golden 测试；0018 DSP v3 立体声/空间/母带、0019 HD 声音模型见第 6/7 节、0020 工程目录 / 工程内预设 / 拖入见第 22 节、0021 jsfxr 预设目录 / demo 音轨见第 23 节、0022 预设直接导出 WAV 见第 24 节、0023 预设可用性 / 读-编辑边界 / 采样内存见第 25 节、0024 预设文件生命周期 / 采样预设 / 和弦高亮见第 26 节、0025 预设采样懒加载 / .trash 恢复见第 27 节；RNG 一致性与采样 `.tres` 往返见 Backlog**。
 执行原则：先修正确性/数据安全，再修性能与交互，最后做结构性重构；每一项都要有可重复的验收命令。
 
 ## 0. 本轮目标与非目标
@@ -516,3 +516,36 @@ cargo run -- --selfcheck
   `Patch::load_samples`。
 - 和弦 chips 的 active 状态由 `chord_preset_index` 计算。
 - 工程 schema 仍为 v4；DSP / bake / `.tres` 导出路径未改。
+
+## 27. 本轮增量（0025）— 预设采样懒加载 / 删除恢复
+
+目标：避免打开工程时把所有预设 PCM 一次性解码，并给 `presets/.trash/`
+一个可用的恢复入口；不改变预设 JSON 格式、工程 schema、DSP 或 Godot 导出。
+
+| # | 项目 | 方案 | 验收 |
+|---|---|---|---|
+| 0025-1 | 预设采样懒加载 | `PresetBank::load_project` 只解析/校验 JSON；新增 `hydrate(index)` 在试听、导出、拖入时按需解码 | `loads_preset_sample_layers_relative_to_the_project`（load 后为 None，hydrate 后 Some） |
+| 0025-2 | 拖入/导出/试听 | 三条路径先 `hydrate`，失败 warning 合并进 toast；Arc 仍共享 PCM | `audition_preset` / `drop_preset` / `export_wav` 代码路径 |
+| 0025-3 | 删除恢复 | `PresetBank::restore_latest` 找到 `.trash/` 中最新 `.bak`，移回 `presets/`，冲突加 `_2` | `restore_latest_brings_back_a_deleted_preset` |
+| 0025-4 | 菜单入口 | PRESETS 段增加 `RESTORE LAST PRESET`；只在 PRESETS 模式可用 | `preset_mode_disables_project_only_actions` |
+
+非目标：退出拦截、异步 Bake、RT buffer 归还队列、`.trash` 文件管理器 UI。
+
+验收命令：
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- --selfcheck
+./scripts/preflight.sh
+```
+
+实测（2026-11-15）：
+
+- `cargo test` 148 passed；`--selfcheck` 2 frames / 2572 commands / 126 text runs。
+- `PresetBank::load_project` 后采样层 `sample_data == None`；`hydrate(0)` 后
+  `Arc<SampleData>` 可用，试听/导出/拖入前均调用 hydrate。
+- `restore_latest` 把 `presets/.trash/one.json.<stamp>.bak` 移回
+  `presets/one.json`；冲突时使用 `_2` 后缀。
+- `./scripts/preflight.sh` 通过；工程 schema 仍为 v4，DSP/导出路径未改。

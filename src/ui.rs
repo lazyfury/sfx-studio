@@ -40,6 +40,7 @@ pub enum Action {
     SavePreset,
     RenamePreset,
     DeletePreset,
+    RestorePreset,
     ExportWav,
     Bake,
     Tres,
@@ -162,6 +163,7 @@ pub const MENU_ENTRIES: &[MenuEntry] = &[
     MenuEntry::Item("SAVE AS PRESET", Action::SavePreset),
     MenuEntry::Item("RENAME PRESET", Action::RenamePreset),
     MenuEntry::Item("DELETE PRESET", Action::DeletePreset),
+    MenuEntry::Item("RESTORE LAST PRESET", Action::RestorePreset),
     MenuEntry::Section("EXPORT"),
     MenuEntry::Item("EXPORT WAV", Action::ExportWav),
     MenuEntry::Item("BAKE GODOT", Action::Bake),
@@ -226,6 +228,7 @@ fn action_icon(action: Action) -> Option<Icon> {
         Action::InstallPresets | Action::SavePreset => Some(Icon::FilePlus),
         Action::RenamePreset => Some(Icon::Pencil),
         Action::DeletePreset => Some(Icon::Trash),
+        Action::RestorePreset => Some(Icon::Undo),
         Action::NewPatch => Some(Icon::FilePlus),
         Action::RenamePatch => Some(Icon::Pencil),
         Action::DuplicatePatch | Action::DuplicateLayer => Some(Icon::Copy),
@@ -256,6 +259,7 @@ fn action_tip(action: Action) -> &'static str {
         Action::SavePreset => "把当前音效保存到工程预设库 · Save as preset",
         Action::RenamePreset => "重命名选中预设 · Rename preset（PRESETS）",
         Action::DeletePreset => "删除选中预设（移到 presets/.trash/）· Delete preset",
+        Action::RestorePreset => "从 presets/.trash/ 恢复最近删除的预设 · Restore",
         Action::ExportWav => "导出 48 kHz WAV · 预设模式导出选中预设（⌘E）",
         Action::Bake => "烘焙 Godot 音频资源 · Bake（⌘B）",
         Action::Tres => "导出 Godot .tres 参数 · Resource",
@@ -322,6 +326,9 @@ pub fn action_available(state: &State, action: Action) -> bool {
     if matches!(action, Action::RenamePreset | Action::DeletePreset) {
         return state.view.library_mode == LibraryMode::Presets && selected_preset;
     }
+    if action == Action::RestorePreset {
+        return state.view.library_mode == LibraryMode::Presets;
+    }
     if state.view.library_mode != LibraryMode::Presets {
         return true;
     }
@@ -356,8 +363,10 @@ pub fn action_available(state: &State, action: Action) -> bool {
 /// status line. Keeps the PRESETS read-only boundary separate from the benign
 /// "select a preset first" case.
 pub fn action_unavailable_message(state: &State, action: Action) -> &'static str {
-    if matches!(action, Action::RenamePreset | Action::DeletePreset)
-        && state.view.library_mode != LibraryMode::Presets
+    if matches!(
+        action,
+        Action::RenamePreset | Action::DeletePreset | Action::RestorePreset
+    ) && state.view.library_mode != LibraryMode::Presets
     {
         return "切到 PRESETS 后管理预设 · switch to PRESETS";
     }
@@ -653,11 +662,13 @@ mod tests {
         assert!(action_available(&state, Action::ExportWav));
         assert!(action_available(&state, Action::RenamePreset));
         assert!(action_available(&state, Action::DeletePreset));
+        assert!(action_available(&state, Action::RestorePreset));
 
         state.view.library_mode = LibraryMode::Project;
         assert!(action_available(&state, Action::ExportWav));
         assert!(!action_available(&state, Action::RenamePreset));
         assert!(!action_available(&state, Action::DeletePreset));
+        assert!(!action_available(&state, Action::RestorePreset));
     }
 
     #[test]
